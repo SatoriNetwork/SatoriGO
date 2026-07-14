@@ -1,0 +1,37 @@
+/* Inter (Satori's typeface), bundled — NOT loaded from Google Fonts.
+ *
+ * An MV3 extension page runs under `font-src 'self'`, so a CDN font (which is how
+ * satorinet.io and the neuron load Inter) would simply be blocked and we'd fall
+ * back to Segoe UI without any error. It must ship inside the package.
+ *
+ * We declare the @font-face rules by hand instead of importing
+ * `@fontsource-variable/inter/wght.css`, because that pulls in SEVEN subsets —
+ * cyrillic, cyrillic-ext, greek, greek-ext, vietnamese — which this wallet can
+ * never render: the UI ships in English and Polish only. They are covered by
+ * latin + latin-ext. Dropping the other five cuts ~83 KB from the store package.
+ * If a language needing another script is ever added, add its subset back here.
+ *
+ * Ranges are copied verbatim from the fontsource stylesheet.
+ */
+
+@font-face {
+  font-family: 'Inter Variable';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url('@fontsource-variable/inter/files/inter-latin-wght-normal.woff2') format('woff2-variations');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308,
+    U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+/* Polish needs this one: ą ć ę ł ń ó ś ź ż all live in Latin Extended-A. */
+@font-face {
+  font-family: 'Inter Variable';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url('@fontsource-variable/inter/files/inter-latin-ext-wght-normal.woff2') format('woff2-variations');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329,
+    U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F,
+    U+A720-A7FF;
+}
