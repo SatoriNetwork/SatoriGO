@@ -99,7 +99,7 @@ Current, honest limitations of the **real** wallet (v1.0.0).
 
 ## Platform
 
-18. **Firefox MV3 is built but not runtime-verified.** `npm run build:firefox`
+18. **Firefox MV3 works but has no automated smoke.** `npm run build:firefox`
     produces `dist/firefox` with a real Gecko manifest: id `satori-go@satorinet.io`,
     `strict_min_version` **128.0**, an event-page background (`background.scripts` +
     `"type": "module"`, since Firefox has no MV3 service worker) rather than a service
@@ -113,12 +113,13 @@ Current, honest limitations of the **real** wallet (v1.0.0).
     140 so it is not set at a 128 floor; two `innerHTML` notices that come from React's
     bundled DOM runtime, not our code, and cannot execute under the pages' `script-src
     'self'` CSP). The build also **installs as a temporary add-on** on real Firefox
-    152.0.6 (headless, via `web-ext run`) with no manifest rejection. What is **NOT
-    verified**: nothing has been exercised at runtime on Firefox. There is no Firefox
-    equivalent of the Chrome live/dApp smokes, so the background event page actually
-    executing its module imports, the dApp connect/send/sign broker, deposit
-    notifications, and the price/pool fetches are all unproven on Firefox. Treat the
-    Firefox build as unshipped until a real Firefox run-through is done.
+    152.0.6 (headless, via `web-ext run`) with no manifest rejection. On 2026-07-15
+    the owner ran a **full manual click-through on real Firefox** and everything
+    passed: wallet create/import/unlock, live balances and prices, a real send,
+    dApp connect and signMessage, staking read, deposit notification, detached
+    window, and persistence across a browser restart. What is still missing: an
+    **automated** Firefox smoke; the Chrome live/dApp smokes remain the only
+    automated end-to-end gate, so Firefox regressions rely on manual re-testing.
 19. **Firefox host permissions can be revoked per site.** On Firefox 127+ the four
     `host_permissions` (api.coinex.com, satorinet.io, network.satorinet.io, safe.trade)
     are granted at install, but the user can revoke any of them from the extensions
@@ -128,14 +129,15 @@ Current, honest limitations of the **real** wallet (v1.0.0).
     that swallows failures). Balance reads and the deposit poller use Electrum over
     `wss:`, which is gated by CSP `connect-src`, not `host_permissions`, so they keep
     working regardless. We do not build a permissions.request() flow for this.
-20. **The Firefox deposit-poll gate uses a fallback that is untested on Firefox.** The
+20. **The Firefox deposit-poll gate uses a different mechanism than Chrome.** The
     worker skips the deposit poll while a wallet window is open to avoid fighting the
     foreground for the Electrum connection. Chrome does this with
     `chrome.runtime.getContexts`, which Firefox lacks; the Firefox path feature-detects
     and falls back to `chrome.extension.getViews` on the event page. It is a
-    connection-contention optimization, not a security control, and this fallback has
-    not been run on a real Firefox. Worst case if it misbehaves: a deposit notification
-    is delayed, or a second Electrum connection briefly contends. No funds are affected.
+    connection-contention optimization, not a security control; the owner's 2026-07-15
+    manual run-through saw a deposit notification arrive on Firefox. Worst case if it
+    misbehaves: a notification is delayed, or a second Electrum connection briefly
+    contends. No funds are affected.
 21. **Price sources are third-party** (CoinEx for EVR; satorinet.io with a SafeTrade
     fallback for SATORIEVR) and reached via `host_permissions`. If they are down or
     block the request, the USD figures simply don't render — balances are unaffected.

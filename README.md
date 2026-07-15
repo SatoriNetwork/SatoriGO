@@ -119,11 +119,12 @@ npm run package           # build + zip all three -> release/satori-go-<target>.
 3. Select any file inside the dist/firefox folder (e.g. manifest.json)
 ```
 
-⚠️ The Firefox build is built and passes `addons-linter` with 0 errors, but it has
-**no runtime smoke test** — dApp connect, deposits and fetches are unverified on
-Firefox. Treat it as unshipped until a real run-through is done; see
-`KNOWN_LIMITATIONS.md` items 18-20. A temporary add-on also unloads on browser
-restart; permanent install requires AMO signing, which hasn't happened yet.
+⚠️ The Firefox build passes `addons-linter` with 0 errors and a full manual
+click-through on real Firefox (wallet lifecycle, send, dApp connect/sign, deposit
+notifications), but there is **no automated Firefox smoke test** yet — the
+Playwright smokes cover Chrome only; see `KNOWN_LIMITATIONS.md` items 18-20.
+A temporary add-on also unloads on browser restart; permanent install requires
+AMO signing, which hasn't happened yet.
 
 After updating the extension, Chrome/Edge may re‑prompt for permissions (the
 content‑script permission was added for dApp connect).

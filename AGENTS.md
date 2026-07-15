@@ -89,8 +89,8 @@ a couple of minutes.
 
 Load unpacked in Chrome from `dist/chrome`, in Edge from `dist/edge`. Firefox
 loads as a *temporary* add-on (`about:debugging` → "This Firefox" → Load
-Temporary Add-on) from `dist/firefox`; it is unverified at runtime — see
-`KNOWN_LIMITATIONS.md` items 18-20 before treating it as anything more than that.
+Temporary Add-on) from `dist/firefox`; it passed a manual owner run-through but
+has no automated smoke — see `KNOWN_LIMITATIONS.md` items 18-20.
 
 ## Architecture map
 
@@ -159,7 +159,7 @@ does not exist on Firefox — feature-detect it (see `walletUiOpen` in
 
 - Version **1.0.0** (HELD at 1.0.0 until production launch — the owner bumps versions, not agents; pre-launch changes ship without a bump).
 - 296 tests. Live + dApp smokes green.
-- Three build targets exist (Chrome, Edge, Firefox); only **Chrome** is gated and shipped-quality — Firefox builds, lints clean, and installs, but is runtime-unverified (see `KNOWN_LIMITATIONS.md` items 18-20).
+- Three build targets exist (Chrome, Edge, Firefox); only **Chrome** has automated end-to-end gates — Firefox lints clean and passed the owner's full manual click-through on real Firefox (2026-07-15), but has no automated smoke (see `KNOWN_LIMITATIONS.md` items 18-20).
 - See `docs/SECURITY.md` for the audit: what was fixed and **what is still open**.
   **M2 is now FIXED** — a dApp's approval is bound to a specific `{origin, walletId}`
   (`src/background/approvals.ts`), so switching the active wallet no longer exposes it
