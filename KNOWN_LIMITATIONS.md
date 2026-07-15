@@ -99,10 +99,44 @@ Current, honest limitations of the **real** wallet (v1.0.0).
 
 ## Platform
 
-18. **Chrome/Chromium (MV3) only.** Firefox would need manifest changes
-    (`browser_specific_settings`, event-page background). The architecture is ready
-    for it; the work isn't done.
-19. **Price sources are third-party** (CoinEx for EVR; satorinet.io with a SafeTrade
+18. **Firefox MV3 is built but not runtime-verified.** `npm run build:firefox`
+    produces `dist/firefox` with a real Gecko manifest: id `satori-go@satorinet.io`,
+    `strict_min_version` **128.0**, an event-page background (`background.scripts` +
+    `"type": "module"`, since Firefox has no MV3 service worker) rather than a service
+    worker. 128.0 was chosen from verified compat data, not guessed: `storage.session`
+    (used by the dApp broker) lands in Firefox 115, module background scripts in 112,
+    and from Firefox 127 host permissions are actually granted at install (so the price
+    and pool fetches work without a permission-request flow we do not ship a UI for);
+    128 is the ESR baseline that clears all three. What is **verified**: `addons-linter`
+    passes with **0 errors** (3 warnings, all benign: one advisory that a future
+    `data_collection_permissions` key will be wanted, which only applies from Firefox
+    140 so it is not set at a 128 floor; two `innerHTML` notices that come from React's
+    bundled DOM runtime, not our code, and cannot execute under the pages' `script-src
+    'self'` CSP). The build also **installs as a temporary add-on** on real Firefox
+    152.0.6 (headless, via `web-ext run`) with no manifest rejection. What is **NOT
+    verified**: nothing has been exercised at runtime on Firefox. There is no Firefox
+    equivalent of the Chrome live/dApp smokes, so the background event page actually
+    executing its module imports, the dApp connect/send/sign broker, deposit
+    notifications, and the price/pool fetches are all unproven on Firefox. Treat the
+    Firefox build as unshipped until a real Firefox run-through is done.
+19. **Firefox host permissions can be revoked per site.** On Firefox 127+ the four
+    `host_permissions` (api.coinex.com, satorinet.io, network.satorinet.io, safe.trade)
+    are granted at install, but the user can revoke any of them from the extensions
+    button. A revoked host makes only that host's `fetch` fail: the EVR/SATORIEVR USD
+    prices and the Satori Network tab render `n/a`, and a pool join/leave surfaces an
+    error, none of which crash or retry-loop (the price poll is a bounded 60 s cadence
+    that swallows failures). Balance reads and the deposit poller use Electrum over
+    `wss:`, which is gated by CSP `connect-src`, not `host_permissions`, so they keep
+    working regardless. We do not build a permissions.request() flow for this.
+20. **The Firefox deposit-poll gate uses a fallback that is untested on Firefox.** The
+    worker skips the deposit poll while a wallet window is open to avoid fighting the
+    foreground for the Electrum connection. Chrome does this with
+    `chrome.runtime.getContexts`, which Firefox lacks; the Firefox path feature-detects
+    and falls back to `chrome.extension.getViews` on the event page. It is a
+    connection-contention optimization, not a security control, and this fallback has
+    not been run on a real Firefox. Worst case if it misbehaves: a deposit notification
+    is delayed, or a second Electrum connection briefly contends. No funds are affected.
+21. **Price sources are third-party** (CoinEx for EVR; satorinet.io with a SafeTrade
     fallback for SATORIEVR) and reached via `host_permissions`. If they are down or
     block the request, the USD figures simply don't render — balances are unaffected.
 

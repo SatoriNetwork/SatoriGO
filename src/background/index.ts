@@ -180,14 +180,33 @@ async function notifyDepositsEnabled(): Promise<boolean> {
  *  connections per IP (which was dropping the popup's connection mid-send). */
 async function walletUiOpen(): Promise<boolean> {
   try {
-    if (typeof chrome === 'undefined' || !chrome.runtime?.getContexts) return false;
-    const ctxs = await chrome.runtime.getContexts({});
-    return ctxs.some((c) => {
-      const t = String(c.contextType);
-      return t === 'POPUP' || t === 'TAB' || t === 'SIDE_PANEL';
-    });
+    if (typeof chrome === 'undefined') return false;
+    // Chrome MV3 service worker: getContexts is the authoritative enumeration.
+    // This branch is byte-for-byte the original code path and only runs when
+    // getContexts exists; the Firefox fallback below is the only addition.
+    if (chrome.runtime?.getContexts) {
+      const ctxs = await chrome.runtime.getContexts({});
+      return ctxs.some((c) => {
+        const t = String(c.contextType);
+        return t === 'POPUP' || t === 'TAB' || t === 'SIDE_PANEL';
+      });
+    }
+    // Firefox has no runtime.getContexts. Its background is an event PAGE (a real
+    // DOM context, unlike a Chrome service worker), so chrome.extension.getViews
+    // enumerates every open extension page. Any view that is not the background
+    // page itself is an open wallet UI (toolbar popup, detached window, or an
+    // extension tab) - the same "foreground wallet is open" signal the Chrome
+    // branch derives from POPUP/TAB/SIDE_PANEL contexts. This only gates the
+    // deposit poll (a connection-contention optimization); it is not a security
+    // control, so an imperfect result can at worst delay a notification.
+    const ext = chrome.extension as typeof chrome.extension | undefined;
+    if (ext?.getViews) {
+      const bg = ext.getBackgroundPage ? ext.getBackgroundPage() : undefined;
+      return ext.getViews({}).some((w) => w !== bg);
+    }
+    return false;
   } catch {
-    return false; // getContexts unavailable — fall through and poll
+    return false; // enumeration unavailable - fall through and poll
   }
 }
 
