@@ -72,8 +72,10 @@ message signatures (Satori login).
 npm run typecheck          # tsc --noEmit
 npm run lint               # eslint
 npm test                   # vitest run  (296 tests)
-npm run build              # typecheck + vite build -> dist/chrome
-npm run package            # build + zip -> release/
+npm run build              # typecheck ONCE + vite build all 3 targets -> dist/chrome, dist/edge, dist/firefox
+npm run build:chrome       # (also build:edge, build:firefox) single-target build
+npm run package            # build all 3 + zip -> release/satori-go-<target>.zip
+npm run package:chrome     # (also package:edge, package:firefox) single-target build + zip
 npm run qa:live            # live smoke: drives the BUILT extension vs the REAL chain
 npm run qa:dapp            # dApp smoke: real page + window.evrmore end-to-end
 ```
@@ -81,9 +83,14 @@ npm run qa:dapp            # dApp smoke: real page + window.evrmore end-to-end
 **Definition of done** for anything non-trivial: `typecheck` + `lint` + `test` +
 `build` + **both smokes**. The smokes are the only thing that proves the actual
 extension works; they load `dist/chrome` in Playwright Chromium and talk
-to real ElectrumX servers. Run them. They take a couple of minutes.
+to real ElectrumX servers — **Chrome only**, even though `build`/`package` now
+produce three targets. There is no Edge or Firefox smoke. Run them. They take
+a couple of minutes.
 
-Load unpacked in Chrome from `dist/chrome`.
+Load unpacked in Chrome from `dist/chrome`, in Edge from `dist/edge`. Firefox
+loads as a *temporary* add-on (`about:debugging` → "This Firefox" → Load
+Temporary Add-on) from `dist/firefox`; it is unverified at runtime — see
+`KNOWN_LIMITATIONS.md` items 18-20 before treating it as anything more than that.
 
 ## Architecture map
 
@@ -109,12 +116,27 @@ src/screens/dapp/       # DappApproval — the explicit gate for connect/send/si
 src/background/         # MV3 service worker: dApp broker + deposit notifications
 public/inpage.js        # window.evrmore provider (MAIN world)
 public/content.js       # page <-> worker relay (stamps the true origin)
-scripts/*-smoke.mjs     # end-to-end verification against the real chain
+platforms/<target>/manifest.json   # per-browser manifest (chrome/edge/firefox);
+                        #   manifest.json no longer lives in public/
+platforms/<target>/overrides/      # optional per-target file overlay onto dist/<target>
+scripts/build.mjs       # build orchestrator: typecheck once, vite build per --target,
+                        #   copies in that target's manifest.json + overrides
+scripts/*-smoke.mjs     # end-to-end verification against the real chain (Chrome build only)
 ```
 
 **Every send goes through `LiveWalletService.buildEvrSend` / `buildAssetSend`.**
 That is the chokepoint where recipient validation and input-amount verification
 live. Put new send-path safety checks there, not only in the UI.
+
+## Per-target rules
+
+The Chrome manifest (`platforms/chrome/manifest.json`) is canonical. When you
+change permissions, `host_permissions`, or CSP, mirror the change into the Edge
+and Firefox manifests too — do not let them drift. Firefox has **no MV3 service
+worker**: its background is a module *event page* (`background.scripts` +
+`"type": "module"`), not `background.service_worker`. `chrome.runtime.getContexts`
+does not exist on Firefox — feature-detect it (see `walletUiOpen` in
+`src/background/index.ts`, which falls back to `chrome.extension.getViews`).
 
 ## Invariants you must not break
 
@@ -137,6 +159,7 @@ live. Put new send-path safety checks there, not only in the UI.
 
 - Version **1.0.0** (HELD at 1.0.0 until production launch — the owner bumps versions, not agents; pre-launch changes ship without a bump).
 - 296 tests. Live + dApp smokes green.
+- Three build targets exist (Chrome, Edge, Firefox); only **Chrome** is gated and shipped-quality — Firefox builds, lints clean, and installs, but is runtime-unverified (see `KNOWN_LIMITATIONS.md` items 18-20).
 - See `docs/SECURITY.md` for the audit: what was fixed and **what is still open**.
   **M2 is now FIXED** — a dApp's approval is bound to a specific `{origin, walletId}`
   (`src/background/approvals.ts`), so switching the active wallet no longer exposes it

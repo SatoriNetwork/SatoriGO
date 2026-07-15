@@ -3,14 +3,18 @@
 > **Powered by EVRmore • Built for the Satori Network**
 
 
-A real, non-custodial **EVRmore (EVR) + assets** browser wallet — Chrome Manifest V3,
-React + TypeScript + Vite. It runs its own pure‑JS crypto engine (BIP39/BIP32/BIP44,
-Evrmore base58check + legacy signing) inside the extension, talks to the live Evrmore
-network over ElectrumX (`wss://`), and lets web pages connect through an injected
-`window.evrmore` provider.
+A real, non-custodial **EVRmore (EVR) + assets** browser wallet — Manifest V3,
+React + TypeScript + Vite, built for **Chrome, Edge and Firefox** from one shared
+codebase (see `platforms/` below). It runs its own pure‑JS crypto engine
+(BIP39/BIP32/BIP44, Evrmore base58check + legacy signing) inside the extension,
+talks to the live Evrmore network over ElectrumX (`wss://`), and lets web pages
+connect through an injected `window.evrmore` provider. Chrome is the only target
+that is fully gated and shipped-quality today; see `KNOWN_LIMITATIONS.md` for
+Firefox's unverified runtime status.
 
-Version **1.0.0**. (The canonical version lives in `public/manifest.json`; this
-line is informational and can lag — check the manifest if in doubt.)
+Version **1.0.0**. (The canonical version lives in each target's manifest under
+`platforms/<target>/manifest.json`; this line is informational and can lag —
+check the manifest if in doubt.)
 
 ## Official links
 
@@ -18,9 +22,11 @@ line is informational and can lag — check the manifest if in doubt.)
 - **Website:** https://satorinet.io (the Satori Network; Satori GO is a community
   wallet built for it).
 - **Releases:** installable builds come from this repository (`npm run package` →
-  `release/satori-go-chrome.zip`) and, in the future, the official Chrome Web Store
-  listing. **Beware of forks or lookalike listings** — a wallet fork can trivially
-  steal funds. Verify you install from the links above.
+  `release/satori-go-chrome.zip`, `release/satori-go-edge.zip`, `release/satori-go-firefox.zip`)
+  and, in the future, the official Chrome Web Store listing (the only store listing that
+  exists today; Edge Add-ons and Firefox AMO are not published yet). **Beware of forks
+  or lookalike listings** — a wallet fork can trivially steal funds. Verify you install
+  from the links above.
 
 ## ⚠️ Security status (read this)
 
@@ -77,6 +83,17 @@ first**. See the in‑app note under **Settings → About**.
 
 ## Install (Load unpacked)
 
+Build first if the target's `dist/` folder doesn't exist:
+
+```bash
+npm install
+npm run build             # typecheck once + build all three -> dist/chrome, dist/edge, dist/firefox
+npm run build:chrome      # or just one target
+npm run package           # build + zip all three -> release/satori-go-<target>.zip
+```
+
+**Chrome / Chromium (Brave, Opera, …):**
+
 ```text
 1. Open chrome://extensions
 2. Enable Developer mode
@@ -85,28 +102,44 @@ first**. See the in‑app note under **Settings → About**.
 5. Pin "Satori GO" to the toolbar
 ```
 
-Build it first if `dist/chrome` doesn't exist:
+**Edge:** the same Chromium MV3 build under a separate manifest/zip.
 
-```bash
-npm install
-npm run build          # typecheck + vite build -> dist/chrome
-npm run package        # also writes release/satori-go-chrome.zip
+```text
+1. Open edge://extensions
+2. Enable Developer mode
+3. Click "Load unpacked"
+4. Select the dist/edge folder
 ```
 
-Loads the same in Edge/Brave/Opera (Chromium MV3). After updating the extension,
-Chrome may re‑prompt for permissions (the content‑script permission was added for
-dApp connect).
+**Firefox — load as a temporary add-on for testing only:**
+
+```text
+1. Open about:debugging#/runtime/this-firefox
+2. Click "Load Temporary Add-on…"
+3. Select any file inside the dist/firefox folder (e.g. manifest.json)
+```
+
+⚠️ The Firefox build is built and passes `addons-linter` with 0 errors, but it has
+**no runtime smoke test** — dApp connect, deposits and fetches are unverified on
+Firefox. Treat it as unshipped until a real run-through is done; see
+`KNOWN_LIMITATIONS.md` items 18-20. A temporary add-on also unloads on browser
+restart; permanent install requires AMO signing, which hasn't happened yet.
+
+After updating the extension, Chrome/Edge may re‑prompt for permissions (the
+content‑script permission was added for dApp connect).
 
 ## Scripts
 
 | Command | What it does |
 |---|---|
-| `npm run build` | Typecheck + production build to `dist/chrome` |
-| `npm run package` | Build + zip to `release/…` |
+| `npm run build` | Typecheck once + production build to `dist/chrome`, `dist/edge`, `dist/firefox` |
+| `npm run build:chrome` / `build:edge` / `build:firefox` | Build a single target |
+| `npm run package` | Build all three + zip to `release/satori-go-<target>.zip` |
+| `npm run package:chrome` / `package:edge` / `package:firefox` | Build + zip a single target |
 | `npm test` | Unit tests (crypto engine + live wallet + tx cache) |
 | `npm run typecheck` / `npm run lint` | TS / ESLint |
-| `node scripts/live-extension-smoke.mjs` | Playwright end‑to‑end against the **real chain** |
-| `node scripts/dapp-smoke.mjs` (`npm run qa:dapp`) | End‑to‑end dApp‑connect proof |
+| `node scripts/live-extension-smoke.mjs` (`npm run qa:live`) | Playwright end‑to‑end against the **real chain** — loads the **Chrome** build only |
+| `node scripts/dapp-smoke.mjs` (`npm run qa:dapp`) | End‑to‑end dApp‑connect proof — loads the **Chrome** build only |
 
 ---
 
@@ -244,6 +277,10 @@ interface EvrmoreProvider {
   the approval window.
 - **`public/inpage.js`** (injected `window.evrmore`), **`public/content.js`** (relay),
   **`src/background/index.ts`** (built module service worker / dApp broker).
+- **`platforms/{chrome,edge,firefox}/manifest.json`** — one manifest per browser
+  target (manifest.json no longer lives in `public/`); **`scripts/build.mjs`**
+  builds shared `src/`/`public/` per target and copies in the right manifest,
+  overlaying `platforms/<target>/overrides/` if present.
 
 ## Documentation
 
