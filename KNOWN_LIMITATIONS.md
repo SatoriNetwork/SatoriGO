@@ -1,6 +1,6 @@
 # Known limitations
 
-Current, honest limitations of the **real** wallet (v1.0.0).
+Current, honest limitations of the **real** wallet (v1.1.0).
 
 ## Security / trust
 
