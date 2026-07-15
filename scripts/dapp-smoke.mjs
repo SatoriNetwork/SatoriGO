@@ -60,7 +60,7 @@ function recoverEvrAddress(message, sigB64) {
 }
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
-const distDir = path.join(root, 'dist', 'chrome-extension');
+const distDir = path.join(root, 'dist', 'chrome');
 const userDataDir = path.join(os.tmpdir(), `evrdemo-dapp-${Date.now()}`);
 
 const VECTOR_MNEMONIC = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';

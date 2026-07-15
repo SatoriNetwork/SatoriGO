@@ -72,7 +72,7 @@ message signatures (Satori login).
 npm run typecheck          # tsc --noEmit
 npm run lint               # eslint
 npm test                   # vitest run  (296 tests)
-npm run build              # typecheck + vite build -> dist/chrome-extension
+npm run build              # typecheck + vite build -> dist/chrome
 npm run package            # build + zip -> release/
 npm run qa:live            # live smoke: drives the BUILT extension vs the REAL chain
 npm run qa:dapp            # dApp smoke: real page + window.evrmore end-to-end
@@ -80,10 +80,10 @@ npm run qa:dapp            # dApp smoke: real page + window.evrmore end-to-end
 
 **Definition of done** for anything non-trivial: `typecheck` + `lint` + `test` +
 `build` + **both smokes**. The smokes are the only thing that proves the actual
-extension works; they load `dist/chrome-extension` in Playwright Chromium and talk
+extension works; they load `dist/chrome` in Playwright Chromium and talk
 to real ElectrumX servers. Run them. They take a couple of minutes.
 
-Load unpacked in Chrome from `dist/chrome-extension`.
+Load unpacked in Chrome from `dist/chrome`.
 
 ## Architecture map
 

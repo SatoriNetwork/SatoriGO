@@ -1,0 +1,65 @@
+{
+  "manifest_version": 3,
+  "name": "Satori GO",
+  "short_name": "Satori GO",
+  "version": "1.0.0",
+  "description": "Non-custodial EVRmore (EVR) wallet for the Satori Network: multiple wallets, EVR + asset sends, SATORIEVR staking, dApp connect.",
+  "author": "Satori Network",
+  "action": {
+    "default_popup": "index.html",
+    "default_title": "Satori GO",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "permissions": [
+    "storage",
+    "alarms",
+    "notifications"
+  ],
+  "host_permissions": [
+    "https://api.coinex.com/*",
+    "https://satorinet.io/*",
+    "https://network.satorinet.io/*",
+    "https://safe.trade/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_start"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "inpage.js"
+      ],
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ]
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' https: wss:; object-src 'none'; base-uri 'self'; form-action 'none'"
+  }
+}

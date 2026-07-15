@@ -7,14 +7,18 @@ const rootDir = dirname(fileURLToPath(import.meta.url));
 
 // Two build entries share one output: the popup (index.html) and the background
 // service worker (src/background/index.ts), emitted as a stable `background.js`
-// at the dist root so the MV3 manifest can point at it. `public/` still carries
-// the manifest, icons and the content/inpage scripts verbatim, so
-// `dist/chrome-extension` remains directly loadable via "Load unpacked".
+// at the dist root so the MV3 manifest can point at it. `public/` carries the
+// icons and the content/inpage scripts verbatim; the per-target manifest.json
+// lives under `platforms/<target>/` and is copied in by `scripts/build.mjs`
+// after this build, so `dist/<target>` becomes directly loadable via
+// "Load unpacked". TARGET selects the output dir (default: chrome).
+const target = process.env.TARGET || 'chrome';
+
 export default defineConfig({
   base: './',
   plugins: [react()],
   build: {
-    outDir: 'dist/chrome-extension',
+    outDir: `dist/${target}`,
     emptyOutDir: true,
     target: 'chrome110',
     assetsInlineLimit: 0,

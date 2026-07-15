@@ -81,15 +81,15 @@ first**. See the in‑app note under **Settings → About**.
 1. Open chrome://extensions
 2. Enable Developer mode
 3. Click "Load unpacked"
-4. Select the dist/chrome-extension folder
+4. Select the dist/chrome folder
 5. Pin "Satori GO" to the toolbar
 ```
 
-Build it first if `dist/chrome-extension` doesn't exist:
+Build it first if `dist/chrome` doesn't exist:
 
 ```bash
 npm install
-npm run build          # typecheck + vite build -> dist/chrome-extension
+npm run build          # typecheck + vite build -> dist/chrome
 npm run package        # also writes release/satori-go-chrome.zip
 ```
 
@@ -101,7 +101,7 @@ dApp connect).
 
 | Command | What it does |
 |---|---|
-| `npm run build` | Typecheck + production build to `dist/chrome-extension` |
+| `npm run build` | Typecheck + production build to `dist/chrome` |
 | `npm run package` | Build + zip to `release/…` |
 | `npm test` | Unit tests (crypto engine + live wallet + tx cache) |
 | `npm run typecheck` / `npm run lint` | TS / ESLint |

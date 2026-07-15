@@ -24,7 +24,7 @@ import path from 'node:path';
 import os from 'node:os';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
-const distDir = path.join(root, 'dist', 'chrome-extension');
+const distDir = path.join(root, 'dist', 'chrome');
 const shotsDir = path.join(root, 'docs', 'screenshots');
 mkdirSync(shotsDir, { recursive: true });
 const userDataDir = path.join(os.tmpdir(), `evrdemo-live-${Date.now()}`);
