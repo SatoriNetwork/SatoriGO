@@ -12,7 +12,7 @@ connect through an injected `window.evrmore` provider. Chrome is the only target
 that is fully gated and shipped-quality today; see `KNOWN_LIMITATIONS.md` for
 Firefox's unverified runtime status.
 
-Version **1.1.0**. (The canonical version lives in each target's manifest under
+Version **1.1.1**. (The canonical version lives in each target's manifest under
 `platforms/<target>/manifest.json`; this line is informational and can lag —
 check the manifest if in doubt.)
 

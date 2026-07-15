@@ -1,6 +1,6 @@
 # Known limitations
 
-Current, honest limitations of the **real** wallet (v1.1.0).
+Current, honest limitations of the **real** wallet (v1.1.1).
 
 ## Security / trust
 
@@ -107,12 +107,14 @@ Current, honest limitations of the **real** wallet (v1.1.0).
     (used by the dApp broker) lands in Firefox 115, module background scripts in 112,
     and from Firefox 127 host permissions are actually granted at install (so the price
     and pool fetches work without a permission-request flow we do not ship a UI for);
-    128 is the ESR baseline that clears all three. What is **verified**: `addons-linter`
-    passes with **0 errors** (3 warnings, all benign: one advisory that a future
-    `data_collection_permissions` key will be wanted, which only applies from Firefox
-    140 so it is not set at a 128 floor; two `innerHTML` notices that come from React's
-    bundled DOM runtime, not our code, and cannot execute under the pages' `script-src
-    'self'` CSP). The build also **installs as a temporary add-on** on real Firefox
+    128 is the ESR baseline that clears all three. The manifest also declares
+    `data_collection_permissions: { required: ["none"] }` (the wallet collects no
+    data) because AMO submission validation requires the key; Firefox older than
+    140 simply ignores it. What is **verified**: `addons-linter` passes with
+    **0 errors** (4 warnings, all benign: two say the data-collection key is
+    unknown below Firefox 140/142, which is exactly the ignored-when-older case
+    above; two `innerHTML` notices come from React's bundled DOM runtime, not our
+    code, and cannot execute under the pages' `script-src 'self'` CSP). The build also **installs as a temporary add-on** on real Firefox
     152.0.6 (headless, via `web-ext run`) with no manifest rejection. On 2026-07-15
     the owner ran a **full manual click-through on real Firefox** and everything
     passed: wallet create/import/unlock, live balances and prices, a real send,

@@ -157,7 +157,7 @@ does not exist on Firefox — feature-detect it (see `walletUiOpen` in
 
 ## Current state
 
-- Version **1.1.0**. Versions follow semver and grow per release (owner approves every bump; agents propose, never bump on their own). Every released version maps 1:1 to a tagged commit — the same version must never exist as two different binaries. v1.0.0 = the Chrome Web Store submission; v1.1.0 = the multi-browser release. Bump `package.json`, all three `platforms/*/manifest.json`, the README version line and the `KNOWN_LIMITATIONS.md` header together.
+- Version **1.1.1**. Versions follow semver and grow per release (owner approves every bump; agents propose, never bump on their own). Every released version maps 1:1 to a tagged commit — the same version must never exist as two different binaries. v1.0.0 = the Chrome Web Store submission; v1.1.0 = the multi-browser release. Bump `package.json`, all three `platforms/*/manifest.json`, the README version line and the `KNOWN_LIMITATIONS.md` header together.
 - 296 tests. Live + dApp smokes green.
 - Three build targets exist (Chrome, Edge, Firefox); only **Chrome** has automated end-to-end gates — Firefox lints clean and passed the owner's full manual click-through on real Firefox (2026-07-15), but has no automated smoke (see `KNOWN_LIMITATIONS.md` items 18-20).
 - See `docs/SECURITY.md` for the audit: what was fixed and **what is still open**.
