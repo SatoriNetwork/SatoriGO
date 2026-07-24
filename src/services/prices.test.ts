@@ -11,8 +11,14 @@ const EVR_BODY = { code: 0, data: [{ last: '0.00002645' }] }; // CoinEx
 const SATORINET_BODY = { price: 0.23, source: 'safetrade' }; //  satorinet.io/api/satori-price (PRIMARY)
 const SAT_BODY = { at: '1700000000', ticker: { last: '0.23' } }; // SafeTrade (FALLBACK)
 
+// CoinEx v2 shape, same endpoint family as EVR (verified live 2026-07-21).
+const RVN_BODY = { code: 0, data: [{ last: '0.003884', market: 'RVNUSDT' }] };
+
 const isCoinex = (url: unknown) => String(url).includes('coinex');
 const isSatorinet = (url: unknown) => String(url).includes('satori-price');
+// The EVR and RVN tickers share the CoinEx host; the market param tells them apart.
+const isEvrTicker = (url: unknown) => isCoinex(url) && String(url).includes('EVRMOREUSDT');
+const isRvnTicker = (url: unknown) => isCoinex(url) && String(url).includes('RVNUSDT');
 
 beforeEach(() => {
   __resetPricesCacheForTests();
@@ -110,5 +116,79 @@ describe('fetchPrices', () => {
 
   it('exposes a 60s refresh cadence', () => {
     expect(PRICE_REFRESH_MS).toBe(60_000);
+  });
+
+  // --- RVN (Ravencoin) price: CoinEx, same host/endpoint family as EVR ------
+  describe('RVN price', () => {
+    it('does NOT fetch RVN by default (EVR-only users request no RVN ticker)', async () => {
+      const spy = vi.fn(async (url: unknown) =>
+        isEvrTicker(url) ? ok(EVR_BODY) : isSatorinet(url) ? ok(SATORINET_BODY) : ok(SAT_BODY),
+      );
+      vi.stubGlobal('fetch', spy);
+      const p = await fetchPrices();
+      expect(p.RVN).toBeUndefined();
+      const hitRvnTicker = spy.mock.calls.some(([u]) => isRvnTicker(u));
+      expect(hitRvnTicker).toBe(false);
+    });
+
+    it('fetches RVN from CoinEx when includeRvn is set', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (url: unknown) => {
+          if (isEvrTicker(url)) return ok(EVR_BODY);
+          if (isRvnTicker(url)) return ok(RVN_BODY);
+          if (isSatorinet(url)) return ok(SATORINET_BODY);
+          return ok(SAT_BODY);
+        }),
+      );
+      const p = await fetchPrices({ includeRvn: true });
+      expect(p.RVN).toBeCloseTo(0.003884, 10);
+    });
+
+    it('omits RVN when the CoinEx RVN ticker fails; never throws, EVR unaffected', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (url: unknown) => {
+          if (isRvnTicker(url)) throw new Error('rvn ticker blocked');
+          if (isEvrTicker(url)) return ok(EVR_BODY);
+          if (isSatorinet(url)) return ok(SATORINET_BODY);
+          return ok(SAT_BODY);
+        }),
+      );
+      const p = await fetchPrices({ includeRvn: true });
+      expect(p.RVN).toBeUndefined();
+      expect(p.EVR).toBeCloseTo(0.00002645, 10);
+    });
+
+    it('omits RVN on a CoinEx error code (code !== 0)', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (url: unknown) => {
+          if (isRvnTicker(url)) return ok({ code: 3008, data: [], message: 'market not found' });
+          if (isEvrTicker(url)) return ok(EVR_BODY);
+          if (isSatorinet(url)) return ok(SATORINET_BODY);
+          return ok(SAT_BODY);
+        }),
+      );
+      const p = await fetchPrices({ includeRvn: true });
+      expect(p.RVN).toBeUndefined();
+    });
+
+    it('refetches to add RVN even within the cache window (cache lacked RVN)', async () => {
+      const spy = vi.fn(async (url: unknown) => {
+        if (isEvrTicker(url)) return ok(EVR_BODY);
+        if (isRvnTicker(url)) return ok(RVN_BODY);
+        if (isSatorinet(url)) return ok(SATORINET_BODY);
+        return ok(SAT_BODY);
+      });
+      vi.stubGlobal('fetch', spy);
+      // First call: EVR-only, caches a result WITHOUT RVN.
+      const first = await fetchPrices();
+      expect(first.RVN).toBeUndefined();
+      // Second call within the window but now wanting RVN: must refetch (not serve
+      // the RVN-less cache) so switching to an RVN wallet gets a price promptly.
+      const second = await fetchPrices({ includeRvn: true });
+      expect(second.RVN).toBeCloseTo(0.003884, 10);
+    });
   });
 });

@@ -8,7 +8,7 @@ import { Modal } from '../../components/Modal';
 import { Button } from '../../components/Button';
 import { TextField } from '../../components/TextField';
 import { TokenIcon } from '../../components/BrandLogo';
-import { useLiveStore } from '../../store/liveStore';
+import { useLiveStore, nativeTickerFor } from '../../store/liveStore';
 
 interface LiveAddAssetProps {
   onClose(): void;
@@ -16,6 +16,7 @@ interface LiveAddAssetProps {
 
 export function LiveAddAsset({ onClose }: LiveAddAssetProps) {
   const addAsset = useLiveStore((s) => s.addAsset);
+  const nativeTicker = nativeTickerFor();
   const [name, setName] = useState('');
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -46,7 +47,9 @@ export function LiveAddAsset({ onClose }: LiveAddAssetProps) {
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
           <TokenIcon assetId={trimmed || '?'} size={34} />
           <p className="text-dim" style={{ fontSize: 12, margin: 0, lineHeight: 1.5 }}>
-            Enter an EVRmore asset name. We verify it exists on-chain before adding it to your list.
+            {nativeTicker === 'RVN'
+              ? 'Enter a Ravencoin asset name. We verify it exists on-chain before adding it to your list.'
+              : 'Enter an EVRmore asset name. We verify it exists on-chain before adding it to your list.'}
           </p>
         </div>
 

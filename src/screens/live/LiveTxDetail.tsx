@@ -7,7 +7,7 @@ import { ArrowDownLeft, ArrowUpRight, ChevronLeft, Clock, ExternalLink, XCircle 
 import { Button } from '../../components/Button';
 import { CopyButton } from '../../components/CopyButton';
 import { EmptyState } from '../../components/EmptyState';
-import { useLiveStore, DEFAULT_EXPLORER_URL } from '../../store/liveStore';
+import { useLiveStore, DEFAULT_EXPLORER_URL, nativeTickerFor } from '../../store/liveStore';
 import { LiveNav } from './LiveNav';
 
 interface LiveTxDetailProps {
@@ -34,6 +34,8 @@ export function resolveExplorerUrl(template: string, txid: string): string {
 export function LiveTxDetail({ txid, onBack }: LiveTxDetailProps) {
   const tx = useLiveStore((s) => s.txs.find((t) => t.txid === txid));
   const explorerUrlTemplate = useLiveStore((s) => s.explorerUrlTemplate);
+  // The fee is always paid in the active chain's native coin (EVR or RVN).
+  const nativeTicker = nativeTickerFor();
 
   const header = (
     <div className="sub-header">
@@ -134,7 +136,7 @@ export function LiveTxDetail({ txid, onBack }: LiveTxDetailProps) {
             {!incoming && tx.feeEvr > 0 && (
               <div className="sum-row">
                 <span className="sum-key">Network fee</span>
-                <span className="sum-val tnum">{fmtAmount(tx.feeEvr)} EVR</span>
+                <span className="sum-val tnum">{fmtAmount(tx.feeEvr)} {nativeTicker}</span>
               </div>
             )}
             {tx.blockHeight !== undefined && (

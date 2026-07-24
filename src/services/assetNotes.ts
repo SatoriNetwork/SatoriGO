@@ -23,14 +23,18 @@ export const ASSET_NOTES: Record<string, AssetNote> = {
   },
 };
 
-/** True only for the exact, case-sensitive asset name 'SATORI' — not
- *  'SATORIEVR', not sub-assets ('SATORI/SUB'), not unique assets ('SATORI#1'),
- *  not reissuable markers ('SATORI!'), not lowercase. */
-export function isLegacyAsset(name: string): boolean {
-  return name === 'SATORI';
+/** True only for the exact, case-sensitive asset name 'SATORI', AND only on
+ *  Evrmore. 'SATORI' is legacy ONLY on Evrmore, where SATORIEVR superseded it; on
+ *  Ravencoin (nativeTicker 'RVN') SATORI is just an ordinary asset, so it is never
+ *  flagged legacy there. Not 'SATORIEVR', not sub-assets ('SATORI/SUB'), not unique
+ *  assets ('SATORI#1'), not reissuable markers ('SATORI!'), not lowercase.
+ *  `nativeTicker` defaults to 'EVR' so existing Evrmore callers/tests are unchanged. */
+export function isLegacyAsset(name: string, nativeTicker: 'EVR' | 'RVN' = 'EVR'): boolean {
+  return name === 'SATORI' && nativeTicker === 'EVR';
 }
 
-/** Looks up the note for an asset name, if one exists (exact match only). */
-export function getAssetNote(name: string): AssetNote | undefined {
-  return ASSET_NOTES[name];
+/** Looks up the note for an asset name, if one applies on the given chain (exact
+ *  match only). Returns undefined where the asset is not legacy on that chain. */
+export function getAssetNote(name: string, nativeTicker: 'EVR' | 'RVN' = 'EVR'): AssetNote | undefined {
+  return isLegacyAsset(name, nativeTicker) ? ASSET_NOTES[name] : undefined;
 }

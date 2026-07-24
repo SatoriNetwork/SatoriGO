@@ -8,7 +8,7 @@ import { Button } from '../../components/Button';
 import { TextField } from '../../components/TextField';
 import { CopyButton } from '../../components/CopyButton';
 import { EmptyState } from '../../components/EmptyState';
-import { useLiveStore } from '../../store/liveStore';
+import { useLiveStore, nativeTickerFor } from '../../store/liveStore';
 import { LiveNav } from './LiveNav';
 
 interface LiveAddressBookProps {
@@ -28,6 +28,7 @@ export function LiveAddressBook({ onBack, onPick }: LiveAddressBookProps) {
   const renameContact = useLiveStore((s) => s.renameContact);
   const removeContact = useLiveStore((s) => s.removeContact);
 
+  const nativeTicker = nativeTickerFor();
   const [label, setLabel] = useState('');
   const [address, setAddress] = useState('');
   const [error, setError] = useState('');
@@ -96,10 +97,10 @@ export function LiveAddressBook({ onBack, onPick }: LiveAddressBookProps) {
             autoComplete="off"
           />
           <TextField
-            label="EVRmore address"
+            label={nativeTicker === 'RVN' ? 'Ravencoin address' : 'EVRmore address'}
             value={address}
             onChange={(e) => { setAddress(e.target.value); setError(''); }}
-            placeholder="EVR address (starts with E)"
+            placeholder={nativeTicker === 'RVN' ? 'RVN address (starts with R)' : 'EVR address (starts with E)'}
             testId="live-contact-address"
             autoComplete="off"
             error={error || undefined}

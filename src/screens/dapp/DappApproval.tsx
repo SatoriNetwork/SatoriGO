@@ -14,7 +14,7 @@ import { Globe, SendHorizonal, ShieldCheck } from 'lucide-react';
 import { Button } from '../../components/Button';
 import { PasswordField } from '../../components/TextField';
 import { getStorage } from '../../services/storage';
-import { LiveWalletService, type LiveSendPlan } from '../../services/chain/liveWallet';
+import { LiveWalletService, type LiveSendPlan, type LiveNetworkId } from '../../services/chain/liveWallet';
 import { createElectrumClient } from '../../services/chain/electrumClient';
 import { isP2pkhAddress } from '../../services/chain/keys';
 import { networkFor } from '../../services/chain/chainParams';
@@ -38,11 +38,15 @@ interface PublicWalletInfo {
   name: string;
   address: string;
   passwordless: boolean;
+  /** Chain id ('mainnet'|'testnet'|'ravencoin-mainnet'); drives every chain-aware
+   *  label below (fee unit, chain name in copy). Defaults to 'mainnet' (Evrmore)
+   *  for a legacy entry with no stored network. */
+  network: string;
 }
 
 /** Public subset of the persisted `liveWallets` record (no vault is read). */
 interface PublicWalletsRecord {
-  wallets: { id: string; name?: string; address?: string; passwordless?: boolean }[];
+  wallets: { id: string; name?: string; address?: string; passwordless?: boolean; network?: string }[];
   activeId: string;
 }
 
@@ -50,26 +54,40 @@ function shortAddress(addr: string): string {
   return addr.length > 20 ? `${addr.slice(0, 10)}…${addr.slice(-8)}` : addr;
 }
 
-/** Map raw build/broadcast error codes to human messages (mirrors LiveSend). */
-function friendlyError(msg: string, assetName: string): string {
+/** Map raw build/broadcast error codes to human messages (mirrors LiveSend).
+ *  `native` is the connected wallet's chain ticker: every message keeps its
+ *  exact historical EVR wording (the dApp smoke asserts on it) and only
+ *  branches for a Ravencoin wallet. */
+function friendlyError(msg: string, assetName: string, native: 'EVR' | 'RVN'): string {
+  const isRvn = native === 'RVN';
   switch (msg) {
     case 'insufficient-funds':
-      return 'Insufficient EVR balance for this transaction (amount + network fee).';
+      return isRvn
+        ? 'Insufficient RVN balance for this transaction (amount + network fee).'
+        : 'Insufficient EVR balance for this transaction (amount + network fee).';
     case 'insufficient-asset':
       return `Insufficient ${assetName} balance for this transfer.`;
     case 'insufficient-evr-for-fee':
-      return 'Not enough EVR to cover the network fee for this asset transfer.';
+      return isRvn
+        ? 'Not enough RVN to cover the network fee for this asset transfer.'
+        : 'Not enough EVR to cover the network fee for this asset transfer.';
     case 'invalid-amount-precision':
       return `That amount is finer than ${assetName} allows. Reduce the number of decimals.`;
     case 'unknown-asset':
-      return `Asset "${assetName}" was not found on the EVRmore network.`;
+      return isRvn
+        ? `Asset "${assetName}" was not found on the Ravencoin network.`
+        : `Asset "${assetName}" was not found on the EVRmore network.`;
     case 'invalid-amount':
       return 'Enter a valid amount greater than 0.';
     case 'unsupported-address-type':
-      return 'That recipient is not a standard EVRmore address (only addresses starting with E are supported; P2SH / wrong-network addresses are rejected).';
+      return isRvn
+        ? 'That recipient is not a standard Ravencoin address (only addresses starting with R are supported; P2SH / wrong-network addresses are rejected).'
+        : 'That recipient is not a standard EVRmore address (only addresses starting with E are supported; P2SH / wrong-network addresses are rejected).';
     case 'input-verify-failed':
     case 'input-value-mismatch':
       return 'Could not verify your coins against the network (the server may be faulty or malicious). Nothing was sent. Try another Electrum server in Settings.';
+    case 'broadcast-unconfirmed':
+      return 'The server had a problem and the transaction could not be confirmed as sent. Nothing appears on the network. It is safe to try again.';
     default:
       return msg;
   }
@@ -116,6 +134,7 @@ export function DappApproval({ requestId }: { requestId: string }) {
             name: entry.name || 'Wallet',
             address: entry.address || '',
             passwordless: entry.passwordless ?? false,
+            network: entry.network || 'mainnet',
           });
         }
       } catch {
@@ -218,8 +237,13 @@ export function DappApproval({ requestId }: { requestId: string }) {
       unlocked = true;
       // Reject a malformed / wrong-network / wrong-type (e.g. P2SH) recipient
       // before building a P2PKH output that the recipient couldn't spend.
-      if (!isP2pkhAddress(to, networkFor(service.network()))) {
-        setActionError('The site sent an unsupported EVRmore address (only standard P2PKH addresses starting with E are accepted).');
+      const net = networkFor(service.network());
+      if (!isP2pkhAddress(to, net)) {
+        setActionError(
+          net.ticker === 'RVN'
+            ? 'The site sent an unsupported Ravencoin address (only standard P2PKH addresses starting with R are accepted).'
+            : 'The site sent an unsupported EVRmore address (only standard P2PKH addresses starting with E are accepted).',
+        );
         return;
       }
       await client.connect();
@@ -233,7 +257,7 @@ export function DappApproval({ requestId }: { requestId: string }) {
       unlocked = false; // ownership transferred to `review`
     } catch (err) {
       const raw = err instanceof Error ? err.message : String(err);
-      setActionError(friendlyError(raw, assetName || 'EVR'));
+      setActionError(friendlyError(raw, assetName || walletNativeTicker, networkFor(service.network()).ticker));
     } finally {
       if (unlocked) {
         service.lock();
@@ -254,7 +278,7 @@ export function DappApproval({ requestId }: { requestId: string }) {
       await settle({ result: { txid } });
     } catch (err) {
       const raw = err instanceof Error ? err.message : String(err);
-      setActionError(friendlyError(raw, review.plan.assetName || 'EVR'));
+      setActionError(friendlyError(raw, review.plan.assetName || walletNativeTicker, walletNativeTicker));
     } finally {
       review.service.lock();
       review.client.close();
@@ -320,13 +344,17 @@ export function DappApproval({ requestId }: { requestId: string }) {
     );
   }
 
+  // The connected wallet's chain ticker: drives every chain-aware label below
+  // (fee unit, "sending X" wording, default asset name for a native send).
+  const walletNativeTicker = networkFor((wallet?.network as LiveNetworkId | undefined) ?? 'mainnet').ticker;
+
   const isSend = pending.method === 'sendEvr' || pending.method === 'sendAsset';
   const isSign = pending.method === 'signMessage';
   const signMessageText = typeof pending.params?.message === 'string' ? pending.params.message : '';
   const sendAssetName =
     pending.method === 'sendAsset' && typeof pending.params?.asset === 'string'
       ? pending.params.asset.trim().toUpperCase()
-      : 'EVR';
+      : walletNativeTicker;
   const sendAmount = Number(pending.params?.amount);
   const sendTo = typeof pending.params?.to === 'string' ? pending.params.to : '';
   const needPassword = !(wallet?.passwordless ?? false);
@@ -464,7 +492,7 @@ export function DappApproval({ requestId }: { requestId: string }) {
               <SendHorizonal size={15} style={{ flexShrink: 0 }} />
               <span>
                 Sending <strong>{Number.isFinite(sendAmount) ? sendAmount : '?'} {sendAssetName}</strong> on the REAL
-                EVRmore network. This cannot be undone.
+                {walletNativeTicker === 'RVN' ? ' Ravencoin' : ' EVRmore'} network. This cannot be undone.
               </span>
             </div>
             <div className="card solid" style={{ marginBottom: 14 }}>
@@ -488,14 +516,14 @@ export function DappApproval({ requestId }: { requestId: string }) {
                 <div className="sum-row" data-testid="dapp-send-fee">
                   <span className="sum-key">Network fee</span>
                   <span className="sum-val">
-                    {review ? `${fmtSats(review.plan.feeSats)} EVR` : 'shown after review'}
+                    {review ? `${fmtSats(review.plan.feeSats)} ${walletNativeTicker}` : 'shown after review'}
                   </span>
                 </div>
                 {review && review.plan.assetName === undefined && (
                   <div className="sum-row">
                     <span className="sum-key">Total debited</span>
                     <span className="sum-val">
-                      {fmtSats(review.plan.amountSats + review.plan.feeSats)} EVR
+                      {fmtSats(review.plan.amountSats + review.plan.feeSats)} {walletNativeTicker}
                     </span>
                   </div>
                 )}

@@ -2,12 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { base64 } from '@scure/base';
 import {
   EVRMORE_MESSAGE_MAGIC,
+  RAVEN_MESSAGE_MAGIC,
   messageHash,
   signMessageWithKey,
   verifyMessage,
 } from './message';
 import { privateKeyToDerived } from './keys';
-import { EVRMORE_MAINNET } from './chainParams';
+import { EVRMORE_MAINNET, RAVENCOIN_MAINNET } from './chainParams';
 
 // Fixed key + message so the signature is a stable known-answer vector.
 const PRIV = new Uint8Array(32).fill(0x42);
@@ -73,5 +74,41 @@ describe('Evrmore signed messages', () => {
       const sig = signMessageWithKey(PRIV, m, true);
       expect(verifyMessage(derived.address, m, sig, EVRMORE_MAINNET)).toBe(true);
     }
+  });
+});
+
+// Per-chain message magic. Ravencoin uses "Raven Signed Message:\n" (verified
+// against RavenProject/Ravencoin src/validation.cpp:129). A signature is only
+// valid under the SAME magic it was produced with — signing with the Raven magic
+// and verifying under the Evrmore magic must fail, or a login proof from one chain
+// could be replayed on the other.
+describe('Ravencoin signed messages (per-chain magic isolation)', () => {
+  const rvnDerived = privateKeyToDerived(PRIV, RAVENCOIN_MAINNET, true);
+
+  it('uses the byte-exact Raven magic', () => {
+    expect(RAVEN_MESSAGE_MAGIC).toBe('Raven Signed Message:\n');
+  });
+
+  it('the Raven magic yields a DIFFERENT digest than the Evrmore magic', () => {
+    expect(messageHash(MSG, RAVEN_MESSAGE_MAGIC)).not.toEqual(messageHash(MSG, EVRMORE_MESSAGE_MAGIC));
+  });
+
+  it('signs with the Raven magic and verifies back to the R-address on RAVENCOIN_MAINNET', () => {
+    const sig = signMessageWithKey(PRIV, MSG, true, RAVEN_MESSAGE_MAGIC);
+    expect(rvnDerived.address[0]).toBe('R');
+    expect(verifyMessage(rvnDerived.address, MSG, sig, RAVENCOIN_MAINNET)).toBe(true);
+  });
+
+  it('an RVN-magic signature does NOT verify under the EVR magic', () => {
+    const rvnSig = signMessageWithKey(PRIV, MSG, true, RAVEN_MESSAGE_MAGIC);
+    // verifyMessage recomputes the digest with net.messageMagic; against an
+    // Evrmore net it uses the Evrmore magic -> recovers a different pubkey ->
+    // the address never matches. Checked for both the EVR and RVN address forms.
+    const evrDerived = privateKeyToDerived(PRIV, EVRMORE_MAINNET, true);
+    expect(verifyMessage(evrDerived.address, MSG, rvnSig, EVRMORE_MAINNET)).toBe(false);
+    expect(verifyMessage(rvnDerived.address, MSG, rvnSig, EVRMORE_MAINNET)).toBe(false);
+    // And the inverse: an EVR-magic signature must not verify under the RVN magic.
+    const evrSig = signMessageWithKey(PRIV, MSG, true, EVRMORE_MESSAGE_MAGIC);
+    expect(verifyMessage(rvnDerived.address, MSG, evrSig, RAVENCOIN_MAINNET)).toBe(false);
   });
 });

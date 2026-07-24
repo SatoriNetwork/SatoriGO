@@ -33,6 +33,17 @@ describe('isLegacyAsset', () => {
   it('is false for an empty string', () => {
     expect(isLegacyAsset('')).toBe(false);
   });
+
+  it('defaults to Evrmore: SATORI is legacy when no chain is given', () => {
+    expect(isLegacyAsset('SATORI')).toBe(true);
+    expect(isLegacyAsset('SATORI', 'EVR')).toBe(true);
+  });
+
+  it('is NOT legacy on Ravencoin: there SATORI is just an ordinary asset', () => {
+    expect(isLegacyAsset('SATORI', 'RVN')).toBe(false);
+    // SATORIEVR is not a normal RVN asset name but still never "legacy" anywhere.
+    expect(isLegacyAsset('SATORIEVR', 'RVN')).toBe(false);
+  });
 });
 
 describe('getAssetNote / ASSET_NOTES', () => {
@@ -49,6 +60,11 @@ describe('getAssetNote / ASSET_NOTES', () => {
   it('returns undefined for assets with no note', () => {
     expect(getAssetNote('SATORIEVR')).toBeUndefined();
     expect(getAssetNote('EVR')).toBeUndefined();
+  });
+
+  it('returns no note for SATORI on Ravencoin (not legacy there)', () => {
+    expect(getAssetNote('SATORI', 'RVN')).toBeUndefined();
+    expect(getAssetNote('SATORI', 'EVR')).toBeDefined();
   });
 
   it('is data-driven: ASSET_NOTES is keyed exactly by SATORI', () => {

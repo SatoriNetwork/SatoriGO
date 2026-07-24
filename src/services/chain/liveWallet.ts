@@ -8,7 +8,12 @@
 // is persisted (via the app's storage adapter). No plaintext seed touches disk.
 
 import { getStorage } from '../storage';
-import { EVRMORE_MAINNET, EVRMORE_TESTNET, type EvrmoreNetwork } from './chainParams';
+import {
+  EVRMORE_MAINNET,
+  EVRMORE_TESTNET,
+  RAVENCOIN_MAINNET,
+  type EvrmoreNetwork,
+} from './chainParams';
 import {
   deriveAddress,
   addressToElectrumScripthash,
@@ -36,6 +41,7 @@ import {
   buildAndSignEvrTx,
   buildAndSignAssetTransfer,
   estimateTxBytes,
+  txid,
   type SignableUtxo,
   type BuiltTx,
 } from './txBuilder';
@@ -44,7 +50,10 @@ import { ELECTRUM_METHODS, SATORI_ASSET } from './network';
 import type { WalletDataProvider } from '../provider';
 import { bytesToHex } from '@noble/hashes/utils';
 
-export type LiveNetworkId = 'mainnet' | 'testnet';
+// Stored per-wallet network id. 'mainnet'/'testnet' are the LEGACY Evrmore ids
+// (kept verbatim so existing wallet records still resolve to Evrmore); new
+// non-Evrmore chains use their canonical id, e.g. 'ravencoin-mainnet'.
+export type LiveNetworkId = 'mainnet' | 'testnet' | 'ravencoin-mainnet';
 
 /** Legacy single-wallet record shape (storage key `liveWallet`). Retained only
  *  so the one-time migration can read a pre-multi-wallet install. */
@@ -177,6 +186,38 @@ export class BroadcastGatedError extends Error {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Broadcast outcome verification
+//
+// A broadcast RPC failing does NOT always mean the tx wasn't sent. Real
+// incident: an Electrum server crashed its broadcast handler (-32603 internal
+// server error) AFTER already accepting the tx into its mempool — the wallet
+// showed a raw error, but the transaction had actually reached the chain.
+//
+// Only a CLEAN daemon rejection is a definitive "not sent" outcome: Electrum
+// returns `{"code":1,"message":"the transaction was rejected by network
+// rules.\n\n<reason>..."}` (verified live against both the Evrmore and
+// Ravencoin servers), which electrumClient.ts turns into
+// `Error("Electrum error: the transaction was rejected by network rules...
+// (code 1)")`. Any OTHER broadcast error (a crash, a timeout, a dropped
+// connection) leaves the outcome UNKNOWN, and an unknown outcome must never be
+// reported as a plain failure — we poll the chain for the tx before deciding.
+
+/** True only for a clean, definitive daemon rejection (Electrum error code 1,
+ *  "rejected by network rules"). Any other error's outcome is UNKNOWN. */
+function isCleanBroadcastRejection(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /rejected by network rules/i.test(msg);
+}
+
+/** Poll cadence for an UNKNOWN broadcast outcome: 8 attempts with a growing
+ *  delay, ~45s total. Overridable via the constructor so tests can shrink it. */
+const DEFAULT_BROADCAST_POLL_DELAYS_MS = [1000, 2000, 3000, 4000, 6000, 8000, 10000, 11000];
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export class LiveWalletService {
   /** ACTIVE seed-wallet: BIP39 seed in memory (null when locked or a pk-wallet). */
   private seed: Uint8Array | null = null;
@@ -187,19 +228,34 @@ export class LiveWalletService {
   /** Kind of the ACTIVE wallet, so derive/reveal branch correctly. */
   private activeKind: WalletKind = 'seed';
   private net: EvrmoreNetwork = EVRMORE_MAINNET;
+  /** The active wallet's stored network id (LiveNetworkId), tracked alongside
+   *  `net`. `net.id` alone can't carry it: Ravencoin mainnet also has net.id
+   *  'mainnet', so we keep the canonical LiveNetworkId here for network(). */
+  private activeNetworkId: LiveNetworkId = 'mainnet';
   /** Cached id of the active wallet, kept in sync with the persisted store so
    *  activeWalletId() can answer synchronously. */
   private activeId: string | null = null;
   private client: ElectrumClient;
   private provider: ElectrumWalletDataProvider;
+  /** Delays (ms) between poll attempts used to resolve an UNKNOWN broadcast
+   *  outcome. Defaults to ~45s total spread over 8 attempts; a test may pass
+   *  a short array via the constructor to keep the suite fast. */
+  private readonly broadcastPollDelaysMs: number[];
 
   /** HARD SAFETY GATE. Must be set true by an explicit user action before any
    *  real broadcast. Defaults false; building/signing for review is always ok. */
   allowBroadcast = false;
 
-  constructor(client: ElectrumClient = createElectrumClient()) {
+  constructor(
+    client: ElectrumClient = createElectrumClient(),
+    options?: { broadcastPollDelaysMs?: number[] },
+  ) {
     this.client = client;
-    this.provider = new ElectrumWalletDataProvider(client, { networkId: 'mainnet' });
+    this.provider = new ElectrumWalletDataProvider(client, {
+      networkId: 'mainnet',
+      network: EVRMORE_MAINNET,
+    });
+    this.broadcastPollDelaysMs = options?.broadcastPollDelaysMs ?? DEFAULT_BROADCAST_POLL_DELAYS_MS;
   }
 
   // --- multi-wallet store -------------------------------------------------
@@ -210,6 +266,10 @@ export class LiveWalletService {
     const existing = await getStorage().get<LiveWalletsStore>(WALLETS_KEY);
     if (existing && Array.isArray(existing.wallets)) {
       this.activeId = existing.activeId || null;
+      // Make the active chain follow the active wallet on load (before any
+      // unlock) so network()/marker/magic are correct for a stored RVN wallet.
+      const active = existing.wallets.find((w) => w.id === existing.activeId);
+      if (active) this.setActiveNetwork(active.network);
       return existing;
     }
 
@@ -251,7 +311,39 @@ export class LiveWalletService {
   }
 
   private netFor(network: LiveNetworkId): EvrmoreNetwork {
-    return network === 'testnet' ? EVRMORE_TESTNET : EVRMORE_MAINNET;
+    switch (network) {
+      case 'testnet':
+        return EVRMORE_TESTNET;
+      case 'ravencoin-mainnet':
+        return RAVENCOIN_MAINNET;
+      case 'mainnet':
+      default:
+        return EVRMORE_MAINNET;
+    }
+  }
+
+  /** Set the active in-memory network (both the resolved params and the canonical
+   *  LiveNetworkId that network() reports). Every place that activates a wallet
+   *  routes through here so the active chain follows the wallet.
+   *
+   *  Also retargets the shared Electrum client's server pool and the watch-only
+   *  provider's native ticker/name at the active chain. When the chain actually
+   *  CHANGES we drop the current connection so the next request reconnects against
+   *  the new chain's pool (Evrmore and Ravencoin are different hosts with the same
+   *  asset dialect; a stale socket must never serve the other chain's reads). */
+  private setActiveNetwork(network: LiveNetworkId): void {
+    const changed = this.activeNetworkId !== network;
+    this.activeNetworkId = network;
+    this.net = this.netFor(network);
+    this.provider.setNetwork(this.net);
+    this.client.setPoolChain?.(network);
+    if (changed) {
+      try {
+        this.client.close();
+      } catch {
+        // best-effort teardown; the next request reconnects anyway.
+      }
+    }
   }
 
   // --- lifecycle (operates on the ACTIVE wallet) --------------------------
@@ -305,7 +397,7 @@ export class LiveWalletService {
     store.wallets.push({ id, name: walletName, network, vault, createdAt: Date.now(), kind: 'seed', address, passwordless });
     store.activeId = id;
     await this.saveStore(store);
-    this.net = net;
+    this.setActiveNetwork(network);
     this.setActiveSeed(seed);
   }
 
@@ -341,7 +433,7 @@ export class LiveWalletService {
     });
     store.activeId = id;
     await this.saveStore(store);
-    this.net = net;
+    this.setActiveNetwork(network);
     this.setActivePk(privateKey, compressed);
   }
 
@@ -356,7 +448,7 @@ export class LiveWalletService {
     } catch {
       return false;
     }
-    this.net = this.netFor(entry.network);
+    this.setActiveNetwork(entry.network);
     let address: string;
     if (entry.kind === 'pk') {
       const { privateKey, compressed } = parsePrivateKey(secret);
@@ -423,7 +515,7 @@ export class LiveWalletService {
   }
 
   network(): LiveNetworkId {
-    return this.net.id;
+    return this.activeNetworkId;
   }
 
   // --- multi-wallet management --------------------------------------------
@@ -458,7 +550,7 @@ export class LiveWalletService {
     store.activeId = id;
     await this.saveStore(store);
     this.lock();
-    this.net = this.netFor(entry.network);
+    this.setActiveNetwork(entry.network);
     this.activeKind = entry.kind ?? 'seed';
   }
 
@@ -484,7 +576,7 @@ export class LiveWalletService {
       store.activeId = store.wallets.length > 0 ? store.wallets[0].id : '';
       this.lock();
       const promoted = this.activeEntry(store);
-      if (promoted) this.net = this.netFor(promoted.network);
+      if (promoted) this.setActiveNetwork(promoted.network);
     }
     await this.saveStore(store);
   }
@@ -559,7 +651,12 @@ export class LiveWalletService {
   signMessage(message: string): { address: string; signature: string } {
     const key = this.deriveKey(0); // throws 'Live wallet is locked' when locked
     const compressed = key.publicKey.length === 33;
-    return { address: key.address, signature: signMessageWithKey(key.privateKey, message, compressed) };
+    return {
+      address: key.address,
+      // Sign with the ACTIVE chain's message magic (EVR default preserved; RVN
+      // uses "Raven Signed Message:\n") so the signature verifies on that chain.
+      signature: signMessageWithKey(key.privateKey, message, compressed, this.net.messageMagic),
+    };
   }
 
   /** All receive keys of the ACTIVE wallet (one per derived address; a pk wallet
@@ -781,7 +878,11 @@ export class LiveWalletService {
           txid: u.tx_hash,
           vout: u.tx_pos,
           valueSats: BigInt(u.value),
-          scriptPubKeyHex: bytesToHex(buildTransferAssetScriptFromHash160(h160, name, BigInt(u.value))),
+          // Build the prevout's sighash script with the ACTIVE chain's marker
+          // family so it matches the on-chain script byte-for-byte (rvnt on RVN).
+          scriptPubKeyHex: bytesToHex(
+            buildTransferAssetScriptFromHash160(h160, name, BigInt(u.value), this.net.assetMarkerPrefix),
+          ),
           privateKey: k.privateKey,
           publicKey: k.publicKey,
         });
@@ -825,22 +926,28 @@ export class LiveWalletService {
     // a lying server from inflating the real fee. For asset inputs it also binds
     // the claimed asset amount (encoded in the OP_EVR_ASSET script, nValue=0).
     // Throws on a lie.
-    await verifyInputAmounts(this.client, [
-      ...assetInputs.map((u) => ({
-        txid: u.txid,
-        vout: u.vout,
-        valueSats: u.valueSats,
-        scriptPubKeyHex: u.scriptPubKeyHex,
-        kind: 'asset' as const,
-      })),
-      ...evrInputs.map((u) => ({
-        txid: u.txid,
-        vout: u.vout,
-        valueSats: u.valueSats,
-        scriptPubKeyHex: u.scriptPubKeyHex,
-        kind: 'evr' as const,
-      })),
-    ]);
+    await verifyInputAmounts(
+      this.client,
+      [
+        ...assetInputs.map((u) => ({
+          txid: u.txid,
+          vout: u.vout,
+          valueSats: u.valueSats,
+          scriptPubKeyHex: u.scriptPubKeyHex,
+          kind: 'asset' as const,
+        })),
+        ...evrInputs.map((u) => ({
+          txid: u.txid,
+          vout: u.vout,
+          valueSats: u.valueSats,
+          scriptPubKeyHex: u.scriptPubKeyHex,
+          kind: 'evr' as const,
+        })),
+      ],
+      // Decode asset prevouts as the ACTIVE chain's family: a wrong-chain marker
+      // (e.g. an 'evrt' output while sending RVN) fails closed here.
+      this.net.assetMarkerPrefix,
+    );
 
     const built = buildAndSignAssetTransfer({
       assetInputs,
@@ -852,6 +959,7 @@ export class LiveWalletService {
           : undefined,
       evrChangeAddress: key.address,
       feeSats,
+      assetMarkerPrefix: this.net.assetMarkerPrefix,
     });
 
     assertFeeSane(built.feeSats);
@@ -875,14 +983,47 @@ export class LiveWalletService {
 
   /** Broadcast a previously built+signed tx. GATED: throws unless armed, and
    *  single-use — the gate auto-disarms after every attempt so each broadcast
-   *  requires a fresh, deliberate arming. */
+   *  requires a fresh, deliberate arming.
+   *
+   *  On success: returns the txid the server returns (unchanged behaviour).
+   *  On a CLEAN daemon rejection (code 1, "rejected by network rules"): the
+   *  outcome is definitively "not sent" — rethrown immediately, no polling.
+   *  On ANY other error (crash, timeout, dropped connection): the outcome is
+   *  UNKNOWN, so we poll `blockchain.transaction.get` for the tx by its
+   *  LOCALLY computed txid (never a server-supplied one) before deciding. If
+   *  it shows up, the send worked — return success. If it never appears,
+   *  throw the 'broadcast-unconfirmed' error code so the caller can tell the
+   *  user nothing was sent and it's safe to retry. */
   async broadcast(rawHex: string): Promise<string> {
     if (!this.allowBroadcast) throw new BroadcastGatedError();
+    const expectedTxid = txid(rawHex); // computed locally, before broadcast
     try {
       return await this.client.request<string>(ELECTRUM_METHODS.txBroadcast, [rawHex]);
+    } catch (err) {
+      if (isCleanBroadcastRejection(err)) throw err;
+      const landed = await this.pollForBroadcastOutcome(expectedTxid);
+      if (landed) return expectedTxid;
+      throw new Error('broadcast-unconfirmed');
     } finally {
       this.allowBroadcast = false;
     }
+  }
+
+  /** Resolve an UNKNOWN broadcast outcome by polling for `expectedTxid` on
+   *  chain (mempool or block). Returns true the moment it's found; false once
+   *  every attempt is exhausted. Never throws — a lookup failure just means
+   *  "not found yet" to the caller. */
+  private async pollForBroadcastOutcome(expectedTxid: string): Promise<boolean> {
+    for (const delayMs of this.broadcastPollDelaysMs) {
+      await sleep(delayMs);
+      try {
+        await this.client.request<string>(ELECTRUM_METHODS.txGet, [expectedTxid]);
+        return true; // the tx is known to the network — the broadcast worked
+      } catch {
+        // Still unknown to this server; keep polling.
+      }
+    }
+    return false;
   }
 
   /** Fully reset: remove ALL wallets and both the new and legacy storage keys. */

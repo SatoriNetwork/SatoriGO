@@ -10,8 +10,12 @@
 // where <blob> = 4-byte marker + varfields, and <pushlen> is the length of the
 // blob (up to and NOT including OP_DROP).
 //
-// Markers (the 4 ASCII bytes immediately after the push length):
-//   "evrq" = issue (new asset), "evrt" = transfer, "evrr" = reissue, "evro" = owner.
+// Markers (the 4 ASCII bytes immediately after the push length) are the chain's
+// 3-char asset-marker prefix + a kind letter. The prefix is chain-dependent:
+//   Evrmore   'evr' -> "evrq" issue, "evrt" transfer, "evrr" reissue, "evro" owner.
+//   Ravencoin 'rvn' -> "rvnq" issue, "rvnt" transfer, "rvnr" reissue, "rvno" owner.
+// (Ravencoin markers verified against RavenProject/Ravencoin src/assets/assets.cpp
+//  and a REAL on-chain transfer, see assetScript.test.ts.)
 //
 // Amounts are carried as bigint sats (uint64, 8 implied decimals) to avoid float
 // rounding error on 8-decimal values.
@@ -22,18 +26,27 @@ import { p2pkhScript, addressToHash160 } from './keys';
 export const OP_EVR_ASSET = 0xc0;
 export const OP_DROP = 0x75;
 
-// 4-byte ASCII markers. "evr" + kind letter.
-const MARKER_TRANSFER = 'evrt';
-const MARKER_ISSUE = 'evrq';
-const MARKER_REISSUE = 'evrr';
-const MARKER_OWNER = 'evro';
+/** The asset-marker family prefix. Evrmore = 'evr', Ravencoin = 'rvn'. */
+export type AssetMarkerPrefix = 'evr' | 'rvn';
 
-const MARKER_TO_KIND: Record<string, AssetTransfer['kind']> = {
-  [MARKER_TRANSFER]: 'transfer',
-  [MARKER_ISSUE]: 'issue',
-  [MARKER_REISSUE]: 'reissue',
-  [MARKER_OWNER]: 'owner',
-};
+/** Default marker prefix, so pre-existing (Evrmore-only) callers/tests keep the
+ *  exact same behavior without passing an argument. */
+export const DEFAULT_MARKER_PREFIX: AssetMarkerPrefix = 'evr';
+
+/** The 4-byte transfer marker string for a prefix, e.g. 'evr' -> "evrt". */
+function transferMarker(prefix: AssetMarkerPrefix): string {
+  return `${prefix}t`;
+}
+
+/** Map a prefix's four markers to their kinds (transfer/issue/reissue/owner). */
+function markerToKind(prefix: AssetMarkerPrefix): Record<string, AssetTransfer['kind']> {
+  return {
+    [`${prefix}t`]: 'transfer',
+    [`${prefix}q`]: 'issue',
+    [`${prefix}r`]: 'reissue',
+    [`${prefix}o`]: 'owner',
+  };
+}
 
 const MAX_UINT64 = (1n << 64n) - 1n;
 
@@ -42,6 +55,14 @@ export interface AssetTransfer {
   name: string;
   /** amount in sats (integer, 8 implied decimals). */
   amount: bigint;
+}
+
+export interface DecodedAssetScript {
+  p2pkhHash160: Uint8Array;
+  transfer: AssetTransfer;
+  /** Which marker family the on-chain script actually used (so callers can
+   *  bind/reject by chain — e.g. verifyUtxo fails closed on a family mismatch). */
+  markerPrefix: AssetMarkerPrefix;
 }
 
 // ---------------------------------------------------------------------------
@@ -125,13 +146,16 @@ function readAscii(bytes: Uint8Array, offset: number, len: number): string {
  * Build a transfer_asset scriptPubKey from a raw 20-byte hash160.
  *
  * Layout:
- *   P2PKH(25) + 0xc0 + pushlen + "evrt" + nameLen(1) + nameBytes + amount(8 LE) + 0x75
- * where pushlen = 4 + 1 + name.length + 8 (blob length, excluding OP_DROP).
+ *   P2PKH(25) + 0xc0 + pushlen + <marker> + nameLen(1) + nameBytes + amount(8 LE) + 0x75
+ * where <marker> is the chain's transfer marker ("evrt" for Evrmore, "rvnt" for
+ * Ravencoin) and pushlen = 4 + 1 + name.length + 8 (blob length, excluding OP_DROP).
+ * `markerPrefix` defaults to 'evr' so pre-existing callers keep byte-identical output.
  */
 export function buildTransferAssetScriptFromHash160(
   hash160: Uint8Array,
   assetName: string,
   amountSats: bigint,
+  markerPrefix: AssetMarkerPrefix = DEFAULT_MARKER_PREFIX,
 ): Uint8Array {
   if (!(hash160 instanceof Uint8Array) || hash160.length !== 20) {
     throw new Error(`hash160 must be 20 bytes, got ${hash160?.length ?? 'n/a'}`);
@@ -140,7 +164,7 @@ export function buildTransferAssetScriptFromHash160(
   const amount = amountLE(amountSats);
 
   const p2pkh = p2pkhScript(hash160);
-  const marker = markerBytes(MARKER_TRANSFER);
+  const marker = markerBytes(transferMarker(markerPrefix));
 
   // blob = marker(4) + nameLen(1) + name + amount(8)
   const pushlen = 4 + 1 + name.length + 8;
@@ -168,9 +192,10 @@ export function buildTransferAssetScript(
   address: string,
   assetName: string,
   amountSats: bigint,
+  markerPrefix: AssetMarkerPrefix = DEFAULT_MARKER_PREFIX,
 ): Uint8Array {
   const { hash } = addressToHash160(address);
-  return buildTransferAssetScriptFromHash160(hash, assetName, amountSats);
+  return buildTransferAssetScriptFromHash160(hash, assetName, amountSats, markerPrefix);
 }
 
 // ---------------------------------------------------------------------------
@@ -178,19 +203,25 @@ export function buildTransferAssetScript(
 // ---------------------------------------------------------------------------
 
 /**
- * Decode an Evrmore asset scriptPubKey.
+ * Decode an asset scriptPubKey for ONE marker family.
  *
- * Parses the standard P2PKH prefix, locates OP_EVR_ASSET (0xc0), reads the push
+ * Parses the standard P2PKH prefix, locates OP_x_ASSET (0xc0), reads the push
  * length, the 4-byte marker, the asset name, and the 8-byte little-endian amount
  * (plus divisions/reissuable for reissue), and verifies the trailing OP_DROP.
  *
- * Returns { p2pkhHash160, transfer } or null if `script` is not an asset script
- * (e.g. a plain P2PKH output).
+ * `markerPrefix` scopes which family is accepted (defaults to 'evr' so existing
+ * callers are unchanged). A well-formed asset script whose marker belongs to a
+ * DIFFERENT family (e.g. an "evrt" script decoded with prefix 'rvn') returns null
+ * — this is the fail-closed hook the send path relies on to reject a prevout from
+ * the wrong chain. Returns { p2pkhHash160, transfer, markerPrefix } or null if
+ * `script` is not an asset script of this family (e.g. a plain P2PKH output).
  */
 export function decodeAssetScript(
   script: Uint8Array | string,
-): { p2pkhHash160: Uint8Array; transfer: AssetTransfer } | null {
+  markerPrefix: AssetMarkerPrefix = DEFAULT_MARKER_PREFIX,
+): DecodedAssetScript | null {
   const bytes = typeof script === 'string' ? hexToBytes(script.trim()) : script;
+  const markerToKindMap = markerToKind(markerPrefix);
 
   // Must at least hold the 25-byte P2PKH prefix + OP_EVR_ASSET + pushlen.
   if (bytes.length < 27) {
@@ -228,7 +259,7 @@ export function decodeAssetScript(
     return null;
   }
   const marker = readAscii(bytes, blobStart, 4);
-  const kind = MARKER_TO_KIND[marker];
+  const kind = markerToKindMap[marker];
   if (!kind) {
     return null;
   }
@@ -245,7 +276,7 @@ export function decodeAssetScript(
 
   if (kind === 'owner') {
     // Owner token: name only, no amount field.
-    return { p2pkhHash160, transfer: { kind, name, amount: 0n } };
+    return { p2pkhHash160, transfer: { kind, name, amount: 0n }, markerPrefix };
   }
 
   // amount: 8 little-endian bytes.
@@ -260,5 +291,5 @@ export function decodeAssetScript(
   // need the amount for the wallet, but we consumed the fields for correctness.
   // Any trailing bytes up to blobEnd are the extra fields; we do not reject them.
 
-  return { p2pkhHash160, transfer: { kind, name, amount } };
+  return { p2pkhHash160, transfer: { kind, name, amount }, markerPrefix };
 }

@@ -2,8 +2,8 @@
   "manifest_version": 3,
   "name": "Satori GO",
   "short_name": "Satori GO",
-  "version": "1.1.1",
-  "description": "Non-custodial EVRmore (EVR) wallet for the Satori Network: multiple wallets, EVR + asset sends, SATORIEVR staking, dApp connect.",
+  "version": "1.2.0",
+  "description": "Non-custodial multi-chain crypto wallet made by Satori Network. Your keys never leave your device.",
   "author": "Satori Network",
   "action": {
     "default_popup": "index.html",

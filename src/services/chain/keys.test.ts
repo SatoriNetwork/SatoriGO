@@ -13,7 +13,7 @@ import {
   encodeWif,
   decodeWif,
 } from './keys';
-import { EVRMORE_MAINNET, EVRMORE_TESTNET, type EvrmoreNetwork } from './chainParams';
+import { EVRMORE_MAINNET, EVRMORE_TESTNET, RAVENCOIN_MAINNET, type EvrmoreNetwork } from './chainParams';
 
 // Trezor BIP39 vector: all-"abandon" + "about", passphrase "TREZOR".
 const VECTOR_MNEMONIC =
@@ -95,6 +95,39 @@ describe('Evrmore testnet address', () => {
     const { version } = addressToHash160(dk.address);
     expect(version).toBe(111);
     expect(isValidAddress(dk.address, EVRMORE_TESTNET)).toBe(true);
+  });
+});
+
+describe('Ravencoin mainnet address (shared-key property)', () => {
+  it("4b. derives an R-prefixed v60 address for m/44'/175'/0'/0/0 with hash160 IDENTICAL to Evrmore", async () => {
+    const seed = await vectorSeed();
+    // Same seed + same path on both chains. Ravencoin and Evrmore share SLIP-44
+    // coin type 175 and the same BIP32 mainnet version bytes (verified against
+    // RavenProject/Ravencoin chainparams.cpp:198/199/202), so the derived
+    // private/public key — and therefore the hash160 — is byte-for-byte the same.
+    // Only the base58 address VERSION byte differs (33 'E' vs 60 'R').
+    const evr = deriveAddress(seed, EVRMORE_MAINNET, 0, 0, 0);
+    const rvn = deriveAddress(seed, RAVENCOIN_MAINNET, 0, 0, 0);
+
+    expect(rvn.path).toBe("m/44'/175'/0'/0/0");
+    expect(rvn.address[0]).toBe('R'); // chainparams.cpp:195 PUBKEY_ADDRESS = 60 -> 'R'
+    expect(rvn.address.length).toBe(34);
+    expect(isValidAddress(rvn.address, RAVENCOIN_MAINNET)).toBe(true);
+
+    const rvnDecoded = addressToHash160(rvn.address);
+    expect(rvnDecoded.version).toBe(60);
+    expect(rvnDecoded.hash.length).toBe(20);
+
+    // THE shared-key property: identical hash160 across chains, only version differs.
+    expect(bytesToHex(rvnDecoded.hash)).toBe(bytesToHex(addressToHash160(evr.address).hash));
+    expect(bytesToHex(rvn.privateKey)).toBe(bytesToHex(evr.privateKey));
+    expect(bytesToHex(rvn.publicKey)).toBe(bytesToHex(evr.publicKey));
+    // Same key, different address string (different version byte).
+    expect(rvn.address).not.toBe(evr.address);
+    expect(addressToHash160(evr.address).version).toBe(33);
+
+    // Round-trip: rebuild the R-address straight from the public key.
+    expect(pubkeyToAddress(rvn.publicKey, RAVENCOIN_MAINNET)).toBe(rvn.address);
   });
 });
 

@@ -7,6 +7,7 @@ import { BrandLogo } from '../../components/BrandLogo';
 import { PasswordStrengthBar } from '../../components/PasswordStrengthBar';
 import { useLiveStore } from '../../store/liveStore';
 import { MIN_PASSWORD_LENGTH } from '../../services/constants';
+import { ChainPicker, type ChainChoice } from './ChainPicker';
 
 type Step = 'choose' | 'create-form' | 'mnemonic' | 'import-form' | 'pk-form';
 
@@ -163,6 +164,7 @@ function CreateForm({ onBack }: { onBack(): void }) {
   const addingWallet = useLiveStore((s) => s.addingWallet);
   const error = useLiveStore((s) => s.error);
   const [name, setName] = useState('');
+  const [network, setNetwork] = useState<ChainChoice>('mainnet');
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
   const [noPassword, setNoPassword] = useState(false);
@@ -187,7 +189,7 @@ function CreateForm({ onBack }: { onBack(): void }) {
       return;
     }
     setLoading(true);
-    await createWallet(noPassword ? '' : password, name);
+    await createWallet(noPassword ? '' : password, name, network);
     setLoading(false);
   };
 
@@ -197,7 +199,9 @@ function CreateForm({ onBack }: { onBack(): void }) {
     <form onSubmit={handleSubmit} data-testid="live-create" style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
       <h3 style={{ marginBottom: 4 }}>{addingWallet ? 'Add a wallet' : 'Create live wallet'}</h3>
       <p className="text-dim" style={{ fontSize: 12, marginBottom: 18 }}>
-        A new wallet will be created on the real EVRmore mainnet. Your recovery phrase will be shown once. Write it down.
+        {network === 'ravencoin-mainnet'
+          ? 'A new wallet will be created on the real Ravencoin mainnet. Your recovery phrase will be shown once. Write it down.'
+          : 'A new wallet will be created on the real EVRmore mainnet. Your recovery phrase will be shown once. Write it down.'}
       </p>
 
       <TextField
@@ -208,6 +212,8 @@ function CreateForm({ onBack }: { onBack(): void }) {
         testId="live-wallet-name"
         autoComplete="off"
       />
+
+      <ChainPicker value={network} onChange={setNetwork} testIdPrefix="live-create-chain" secretKind="phrase" />
 
       <PasswordSection
         noPassword={noPassword}
@@ -343,6 +349,7 @@ function ImportForm({ onBack }: { onBack(): void }) {
   const importWallet = useLiveStore((s) => s.importWallet);
   const addingWallet = useLiveStore((s) => s.addingWallet);
   const [name, setName] = useState('');
+  const [network, setNetwork] = useState<ChainChoice>('mainnet');
   const [phrase, setPhrase] = useState('');
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
@@ -375,7 +382,7 @@ function ImportForm({ onBack }: { onBack(): void }) {
     }
     setLoading(true);
     try {
-      await importWallet(trimmed, noPassword ? '' : password, name);
+      await importWallet(trimmed, noPassword ? '' : password, name, network);
     } catch (err) {
       setLocalError(err instanceof Error ? err.message : 'Import failed');
     }
@@ -386,7 +393,9 @@ function ImportForm({ onBack }: { onBack(): void }) {
     <form onSubmit={handleSubmit} data-testid="live-import" style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
       <h3 style={{ marginBottom: 4 }}>{addingWallet ? 'Add a wallet' : 'Import wallet'}</h3>
       <p className="text-dim" style={{ fontSize: 12, marginBottom: 16 }}>
-        Enter your 12- or 24-word BIP39 recovery phrase to restore an existing EVRmore wallet.
+        {network === 'ravencoin-mainnet'
+          ? 'Enter your 12- or 24-word BIP39 recovery phrase to restore an existing Ravencoin wallet.'
+          : 'Enter your 12- or 24-word BIP39 recovery phrase to restore an existing EVRmore wallet.'}
       </p>
 
       <TextField
@@ -397,6 +406,8 @@ function ImportForm({ onBack }: { onBack(): void }) {
         testId="live-wallet-name"
         autoComplete="off"
       />
+
+      <ChainPicker value={network} onChange={setNetwork} testIdPrefix="live-import-chain" secretKind="phrase" />
 
       <div className="field" style={{ marginBottom: 13 }}>
         <label>Recovery phrase</label>
@@ -449,6 +460,7 @@ function PkImportForm({ onBack }: { onBack(): void }) {
   const importPrivateKeyWallet = useLiveStore((s) => s.importPrivateKeyWallet);
   const addingWallet = useLiveStore((s) => s.addingWallet);
   const [name, setName] = useState('');
+  const [network, setNetwork] = useState<ChainChoice>('mainnet');
   const [pk, setPk] = useState('');
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
@@ -479,7 +491,7 @@ function PkImportForm({ onBack }: { onBack(): void }) {
     }
     setLoading(true);
     try {
-      await importPrivateKeyWallet(pk.trim(), noPassword ? '' : password, name);
+      await importPrivateKeyWallet(pk.trim(), noPassword ? '' : password, name, network);
     } catch (err) {
       setLocalError(mapPkError(err instanceof Error ? err.message : 'Import failed'));
     }
@@ -507,6 +519,8 @@ function PkImportForm({ onBack }: { onBack(): void }) {
         testId="live-wallet-name"
         autoComplete="off"
       />
+
+      <ChainPicker value={network} onChange={setNetwork} testIdPrefix="live-pk-chain" secretKind="key" />
 
       <div className="field" style={{ marginBottom: 13 }}>
         <label>Private key (WIF or hex)</label>

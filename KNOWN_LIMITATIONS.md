@@ -53,8 +53,11 @@ Current, honest limitations of the **real** wallet (v1.1.1).
    So: not a bug, and not a risk to you. It only means the wallet refuses to send to
    multisig / script addresses at all, rather than burning the funds. Emitting genuine
    P2SH outputs is simply not implemented.
-7. **EVRmore only.** The wallet is architected to carry more than one chain, but today
-   it speaks EVRmore and nothing else. Adding a network is not a config switch yet.
+7. **Two chains are live-verified: EVRmore and Ravencoin.** The chain layer is
+   multichain (both share coin type 175, so one seed/key is valid on each; only the
+   address version byte differs) and the create/import flow lets you pick either
+   chain. Ravencoin passed this project's verification bar on 2026-07-22 — see
+   Platform item 22 for exactly what was verified and by whom.
 8. **Mainnet only in practice.** `chainParams.ts` defines testnet, but wallet
    creation/import hardcodes mainnet and no UI exposes a testnet toggle.
 9. **Amounts above ~90,071,992 EVR** lose precision in the decimal→sats conversion
@@ -143,9 +146,31 @@ Current, honest limitations of the **real** wallet (v1.1.1).
 21. **Price sources are third-party** (CoinEx for EVR; satorinet.io with a SafeTrade
     fallback for SATORIEVR) and reached via `host_permissions`. If they are down or
     block the request, the USD figures simply don't render — balances are unaffected.
+22. **Ravencoin (RVN) is verified and supported (2026-07-22).** Chain parameters
+    were verified against `RavenProject/Ravencoin` `chainparams.cpp`/`assets.cpp`
+    source (see `docs/CHAIN_PARAMS.md`), including the asset-transfer marker bytes
+    and the `Raven Signed Message:\n` signing magic, cross-checked against a real
+    on-chain Ravencoin fixture (the wallet-built transfer script is byte-identical
+    to a live on-chain SATORI transfer). The three remaining gates all closed on
+    2026-07-22, each with its evidence:
+    - **Server:** `wss://rvnx.satorinet.io` is live and speaks the full asset
+      dialect — verified by replaying the wallet's exact call sequence against it
+      (`asset.get_meta`, `listunspent(sh, asset)`, `estimatefee`,
+      `transaction.get`, broadcast error paths), synced to the network tip.
+    - **Live smoke:** exercises a Ravencoin wallet end to end (creation with the
+      chain picker, chain-scoped recipient pickers, and a native-send review that
+      must reach the native path, not the asset path).
+    - **Funded sends:** a funded RVN **asset** send and a funded **native RVN**
+      send were both confirmed working on mainnet **by the owner's own testing**
+      (2026-07-22), through the owner's server. Recorded here as owner-verified:
+      these were not agent-run.
+    Residual honesty note: RVN has fewer miles on it than Evrmore. The first
+    native-send attempt surfaced a dispatch bug (fixed + regression-tested the
+    same day), and one transient server-side `-32603` was observed once during an
+    asset broadcast (the transaction succeeded; a broadcast-outcome check is
+    planned so such errors report the true result).
 
 ## Not implemented (ideas, not promises)
 
-Additional chains (the architecture is aimed at them; only EVRmore is wired up today),
-real P2SH output support, QR-code scanning, 24 h price change %, an in-wallet asset
-explorer, hardware-wallet support, a self-hosted Electrum node.
+Real P2SH output support, QR-code scanning, 24 h price change %, an in-wallet asset
+explorer, hardware-wallet support, additional chains beyond Evrmore and Ravencoin.

@@ -5,6 +5,7 @@ import { describe, it, expect } from 'vitest';
 import { ElectrumWalletDataProvider } from './electrumProvider';
 import type { ElectrumClient } from './electrumTypes';
 import { ELECTRUM_METHODS } from './network';
+import { RAVENCOIN_MAINNET } from './chainParams';
 
 // ---------------------------------------------------------------------------
 // Fake ElectrumClient
@@ -868,6 +869,190 @@ describe('ElectrumWalletDataProvider', () => {
       expect(txs[0].asset).toBe('EVR');
       expect(txs[0].direction).toBe('in');
       expect(txs[0].amount).toBeCloseTo(2.5, 8);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Ravencoin: native ticker/name parametrised; NO SATORI row/queries.
+  // The scripthash mechanism is net-agnostic, so OUR_ADDRESS is reused; only the
+  // provider's `network` differs (RAVENCOIN_MAINNET -> ticker 'RVN').
+  // -------------------------------------------------------------------------
+  describe('Ravencoin (network: RAVENCOIN_MAINNET)', () => {
+    it('getAssets returns ONLY the native RVN row (no SATORI)', async () => {
+      const client = makeFakeClient(() => {
+        throw new Error('not called');
+      });
+      const provider = new ElectrumWalletDataProvider(client, { network: RAVENCOIN_MAINNET });
+      const assets = await provider.getAssets();
+
+      expect(assets).toHaveLength(1);
+      expect(assets[0]).toMatchObject({ id: 'RVN', symbol: 'RVN', kind: 'native', decimals: 8 });
+      expect(assets.some((a) => a.id === 'SATORI')).toBe(false);
+    });
+
+    it('getBalances returns ONLY the native RVN row and never queries SATORI', async () => {
+      const seenParams: unknown[][] = [];
+      const handler: RequestHandler = (method, params) => {
+        if (method === ELECTRUM_METHODS.getBalance) {
+          seenParams.push(params ?? []);
+          return { confirmed: 248174000000, unconfirmed: 0 };
+        }
+        throw new Error(`unexpected method: ${method}`);
+      };
+      const client = makeFakeClient(handler);
+      await client.connect();
+      const provider = new ElectrumWalletDataProvider(client, { network: RAVENCOIN_MAINNET });
+      const balances = await provider.getBalances(OUR_ADDRESS);
+
+      expect(balances).toHaveLength(1);
+      expect(balances[0]).toMatchObject({ assetId: 'RVN' });
+      expect(balances[0].amount).toBeCloseTo(2481.74, 5);
+      // Exactly one get_balance call, WITHOUT an asset arg (never [sh,'SATORI']).
+      expect(seenParams).toHaveLength(1);
+      expect(seenParams[0]).toHaveLength(1);
+      expect(seenParams.some((p) => p[1] === 'SATORI')).toBe(false);
+    });
+
+    it('getAllAssetBalances names the native row RVN (not EVR)', async () => {
+      const utxos = [{ tx_hash: 'a', tx_pos: 0, height: 100, asset: null, value: 150000000 }];
+      const handler: RequestHandler = (method) => {
+        if (method === ELECTRUM_METHODS.listUnspent) return utxos;
+        throw new Error(`unexpected: ${method}`);
+      };
+      const client = makeFakeClient(handler);
+      await client.connect();
+      const provider = new ElectrumWalletDataProvider(client, { network: RAVENCOIN_MAINNET });
+      const balances = await provider.getAllAssetBalances(OUR_ADDRESS);
+
+      expect(balances).toHaveLength(1);
+      expect(balances[0]).toMatchObject({ name: 'RVN', isNative: true });
+      expect(balances[0].amount).toBeCloseTo(1.5, 8);
+    });
+
+    it('setNetwork retargets a shared provider from EVR to RVN', async () => {
+      const utxos = [{ tx_hash: 'a', tx_pos: 0, height: 100, asset: null, value: 100000000 }];
+      const handler: RequestHandler = (method) => {
+        if (method === ELECTRUM_METHODS.listUnspent) return utxos;
+        throw new Error(`unexpected: ${method}`);
+      };
+      const client = makeFakeClient(handler);
+      await client.connect();
+      const provider = new ElectrumWalletDataProvider(client); // defaults to Evrmore
+      const evr = await provider.getAllAssetBalances(OUR_ADDRESS);
+      expect(evr[0].name).toBe('EVR');
+
+      provider.setNetwork(RAVENCOIN_MAINNET);
+      const rvn = await provider.getAllAssetBalances(OUR_ADDRESS);
+      expect(rvn[0].name).toBe('RVN');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Verbose-tx memo cache: prevout lookups (immutable) are memoized so a big
+  // first sync roughly halves round-trips; a mempool MAIN tx (height<=0) is
+  // always refetched; the memo is bounded (cap 500, oldest evicted).
+  // -------------------------------------------------------------------------
+
+  describe('verbose-tx memo cache', () => {
+    it('fetches a shared prevout only ONCE across two classifications', async () => {
+      const PREV = 'aa' + '0'.repeat(62);
+      const TXA = 'a1' + '0'.repeat(62);
+      const TXB = 'b1' + '0'.repeat(62);
+
+      // Prevout tx: two EVR outputs, both ours. TXA spends vout 0, TXB spends vout 1.
+      const prevTx = makeVerboseTx(PREV, {
+        vout: [
+          { value: 10, address: OUR_ADDRESS },
+          { value: 5, address: OUR_ADDRESS },
+        ],
+      });
+      const txA = makeVerboseTx(TXA, {
+        vin: [{ txid: PREV, vout: 0 }],
+        vout: [{ value: 9.9, address: OUR_ADDRESS }],
+      });
+      const txB = makeVerboseTx(TXB, {
+        vin: [{ txid: PREV, vout: 1 }],
+        vout: [{ value: 4.9, address: OUR_ADDRESS }],
+      });
+      const byId: Record<string, unknown> = { [PREV]: prevTx, [TXA]: txA, [TXB]: txB };
+
+      const counts: Record<string, number> = {};
+      const handler: RequestHandler = (method, params) => {
+        if (method === ELECTRUM_METHODS.txGet) {
+          const id = params?.[0] as string;
+          counts[id] = (counts[id] ?? 0) + 1;
+          return byId[id];
+        }
+        throw new Error(`unexpected: ${method}`);
+      };
+
+      const client = makeFakeClient(handler);
+      await client.connect();
+      const provider = new ElectrumWalletDataProvider(client);
+
+      await provider.classifyTxHash(OUR_ADDRESS, TXA, 100);
+      await provider.classifyTxHash(OUR_ADDRESS, TXB, 101);
+
+      // The shared prevout is fetched once (memo hit on the second classification).
+      expect(counts[PREV]).toBe(1);
+      // Each confirmed main tx is fetched exactly once too.
+      expect(counts[TXA]).toBe(1);
+      expect(counts[TXB]).toBe(1);
+    });
+
+    it('refetches a MEMPOOL main tx (height<=0) every time, overwriting the memo', async () => {
+      const TXM = 'cc' + '0'.repeat(62);
+      const mempoolTx = makeVerboseTx(TXM, {
+        vin: [{}], // coinbase-like: no prevout to resolve
+        vout: [{ value: 2, address: OUR_ADDRESS }],
+      });
+
+      let calls = 0;
+      const handler: RequestHandler = (method, params) => {
+        if (method === ELECTRUM_METHODS.txGet && params?.[0] === TXM) {
+          calls++;
+          return mempoolTx;
+        }
+        throw new Error(`unexpected: ${method}`);
+      };
+
+      const client = makeFakeClient(handler);
+      await client.connect();
+      const provider = new ElectrumWalletDataProvider(client);
+
+      await provider.classifyTxHash(OUR_ADDRESS, TXM, 0);
+      await provider.classifyTxHash(OUR_ADDRESS, TXM, 0);
+
+      // A mempool tx can still change (confirmation/time), so never served from memo.
+      expect(calls).toBe(2);
+    });
+
+    it('evicts the oldest entry once the cap (500) is exceeded', async () => {
+      const T1 = 'd1' + '0'.repeat(62);
+      const counts: Record<string, number> = {};
+      const handler: RequestHandler = (method, params) => {
+        if (method === ELECTRUM_METHODS.txGet) {
+          const id = params?.[0] as string;
+          counts[id] = (counts[id] ?? 0) + 1;
+          // No prevout inputs, so each classify is exactly one main fetch.
+          return makeVerboseTx(id, { vin: [{}], vout: [{ value: 1, address: OUR_ADDRESS }] });
+        }
+        throw new Error(`unexpected: ${method}`);
+      };
+
+      const client = makeFakeClient(handler);
+      await client.connect();
+      const provider = new ElectrumWalletDataProvider(client);
+
+      // Cache T1, then push 500 distinct confirmed txs (T1 + 500 = 501 > cap) so
+      // T1 (the oldest insertion) is evicted.
+      await provider.classifyTxHash(OUR_ADDRESS, T1, 100);
+      for (let i = 0; i < 500; i++) {
+        await provider.classifyTxHash(OUR_ADDRESS, `f${i}` + '0'.repeat(60), 100);
+      }
+      // T1 was evicted, so classifying it again misses the memo and refetches.
+      await provider.classifyTxHash(OUR_ADDRESS, T1, 100);
+      expect(counts[T1]).toBe(2);
     });
   });
 });
