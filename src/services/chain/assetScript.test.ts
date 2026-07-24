@@ -130,3 +130,83 @@ describe('validation', () => {
     expect(() => buildTransferAssetScriptFromHash160(h, 'SATORI', 0n)).toThrow();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Ravencoin ('rvn') marker family. Only the 3-char marker prefix differs from
+// Evrmore ('rvnt' vs 'evrt' etc.); the opcode (0xc0), layout and amount encoding
+// are identical. Markers verified against RavenProject/Ravencoin src/assets/
+// assets.h (RVN_R=114 'r', RVN_V=118 'v', RVN_N=110 'n', RVN_T=116 't') and a
+// REAL on-chain transfer (fixture below).
+// ---------------------------------------------------------------------------
+describe('Ravencoin marker family (rvn)', () => {
+  it('8. builds a byte-exact "rvnt" transfer script for a known hash160/name/amount', () => {
+    const h = hexToBytes(TRANSFER_HASH160);
+    // P2PKH(25) + c0 + pushlen(0x13=19) + "rvnt"(72766e74) + nameLen(6) +
+    // "SATORI"(5341544f5249) + 250000000 LE (80b2e60e00000000) + OP_DROP(75).
+    const EXPECTED =
+      '76a91472e8ba9b5b0bd9cf46398f35155a9faf10e5e3eb88ac' + // P2PKH
+      'c0' + // OP_RVN_ASSET (same value as OP_EVR_ASSET)
+      '13' + // pushlen = 4 + 1 + 6 + 8 = 19
+      '72766e74' + // "rvnt"
+      '06' + // name length 6
+      '5341544f5249' + // "SATORI"
+      '80b2e60e00000000' + // 250000000 LE
+      '75'; // OP_DROP
+    const hex = bytesToHex(buildTransferAssetScriptFromHash160(h, 'SATORI', 250000000n, 'rvn'));
+    expect(hex).toBe(EXPECTED);
+  });
+
+  it('9. round-trips build -> decode under the rvn family', () => {
+    const h = hexToBytes(TRANSFER_HASH160);
+    const script = buildTransferAssetScriptFromHash160(h, 'SATORI', 250000000n, 'rvn');
+    const decoded = decodeAssetScript(script, 'rvn');
+    expect(decoded).not.toBeNull();
+    expect(decoded!.transfer.kind).toBe('transfer');
+    expect(decoded!.transfer.name).toBe('SATORI');
+    expect(decoded!.transfer.amount).toBe(250000000n);
+    expect(bytesToHex(decoded!.p2pkhHash160)).toBe(TRANSFER_HASH160);
+    expect(decoded!.markerPrefix).toBe('rvn');
+  });
+
+  it('10. FAILS CLOSED across families: rvn script !decodes as evr, evr script !decodes as rvn', () => {
+    const h = hexToBytes(TRANSFER_HASH160);
+    const rvnScript = buildTransferAssetScriptFromHash160(h, 'SATORI', 250000000n, 'rvn');
+    const evrScript = buildTransferAssetScriptFromHash160(h, 'SATORI', 250000000n, 'evr');
+    // A well-formed asset script of the OTHER family must return null (not throw),
+    // so verifyUtxo can reject a wrong-chain prevout by treating null as fail-closed.
+    expect(decodeAssetScript(rvnScript, 'evr')).toBeNull();
+    expect(decodeAssetScript(evrScript, 'rvn')).toBeNull();
+    // ...and each decodes under its own family.
+    expect(decodeAssetScript(rvnScript, 'rvn')).not.toBeNull();
+    expect(decodeAssetScript(evrScript, 'evr')).not.toBeNull();
+  });
+
+  // REAL on-chain Ravencoin transfer output, fetched live 2026-07-21 from the
+  // ting.finance mainnet gateway (POST rvn-rpc-mainnet.ting.finance/rpc) by
+  // scanning recent blocks for an OP_RVN_ASSET "rvnt" output:
+  //   block 4463131, txid d88d5229636e92f6602ec9d9ed8496198721e048ea49b63a25ddfe5aa126f2f6, vout 1
+  //   node asm: ... OP_RVN_ASSET 1672766e7409234445504f5349543200e1f5050000000075
+  //   asset name "#DEPOSIT2", amount 100000000 (1.0), hash160 7538db8d…9abf.
+  // Confirmed live that our decodeAssetScript(hex,'rvn') parses it coherently and
+  // decodeAssetScript(hex,'evr') returns null.
+  const REAL_RVN_TRANSFER =
+    '76a9147538db8d7279e84a53bb85ff13a5d74a30759abf88ac' + // P2PKH
+    'c0' + // OP_RVN_ASSET
+    '16' + // pushlen = 22
+    '72766e74' + // "rvnt"
+    '09' + // name length 9
+    '234445504f53495432' + // "#DEPOSIT2"
+    '00e1f50500000000' + // 100000000 LE
+    '75'; // OP_DROP
+  it('11. decodes a REAL on-chain rvn transfer output (rvn family), and rejects it as evr', () => {
+    const decoded = decodeAssetScript(REAL_RVN_TRANSFER, 'rvn');
+    expect(decoded).not.toBeNull();
+    expect(decoded!.transfer.kind).toBe('transfer');
+    expect(decoded!.transfer.name).toBe('#DEPOSIT2');
+    expect(decoded!.transfer.amount).toBe(100000000n);
+    expect(bytesToHex(decoded!.p2pkhHash160)).toBe('7538db8d7279e84a53bb85ff13a5d74a30759abf');
+    expect(decoded!.markerPrefix).toBe('rvn');
+    // Wrong family -> fail closed.
+    expect(decodeAssetScript(REAL_RVN_TRANSFER, 'evr')).toBeNull();
+  });
+});

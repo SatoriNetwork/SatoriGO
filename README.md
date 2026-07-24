@@ -1,16 +1,24 @@
 # Satori GO
 
-> **Powered by EVRmore • Built for the Satori Network**
+> **Non-custodial multi-chain browser wallet made by Satori Network**
 
 
-A real, non-custodial **EVRmore (EVR) + assets** browser wallet — Manifest V3,
-React + TypeScript + Vite, built for **Chrome, Edge and Firefox** from one shared
-codebase (see `platforms/` below). It runs its own pure‑JS crypto engine
-(BIP39/BIP32/BIP44, Evrmore base58check + legacy signing) inside the extension,
-talks to the live Evrmore network over ElectrumX (`wss://`), and lets web pages
-connect through an injected `window.evrmore` provider. Chrome is the only target
-that is fully gated and shipped-quality today; see `KNOWN_LIMITATIONS.md` for
-Firefox's unverified runtime status.
+A real, non-custodial multi-chain browser wallet made by Satori Network. Built as
+Manifest V3, React + TypeScript + Vite, for **Chrome, Edge and Firefox** from one
+shared codebase (see `platforms/` below). It runs its own pure‑JS crypto engine
+(BIP39/BIP32/BIP44, base58check + legacy signing) inside the extension, talks to
+the live network over ElectrumX (`wss://`), and lets web pages connect through an
+injected `window.evrmore` provider. Chrome is the only target that is fully gated
+and shipped-quality today; see `KNOWN_LIMITATIONS.md` for Firefox's unverified
+runtime status.
+
+The chain layer also carries **Ravencoin (RVN)** — the sister chain that shares
+Evrmore's key derivation (same coin type, same address algorithm, only the
+version byte differs) — with its own per-chain Electrum server pool, block
+explorer and chain-aware address validation. You can create or import a
+Ravencoin wallet from the same onboarding flow. It is built and unit-tested but
+not yet verified end-to-end against the real Ravencoin network; see
+`KNOWN_LIMITATIONS.md` (Platform section) for exactly what is and isn't proven.
 
 Version **1.1.1**. (The canonical version lives in each target's manifest under
 `platforms/<target>/manifest.json`; this line is informational and can lag —
@@ -269,10 +277,13 @@ interface EvrmoreProvider {
 
 ## Architecture (short)
 
-- **`src/services/chain/`** — the crypto engine: `keys` (BIP39/32/44, base58check,
-  WIF), `vault` (AES‑GCM+scrypt), `txBuilder` (legacy SIGHASH_ALL, RFC6979 low‑S,
-  DER), `assetScript` (OP_EVR_ASSET), `electrumClient`/`electrumProvider` (wss),
-  `txCache`, and `liveWallet` (the keystone service). All pure‑JS, CSP‑safe.
+- **`src/services/chain/`** — the crypto engine: `chainParams` (Evrmore +
+  Ravencoin network constants, source-verified), `keys` (BIP39/32/44,
+  base58check, WIF), `vault` (AES‑GCM+scrypt), `txBuilder` (legacy
+  SIGHASH_ALL, RFC6979 low‑S, DER), `assetScript` (OP_EVR_ASSET/OP_RVN_ASSET),
+  `electrumClient`/`electrumProvider` (wss, per-chain server pool), `txCache`,
+  and `liveWallet` (the keystone service; each wallet carries its own chain id).
+  All pure‑JS, CSP‑safe.
 - **`src/store/liveStore.ts`** — zustand state for the wallet UI.
 - **`src/screens/live/`** — the wallet UI; **`src/screens/dapp/DappApproval.tsx`** —
   the approval window.

@@ -2,7 +2,7 @@
 // Uses a fake TransactionCacheProvider + an in-memory storage adapter, so no
 // WebSocket and no chrome.storage are touched.
 
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   getCachedTransactions,
   refreshTransactionCache,
@@ -23,6 +23,8 @@ interface FakeProviderState {
   history: TxHistoryItem[];
   classifyCalls: number;
   historyCalls: number;
+  /** tx_hashes in the order classifyTxHash was invoked (asserts newest-first). */
+  classifiedOrder: string[];
 }
 
 function makeFakeProvider(initialHistory: TxHistoryItem[]): {
@@ -33,6 +35,7 @@ function makeFakeProvider(initialHistory: TxHistoryItem[]): {
     history: initialHistory,
     classifyCalls: 0,
     historyCalls: 0,
+    classifiedOrder: [],
   };
   const provider: TransactionCacheProvider = {
     async getAddressHistory(): Promise<TxHistoryItem[]> {
@@ -41,6 +44,7 @@ function makeFakeProvider(initialHistory: TxHistoryItem[]): {
     },
     async classifyTxHash(_address, txHash, height): Promise<LiveTransaction | null> {
       state.classifyCalls++;
+      state.classifiedOrder.push(txHash);
       return {
         txid: txHash,
         asset: 'SATORIEVR',
@@ -57,9 +61,20 @@ function makeFakeProvider(initialHistory: TxHistoryItem[]): {
   return { provider, state };
 }
 
+let storage: MemoryStorageAdapter;
 beforeEach(() => {
-  setStorageForTests(new MemoryStorageAdapter());
+  storage = new MemoryStorageAdapter();
+  setStorageForTests(storage);
 });
+
+/** Build N distinct confirmed history items with STRICTLY DESCENDING heights, so
+ *  the id order (h<N>..h1) is the same order refreshTransactionCache should
+ *  classify them in (newest-first). */
+function makeHistory(n: number): TxHistoryItem[] {
+  const items: TxHistoryItem[] = [];
+  for (let i = 1; i <= n; i++) items.push({ tx_hash: `h${i}`, height: i });
+  return items;
+}
 
 describe('txCache', () => {
   it('getCachedTransactions returns [] when nothing is cached', async () => {
@@ -192,5 +207,118 @@ describe('txCache', () => {
 
     // t1 survives; the failed tBad is simply omitted (retried next refresh).
     expect(second.map((t) => t.txid)).toEqual(['t1']);
+  });
+
+  it('classifies the delta NEWEST-first (mempool, then height descending)', async () => {
+    // Deliberately give history in an out-of-order shape (old, mempool, new) to
+    // prove the classifier re-orders it rather than following history order.
+    const { provider, state } = makeFakeProvider([
+      { tx_hash: 'old', height: 10 },
+      { tx_hash: 'mempool', height: 0 },
+      { tx_hash: 'newer', height: 300 },
+      { tx_hash: 'newest', height: 500 },
+    ]);
+
+    await refreshTransactionCache(ADDR, provider);
+
+    // Mempool first, then confirmed by height DESC.
+    expect(state.classifiedOrder).toEqual(['mempool', 'newest', 'newer', 'old']);
+  });
+
+  it('CHECKPOINTS the cache mid-run (persists every 20 classified, not only at end)', async () => {
+    // 45 new txs => checkpoints after the 20th and 40th classified tx, plus the
+    // final write = 3 storage.set calls (the old serial code wrote exactly once).
+    const { provider } = makeFakeProvider(makeHistory(45));
+    const setSpy = vi.spyOn(storage, 'set');
+
+    await refreshTransactionCache(ADDR, provider);
+
+    expect(setSpy).toHaveBeenCalledTimes(3);
+    // The FIRST persisted checkpoint already holds 20 classified txs — proof the
+    // cache is durable mid-run, so an interruption resumes instead of restarting.
+    const firstEntry = setSpy.mock.calls[0][1] as { txs: LiveTransaction[] };
+    expect(firstEntry.txs).toHaveLength(20);
+    const lastEntry = setSpy.mock.calls[2][1] as { txs: LiveTransaction[] };
+    expect(lastEntry.txs).toHaveLength(45);
+  });
+
+  it('a checkpointed run RESUMES: a crash after a checkpoint re-classifies only the rest', async () => {
+    // First run: classify only the first 20 (fail hard after that) to simulate an
+    // interruption right after the first checkpoint.
+    const { provider, state } = makeFakeProvider(makeHistory(45));
+    let allow = 20;
+    const original = provider.classifyTxHash.bind(provider);
+    provider.classifyTxHash = async (a, h, height) => {
+      if (allow-- <= 0) throw new Error('interrupted');
+      return original(a, h, height);
+    };
+    await refreshTransactionCache(ADDR, provider).catch(() => {});
+    // 20 succeeded and were checkpointed; the rest threw (swallowed per-tx).
+    const cached = await getCachedTransactions(ADDR);
+    expect(cached.length).toBeGreaterThanOrEqual(20);
+
+    // Second run with a healthy provider: only the NOT-yet-classified txs run.
+    const before = state.classifyCalls;
+    provider.classifyTxHash = original;
+    const result = await refreshTransactionCache(ADDR, provider);
+    // The 20 already-known txs are NOT re-classified; only the remaining 25 are.
+    expect(state.classifyCalls - before).toBe(25);
+    expect(result).toHaveLength(45);
+  });
+
+  it('reports progress via onProgress: (0,total) first, then after each batch, ending (total,total)', async () => {
+    const { provider } = makeFakeProvider(makeHistory(45));
+    const calls: Array<[number, number]> = [];
+
+    await refreshTransactionCache(ADDR, provider, (done, total) => calls.push([done, total]));
+
+    // One priming (0,total) call, then one per batch of 5 (ceil(45/5) = 9).
+    expect(calls).toHaveLength(10);
+    expect(calls[0]).toEqual([0, 45]);
+    expect(calls[calls.length - 1]).toEqual([45, 45]);
+    // done is monotonically non-decreasing and never exceeds total.
+    for (let i = 1; i < calls.length; i++) {
+      expect(calls[i][0]).toBeGreaterThanOrEqual(calls[i - 1][0]);
+      expect(calls[i][0]).toBeLessThanOrEqual(45);
+    }
+  });
+
+  it('does not call onProgress at all when there is nothing to classify', async () => {
+    const { provider } = makeFakeProvider(makeHistory(3));
+    await refreshTransactionCache(ADDR, provider); // first run classifies the 3
+
+    const calls: Array<[number, number]> = [];
+    // Identical history => no delta => total 0 => no progress calls.
+    await refreshTransactionCache(ADDR, provider, (done, total) => calls.push([done, total]));
+    expect(calls).toHaveLength(0);
+  });
+
+  it('one failing tx in a batch does not block the other txs in the same batch', async () => {
+    // Batch size is 5; put a thrower in the middle of the first batch.
+    const { provider } = makeFakeProvider([
+      { tx_hash: 'a', height: 5 },
+      { tx_hash: 'b', height: 4 },
+      { tx_hash: 'boom', height: 3 },
+      { tx_hash: 'c', height: 2 },
+      { tx_hash: 'd', height: 1 },
+    ]);
+    provider.classifyTxHash = async (_a, txHash, height) => {
+      if (txHash === 'boom') throw new Error('classify boom');
+      return {
+        txid: txHash,
+        asset: 'SATORIEVR',
+        direction: 'in',
+        amount: 1,
+        feeEvr: 0,
+        status: height > 0 ? 'confirmed' : 'pending',
+        blockHeight: height > 0 ? height : undefined,
+        timestamp: 1_700_000_000_000,
+        counterparty: 'EcounterpartyAddress00000000000000',
+      };
+    };
+
+    const result = await refreshTransactionCache(ADDR, provider);
+    // Every sibling of the failed tx still classified; only 'boom' is missing.
+    expect(result.map((t) => t.txid).sort()).toEqual(['a', 'b', 'c', 'd']);
   });
 });

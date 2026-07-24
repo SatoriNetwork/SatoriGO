@@ -277,6 +277,56 @@ describe('verifyInputAmounts — ASSET inputs (nValue=0, amount in the script)',
   });
 });
 
+describe('verifyInputAmounts — cross-chain marker family (fail closed)', () => {
+  const AMT = 20_547_945_205n;
+  const rvntScript = bytesToHex(buildTransferAssetScriptFromHash160(HASH160, 'SATORI', AMT, 'rvn'));
+  const evrtScript = bytesToHex(buildTransferAssetScriptFromHash160(HASH160, 'SATORI', AMT, 'evr'));
+
+  it('accepts an rvnt prevout when verifying as the rvn family', async () => {
+    const raws = new Map<string, string>();
+    const raw = rawTxOuts('c'.repeat(64), [{ value: 0n, scriptHex: rvntScript }]);
+    const id = computeTxid(raw);
+    raws.set(id, raw);
+    await expect(
+      verifyInputAmounts(
+        txGetClient(raws),
+        [{ txid: id, vout: 0, valueSats: AMT, scriptPubKeyHex: rvntScript, kind: 'asset' }],
+        'rvn',
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it('REJECTS an evrt prevout while the wallet is sending on RVN (rvnt claimed, verify as rvn)', async () => {
+    const raws = new Map<string, string>();
+    // On-chain prevout is an Evrmore ("evrt") output; the RVN wallet built an
+    // "rvnt" claimed script and verifies as 'rvn'. The wrong-family on-chain
+    // script decodes to null under 'rvn' -> fail closed.
+    const raw = rawTxOuts('d'.repeat(64), [{ value: 0n, scriptHex: evrtScript }]);
+    const id = computeTxid(raw);
+    raws.set(id, raw);
+    await expect(
+      verifyInputAmounts(
+        txGetClient(raws),
+        [{ txid: id, vout: 0, valueSats: AMT, scriptPubKeyHex: rvntScript, kind: 'asset' }],
+        'rvn',
+      ),
+    ).rejects.toThrow('input-verify-failed');
+  });
+
+  it('REJECTS an rvnt prevout while the wallet is sending on EVR (evrt claimed, verify as evr default)', async () => {
+    const raws = new Map<string, string>();
+    const raw = rawTxOuts('e'.repeat(64), [{ value: 0n, scriptHex: rvntScript }]);
+    const id = computeTxid(raw);
+    raws.set(id, raw);
+    // Default prefix is 'evr' — an rvnt on-chain output decodes to null under it.
+    await expect(
+      verifyInputAmounts(txGetClient(raws), [
+        { txid: id, vout: 0, valueSats: AMT, scriptPubKeyHex: evrtScript, kind: 'asset' },
+      ]),
+    ).rejects.toThrow('input-verify-failed');
+  });
+});
+
 // --- KNOWN-ANSWER: a REAL on-chain SATORI transfer output ---------------------
 // Fetched live from the Evrmore chain on 2026-07-13 (scripts/verify-utxo-probe.ts):
 //   txid  3bac2c022f35a0657e17f4d5ab758d5b107142462f7ad49f3ea93fd0fff4cec6

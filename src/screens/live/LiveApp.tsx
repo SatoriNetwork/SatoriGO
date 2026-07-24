@@ -2,7 +2,7 @@
 // Mounted directly by App.tsx once display settings + branding have loaded.
 
 import { useEffect, useState } from 'react';
-import { useLiveStore, computeDisplayedAssets } from '../../store/liveStore';
+import { useLiveStore, computeDisplayedAssets, stakingSupported } from '../../store/liveStore';
 import { LiveOnboarding } from './LiveOnboarding';
 import { LiveLock } from './LiveLock';
 import { LiveHome } from './LiveHome';
@@ -120,6 +120,16 @@ export function LiveApp() {
     document.addEventListener('keydown', touch);
     document.addEventListener('visibilitychange', onVisible);
     const interval = setInterval(() => {
+      // Hold the auto-lock while the wallet runs its FIRST full sync: that sync is
+      // watch-only, and locking mid-sync clears address/txs and discards in-flight
+      // progress — confusing for a user who is just passively waiting for the
+      // balance to appear. Read the CURRENT store state (not a captured value, to
+      // avoid a new effect dependency) and refresh activity so the idle timer
+      // resumes cleanly once the sync completes.
+      if (useLiveStore.getState().syncing === 'initial') {
+        lastActivity = Date.now();
+        return;
+      }
       if (Date.now() - lastActivity >= idleMs) lock();
     }, 10_000);
 
@@ -234,6 +244,10 @@ export function LiveApp() {
   }
 
   if (subView.name === 'staking') {
+    // Cheap guard: staking is Evrmore-only (SATORIEVR). A stale/forced navigation
+    // to this route on a Ravencoin wallet (the Stake action itself is never shown
+    // there) degrades to home instead of rendering a broken/inert screen.
+    if (!stakingSupported()) return wrap(home);
     return wrap(<LiveStaking onBack={() => setSubView({ name: 'asset', asset: 'SATORIEVR' })} />);
   }
 
@@ -246,10 +260,10 @@ export function LiveApp() {
     const selected = displayAssets.find((a) => a.name === subView.asset);
     // If the asset is gone (e.g. removed while viewing), fall back to home.
     if (!selected) return wrap(home);
-    // Staking is offered ONLY for SATORIEVR on mainnet (all wallets here are
-    // mainnet, but gate explicitly so a future testnet wallet never shows it).
-    const activeNetwork = wallets.find((w) => w.id === activeWalletId)?.network ?? 'mainnet';
-    const canStake = selected.name === 'SATORIEVR' && activeNetwork === 'mainnet';
+    // Staking is offered ONLY for SATORIEVR, and only on a chain where staking
+    // applies at all (Evrmore; SATORIEVR does not exist on Ravencoin). Uses the
+    // store's own chain check so this can never drift from the store's refusal.
+    const canStake = selected.name === 'SATORIEVR' && stakingSupported();
     return wrap(
       <LiveAssetDetail
         asset={selected}

@@ -3,7 +3,7 @@ import { Check, Lock } from 'lucide-react';
 import { Button } from '../../components/Button';
 import { PasswordField } from '../../components/TextField';
 import { BrandLogo } from '../../components/BrandLogo';
-import { useLiveStore } from '../../store/liveStore';
+import { useLiveStore, nativeTickerFor } from '../../store/liveStore';
 
 type LiveLockProps = Record<string, never>;
 
@@ -125,7 +125,9 @@ export function LiveLock(_props: LiveLockProps) {
           </div>
         </div>
         <h2>Live Wallet Locked</h2>
-        <p className="lock-account">{activeWallet?.name ?? 'Real EVRmore Network'}</p>
+        <p className="lock-account">
+          {activeWallet?.name ?? (nativeTickerFor() === 'RVN' ? 'Real Ravencoin Network' : 'Real EVRmore Network')}
+        </p>
 
         {/* Wallet picker: the LAST-USED (active) wallet is preselected; picking
             another one switches to it while staying on this lock screen. */}
@@ -143,12 +145,22 @@ export function LiveLock(_props: LiveLockProps) {
                   data-testid={`live-lock-wallet-${i}`}
                 >
                   {w.kind === 'pk' && <BrandLogo slot="satori" size={16} alt="Satori" />}
+                  {w.network === 'ravencoin-mainnet' && <BrandLogo slot="rvn" size={16} alt="RVN" />}
                   <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {w.name}
                   </span>
                   <span className="chip neutral" style={{ fontSize: 8.5, padding: '1px 4px', flexShrink: 0 }}>
                     {w.kind === 'pk' ? 'Satori' : 'Seed'}
                   </span>
+                  {w.network === 'ravencoin-mainnet' && (
+                    <span
+                      className="chip neutral"
+                      data-testid={`live-lock-wallet-chain-${i}`}
+                      style={{ fontSize: 8.5, padding: '1px 4px', flexShrink: 0 }}
+                    >
+                      RVN
+                    </span>
+                  )}
                   {w.passwordless && (
                     <span className="chip warning" style={{ fontSize: 8.5, padding: '1px 4px', flexShrink: 0 }}>No pw</span>
                   )}

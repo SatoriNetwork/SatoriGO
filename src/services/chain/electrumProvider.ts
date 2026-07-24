@@ -22,6 +22,7 @@ import type {
 } from './electrumTypes';
 import { addressToElectrumScripthash } from './keys';
 import { ELECTRUM_METHODS, SATORI_ASSET } from './network';
+import { EVRMORE_MAINNET, type EvrmoreNetwork } from './chainParams';
 
 // ---------------------------------------------------------------------------
 // Dynamic (MetaMask-style) asset detection types + helpers.
@@ -118,8 +119,9 @@ interface ElectrumAssetMeta {
   ipfs?: string;
 }
 
-/** Public display name of the native coin. */
-const NATIVE_ASSET_NAME = 'EVR';
+/** Decimal places of the native coin (EVR and RVN both use 8). The native NAME is
+ *  per-instance and comes from the wallet's network (net.ticker: 'EVR' on Evrmore,
+ *  'RVN' on Ravencoin) — see ElectrumWalletDataProvider.nativeName. */
 const NATIVE_DECIMALS = 8;
 /** Evrmore asset amounts — EVR AND every issued asset — are ALWAYS stored on-chain
  *  in 1e8 base units (like satoshis), regardless of the asset's `divisions`.
@@ -229,13 +231,36 @@ function sortHistoryMempoolFirst<T extends { height: number }>(items: T[]): T[] 
 
 export interface ElectrumProviderOptions {
   networkId?: NetworkId;
+  /** The wallet's chain params. Drives the native ticker/name (net.ticker) and
+   *  whether Evrmore-only assets like SATORI are reported. Defaults to Evrmore
+   *  mainnet, so existing callers behave byte-identically. */
+  network?: EvrmoreNetwork;
   prices?: Partial<Record<AssetId, { priceUsd: number; change24hPct: number }>>;
 }
 
 export class ElectrumWalletDataProvider implements WalletDataProvider {
   private readonly client: ElectrumClient;
   private readonly networkId: NetworkId;
+  /** Active chain params. Mutable via setNetwork() so a single shared provider
+   *  follows the active wallet's chain (the live service retargets it on switch). */
+  private net: EvrmoreNetwork;
   private readonly prices: Partial<Record<AssetId, { priceUsd: number; change24hPct: number }>>;
+
+  /** Native coin name for the ACTIVE chain ('EVR' / 'RVN'). */
+  private get nativeName(): string {
+    return this.net.ticker;
+  }
+
+  /** True on an Evrmore chain, false on Ravencoin. Gates Evrmore-only behavior
+   *  (the built-in SATORI row/queries, the SATORI tx special-case). */
+  private get isEvrmore(): boolean {
+    return this.net.ticker === 'EVR';
+  }
+
+  /** Retarget the active chain (Evrmore vs Ravencoin) for a shared provider. */
+  setNetwork(net: EvrmoreNetwork): void {
+    this.net = net;
+  }
 
   // Cache the server version string from the handshake (if available).
   private cachedServerVersion = 'ElectrumX Evrmore';
@@ -244,9 +269,21 @@ export class ElectrumWalletDataProvider implements WalletDataProvider {
   // during getAllAssetBalances don't refetch get_meta for the same asset.
   private readonly metaCache = new Map<string, LiveAssetMeta>();
 
+  // Bounded in-memory memo of verbose txs (txid -> VerboseTx). Prevout lookups
+  // during classification are the dominant cost of a big first sync, and in a
+  // pool-reward wallet each tx's prevout is usually the PREVIOUS wallet tx we
+  // just fetched — so memoizing verbose txs roughly halves round-trips. Prevout
+  // outputs are immutable, so a cached verbose tx is always safe to reuse for
+  // them (the only volatile field, `time`, is unused by prevout tallying).
+  // Simple LRU-ish: re-inserting refreshes recency; the oldest insertion is
+  // evicted once the cap is exceeded. Bounded so it can't grow without limit.
+  private readonly verboseTxCache = new Map<string, VerboseTx>();
+  private static readonly VERBOSE_TX_CACHE_CAP = 500;
+
   constructor(client: ElectrumClient, opts?: ElectrumProviderOptions) {
     this.client = client;
     this.networkId = opts?.networkId ?? 'mainnet';
+    this.net = opts?.network ?? EVRMORE_MAINNET;
     this.prices = opts?.prices ?? {};
   }
 
@@ -255,17 +292,30 @@ export class ElectrumWalletDataProvider implements WalletDataProvider {
 
   async getAssets(): Promise<Asset[]> {
     const evrPrice = this.prices['EVR'] ?? { priceUsd: 0, change24hPct: 0 };
-    const satPrice = this.prices['SATORI'] ?? { priceUsd: 0, change24hPct: 0 };
 
+    const native: Asset = {
+      // Native id/symbol/name follow the active chain (EVR / RVN). The domain
+      // AssetId union predates multichain, so a non-'EVR' native id is cast.
+      id: this.nativeName as AssetId,
+      symbol: this.nativeName,
+      name: this.net.displayName,
+      kind: 'native',
+      decimals: 8,
+      priceUsd: evrPrice.priceUsd,
+      change24hPct: evrPrice.change24hPct,
+      description: `Native coin of the ${this.net.displayName} chain. Pays transaction fees for every transfer, including assets.`,
+    };
+
+    // Ravencoin has no SATORI row: return ONLY the native coin.
+    if (!this.isEvrmore) return [native];
+
+    const satPrice = this.prices['SATORI'] ?? { priceUsd: 0, change24hPct: 0 };
     return [
       {
+        ...native,
         id: 'EVR',
         symbol: 'EVR',
         name: 'EVRmore',
-        kind: 'native',
-        decimals: 8,
-        priceUsd: evrPrice.priceUsd,
-        change24hPct: evrPrice.change24hPct,
         description:
           'Native coin of the EVRmore chain. Pays transaction fees for every transfer, including EVRmore assets.',
       },
@@ -343,6 +393,13 @@ export class ElectrumWalletDataProvider implements WalletDataProvider {
 
       const sh = addressToElectrumScripthash(address);
 
+      // Ravencoin: native only. Never query 'SATORI' (an Evrmore-only asset).
+      if (!this.isEvrmore) {
+        const bal = await this.client.request<ElectrumBalance>(ELECTRUM_METHODS.getBalance, [sh]);
+        const amount = ((bal.confirmed ?? 0) + (bal.unconfirmed ?? 0)) / 1e8;
+        return [{ assetId: this.nativeName as AssetId, amount }];
+      }
+
       const [evrBalance, satoriBalance] = await Promise.all([
         this.client.request<ElectrumBalance>(ELECTRUM_METHODS.getBalance, [sh]),
         this.client.request<ElectrumBalance>(ELECTRUM_METHODS.getBalance, [sh, 'SATORI']),
@@ -391,10 +448,11 @@ export class ElectrumWalletDataProvider implements WalletDataProvider {
         }
       }
 
-      // EVR is always present (even at 0) and listed first.
+      // The native coin is always present (even at 0) and listed first. Its NAME
+      // follows the active chain (EVR / RVN).
       const results: LiveAssetBalance[] = [
         {
-          name: NATIVE_ASSET_NAME,
+          name: this.nativeName,
           amount: evrSats / ASSET_BASE_UNIT,
           decimals: NATIVE_DECIMALS,
           isNative: true,
@@ -586,8 +644,43 @@ export class ElectrumWalletDataProvider implements WalletDataProvider {
     if (!this.client.isConnected()) {
       await this.client.connect();
     }
-    const tx = await this.client.request<VerboseTx>(ELECTRUM_METHODS.txGet, [txHash, true]);
+    let tx: VerboseTx;
+    if (height > 0) {
+      // Confirmed tx: immutable, so the memo is safe (and usually a hit on a
+      // later tx's prevout lookup). Fetch-through the memo.
+      tx = await this.fetchVerboseTx(txHash);
+    } else {
+      // Mempool tx (height<=0): its confirmation can still change, so always
+      // fetch fresh and OVERWRITE any stale memo entry.
+      tx = await this.client.request<VerboseTx>(ELECTRUM_METHODS.txGet, [txHash, true]);
+      this.cacheVerboseTx(tx);
+    }
     return this.classifyLive(tx, address, height);
+  }
+
+  // -------------------------------------------------------------------------
+  // Private: bounded verbose-tx memo (see verboseTxCache above).
+
+  /** Fetch a verbose tx through the memo: a hit returns the cached copy, a miss
+   *  fetches once and caches it. Only use for immutable reads (prevouts, and
+   *  confirmed main txs) — never for a mempool main tx (see classifyTxHash). */
+  private async fetchVerboseTx(txid: string): Promise<VerboseTx> {
+    const cached = this.verboseTxCache.get(txid);
+    if (cached) return cached;
+    const tx = await this.client.request<VerboseTx>(ELECTRUM_METHODS.txGet, [txid, true]);
+    this.cacheVerboseTx(tx);
+    return tx;
+  }
+
+  /** Insert/refresh a verbose tx in the memo, evicting the oldest entry once the
+   *  cap is exceeded. Re-inserting an existing key refreshes its recency. */
+  private cacheVerboseTx(tx: VerboseTx): void {
+    if (this.verboseTxCache.has(tx.txid)) this.verboseTxCache.delete(tx.txid);
+    this.verboseTxCache.set(tx.txid, tx);
+    if (this.verboseTxCache.size > ElectrumWalletDataProvider.VERBOSE_TX_CACHE_CAP) {
+      const oldest = this.verboseTxCache.keys().next().value;
+      if (oldest !== undefined) this.verboseTxCache.delete(oldest);
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -615,7 +708,7 @@ export class ElectrumWalletDataProvider implements WalletDataProvider {
 
     for (const vout of tx.vout) {
       if (!voutPaysTo(vout.scriptPubKey, address)) continue;
-      if (vout.scriptPubKey.asset && vout.scriptPubKey.asset.name === SATORI_ASSET.name) {
+      if (this.isEvrmore && vout.scriptPubKey.asset && vout.scriptPubKey.asset.name === SATORI_ASSET.name) {
         // Asset output: amount is already in the asset's decimal units (per Evrmore verbose tx).
         receivedSatori += vout.scriptPubKey.asset.amount;
       } else {
@@ -639,15 +732,14 @@ export class ElectrumWalletDataProvider implements WalletDataProvider {
     for (const vin of tx.vin) {
       if (!vin.txid || vin.vout === undefined) continue; // coinbase
       try {
-        const prevTx = await this.client.request<VerboseTx>(ELECTRUM_METHODS.txGet, [
-          vin.txid,
-          true,
-        ]);
+        // Prevout outputs are immutable — always read through the memo.
+        const prevTx = await this.fetchVerboseTx(vin.txid);
         const prevVout = prevTx.vout[vin.vout];
         if (!prevVout) continue;
         if (!voutPaysTo(prevVout.scriptPubKey, address)) continue;
 
         if (
+          this.isEvrmore &&
           prevVout.scriptPubKey.asset &&
           prevVout.scriptPubKey.asset.name === SATORI_ASSET.name
         ) {
@@ -674,7 +766,9 @@ export class ElectrumWalletDataProvider implements WalletDataProvider {
       amount = Math.abs(netSatori);
       direction = netSatori >= 0 ? 'in' : 'out';
     } else if (Math.abs(netEvr) > 1e-9) {
-      assetId = 'EVR';
+      // Native coin of the active chain (EVR / RVN). The domain AssetId union
+      // predates multichain, so a non-'EVR' native id is cast.
+      assetId = this.nativeName as AssetId;
       amount = Math.abs(netEvr);
       direction = netEvr >= 0 ? 'in' : 'out';
     } else {
@@ -746,10 +840,8 @@ export class ElectrumWalletDataProvider implements WalletDataProvider {
     for (const vin of tx.vin) {
       if (!vin.txid || vin.vout === undefined) continue; // coinbase
       try {
-        const prevTx = await this.client.request<VerboseTx>(ELECTRUM_METHODS.txGet, [
-          vin.txid,
-          true,
-        ]);
+        // Prevout outputs are immutable — always read through the memo.
+        const prevTx = await this.fetchVerboseTx(vin.txid);
         const prevVout = prevTx.vout[vin.vout];
         if (!prevVout) continue;
         if (!voutPaysTo(prevVout.scriptPubKey, address)) continue;
@@ -788,7 +880,7 @@ export class ElectrumWalletDataProvider implements WalletDataProvider {
       amount = Math.abs(dominantNet);
       direction = dominantNet >= 0 ? 'in' : 'out';
     } else if (Math.abs(netEvr) > EPS) {
-      asset = NATIVE_ASSET_NAME;
+      asset = this.nativeName;
       amount = Math.abs(netEvr);
       direction = netEvr >= 0 ? 'in' : 'out';
     } else {

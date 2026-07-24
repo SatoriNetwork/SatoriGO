@@ -3,9 +3,10 @@ import { LiveWalletService, BroadcastGatedError } from './liveWallet';
 import { MemoryStorageAdapter, setStorageForTests, getStorage } from '../storage';
 import { ELECTRUM_METHODS } from './network';
 import { deriveAddress, mnemonicToSeed, decodeWif, addressToHash160, p2pkhScript } from './keys';
-import { EVRMORE_MAINNET } from './chainParams';
+import { EVRMORE_MAINNET, RAVENCOIN_MAINNET } from './chainParams';
 import { createVault } from './vault';
 import { buildTransferAssetScriptFromHash160 } from './assetScript';
+import { verifyMessage } from './message';
 import type { ElectrumClient } from './electrumTypes';
 import { txid as computeTxid } from './txBuilder';
 import { base58check } from '@scure/base';
@@ -373,6 +374,113 @@ describe('LiveWalletService', () => {
     const txid = await svc.broadcast(plan.built.rawHex);
     expect(txid).toBe(plan.built.txid);
     expect(client.broadcasted).toEqual([plan.built.rawHex]);
+  });
+
+  describe('broadcast outcome verification', () => {
+    // Arbitrary but well-formed hex; broadcast() only hashes it locally (txid)
+    // and hands it to the server — its transactional validity is irrelevant here.
+    const RAW_HEX = '0200000001' + 'ab'.repeat(60);
+    const EXPECTED_TXID = computeTxid(RAW_HEX);
+
+    /** A minimal ElectrumClient whose txBroadcast/txGet behaviour is fully
+     *  scripted, so each test can exercise a specific outcome path without
+     *  needing a real wallet/UTXO set (broadcast() never touches those). */
+    function outcomeClient(opts: {
+      broadcastError?: Error;
+      /** How many leading txGet calls throw "not found" before it succeeds.
+       *  Omit to always throw (never confirms). */
+      txGetSucceedsOnCall?: number;
+    }): ElectrumClient & { broadcastCalls: string[]; txGetCalls: string[] } {
+      const broadcastCalls: string[] = [];
+      const txGetCalls: string[] = [];
+      return {
+        broadcastCalls,
+        txGetCalls,
+        connect: async () => {},
+        isConnected: () => true,
+        endpoint: () => 'wss://fake',
+        close: () => {},
+        request: async (method: string, params: unknown[] = []) => {
+          if (method === ELECTRUM_METHODS.txBroadcast) {
+            broadcastCalls.push(params[0] as string);
+            if (opts.broadcastError) throw opts.broadcastError;
+            return computeTxid(params[0] as string) as never;
+          }
+          if (method === ELECTRUM_METHODS.txGet) {
+            txGetCalls.push(params[0] as string);
+            const succeedsOn = opts.txGetSucceedsOnCall;
+            if (succeedsOn !== undefined && txGetCalls.length >= succeedsOn) {
+              return '02000000...' as never; // raw hex; broadcast() only cares that this resolved
+            }
+            throw new Error('Electrum error: no such transaction (code 2)');
+          }
+          throw new Error(`unexpected method ${method}`);
+        },
+      };
+    }
+
+    it('(a) success path is unchanged: no polling on a clean broadcast', async () => {
+      const client = outcomeClient({});
+      const svc = new LiveWalletService(client, { broadcastPollDelaysMs: [1, 1, 1] });
+      svc.allowBroadcast = true;
+      const txid = await svc.broadcast(RAW_HEX);
+      expect(txid).toBe(EXPECTED_TXID);
+      expect(client.broadcastCalls).toEqual([RAW_HEX]);
+      expect(client.txGetCalls).toHaveLength(0); // no outcome check needed
+    });
+
+    it('(b) a clean code-1 rejection is rethrown immediately, with NO polling', async () => {
+      const rejection = new Error(
+        'Electrum error: the transaction was rejected by network rules.\n\ndust output (code 1)',
+      );
+      const client = outcomeClient({ broadcastError: rejection });
+      const svc = new LiveWalletService(client, { broadcastPollDelaysMs: [1, 1, 1] });
+      svc.allowBroadcast = true;
+      await expect(svc.broadcast(RAW_HEX)).rejects.toBe(rejection);
+      expect(client.txGetCalls).toHaveLength(0); // definitively "not sent" — never polls
+    });
+
+    it('(c) a -32603 crash followed by transaction.get finding the tx resolves with the txid', async () => {
+      const crash = new Error('Electrum error: internal server error (code -32603)');
+      // Confirms on the 2nd poll attempt: not found once, then found.
+      const client = outcomeClient({ broadcastError: crash, txGetSucceedsOnCall: 2 });
+      const svc = new LiveWalletService(client, { broadcastPollDelaysMs: [1, 1, 1, 1] });
+      svc.allowBroadcast = true;
+      const txid = await svc.broadcast(RAW_HEX);
+      // The send actually worked — resolves with success, not an error.
+      expect(txid).toBe(EXPECTED_TXID);
+      expect(client.txGetCalls.length).toBeGreaterThanOrEqual(2);
+    });
+
+    it('(d) a -32603 crash whose tx never appears throws broadcast-unconfirmed after the attempts', async () => {
+      const crash = new Error('Electrum error: internal server error (code -32603)');
+      // txGetSucceedsOnCall omitted: transaction.get always throws "not found".
+      const client = outcomeClient({ broadcastError: crash });
+      const delays = [1, 1, 1, 1, 1, 1, 1, 1]; // 8 attempts, matching the production count
+      const svc = new LiveWalletService(client, { broadcastPollDelaysMs: delays });
+      svc.allowBroadcast = true;
+      await expect(svc.broadcast(RAW_HEX)).rejects.toThrow('broadcast-unconfirmed');
+      expect(client.txGetCalls).toHaveLength(delays.length);
+    });
+
+    it('(e) the poll looks up the LOCALLY computed txid, never one from the server', async () => {
+      const crash = new Error('Electrum error: internal server error (code -32603)');
+      const client = outcomeClient({ broadcastError: crash, txGetSucceedsOnCall: 1 });
+      const svc = new LiveWalletService(client, { broadcastPollDelaysMs: [1] });
+      svc.allowBroadcast = true;
+      await svc.broadcast(RAW_HEX);
+      expect(client.txGetCalls).toEqual([EXPECTED_TXID]);
+      expect(EXPECTED_TXID).toBe(computeTxid(RAW_HEX)); // sanity: matches the raw hex's real hash
+    });
+
+    it('a timeout/connection-drop style error is also treated as UNKNOWN (polls, then confirms)', async () => {
+      const dropped = new Error('WebSocket closed with request pending');
+      const client = outcomeClient({ broadcastError: dropped, txGetSucceedsOnCall: 1 });
+      const svc = new LiveWalletService(client, { broadcastPollDelaysMs: [1] });
+      svc.allowBroadcast = true;
+      const txid = await svc.broadcast(RAW_HEX);
+      expect(txid).toBe(EXPECTED_TXID);
+    });
   });
 
   it('throws insufficient-funds when there are no UTXOs', async () => {
@@ -793,5 +901,53 @@ describe('LiveWalletService', () => {
     expect(await svc.exists()).toBe(false);
     expect(svc.activeWalletId()).toBe(null);
     expect(await getStorage().get('liveWallets')).toBeUndefined();
+  });
+
+  it("a 'ravencoin-mainnet' wallet round-trips from storage and derives R-addresses; a 'mainnet' wallet stays Evrmore", async () => {
+    const seed = await mnemonicToSeed(VECTOR_MNEMONIC);
+    const expectedRvn = deriveAddress(seed, RAVENCOIN_MAINNET, 0, 0, 0).address;
+    const expectedEvr = deriveAddress(seed, EVRMORE_MAINNET, 0, 0, 0).address;
+
+    // Import the SAME mnemonic once as Evrmore ('mainnet') and once as Ravencoin.
+    const svc = new LiveWalletService(fakeClient([]));
+    await svc.import(VECTOR_MNEMONIC, 'pw', 'mainnet', 'EVR wallet');
+    const evrId = svc.activeWalletId();
+    await svc.import(VECTOR_MNEMONIC, 'pw', 'ravencoin-mainnet', 'RVN wallet');
+    const rvnId = svc.activeWalletId();
+
+    // Active wallet is now the RVN one: net follows the wallet.
+    expect(svc.network()).toBe('ravencoin-mainnet');
+    expect(svc.getAddress(0)).toBe(expectedRvn);
+    expect(expectedRvn[0]).toBe('R');
+
+    // listWallets reports the canonical stored ids (no rewrite of legacy 'mainnet').
+    const list = await svc.listWallets();
+    expect(list.find((w) => w.id === rvnId)!.network).toBe('ravencoin-mainnet');
+    expect(list.find((w) => w.id === evrId)!.network).toBe('mainnet');
+    expect(list.find((w) => w.id === rvnId)!.address).toBe(expectedRvn);
+    expect(list.find((w) => w.id === evrId)!.address).toBe(expectedEvr);
+
+    // Round-trip through storage: a FRESH service instance reads the persisted
+    // store, makes the active chain follow the active (RVN) wallet on load, and
+    // after unlock derives the R-address.
+    const svc2 = new LiveWalletService(fakeClient([]));
+    expect(await svc2.exists()).toBe(true);
+    expect(svc2.network()).toBe('ravencoin-mainnet'); // set on loadStore, before unlock
+    expect(await svc2.unlock('pw')).toBe(true);
+    expect(svc2.getAddress(0)).toBe(expectedRvn);
+
+    // signMessage on the active RVN wallet uses the Raven magic end-to-end: the
+    // signature verifies to the R-address under RAVENCOIN_MAINNET.
+    const { address, signature } = svc2.signMessage('login-rvn');
+    expect(address).toBe(expectedRvn);
+    expect(verifyMessage(address, 'login-rvn', signature, RAVENCOIN_MAINNET)).toBe(true);
+    expect(verifyMessage(address, 'login-rvn', signature, EVRMORE_MAINNET)).toBe(false);
+
+    // Switch back to the Evrmore wallet: the active chain follows it, E-address.
+    await svc2.switchWallet(evrId!);
+    expect(svc2.network()).toBe('mainnet');
+    expect(await svc2.unlock('pw')).toBe(true);
+    expect(svc2.getAddress(0)).toBe(expectedEvr);
+    expect(expectedEvr[0]).toBe('E');
   });
 });

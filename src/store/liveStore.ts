@@ -6,20 +6,23 @@ import { create } from 'zustand';
 import {
   LiveWalletService,
   BroadcastGatedError,
+  type LiveNetworkId,
   type LiveSendPlan,
   type WalletSummary,
 } from '../services/chain/liveWallet';
 import { getStorage } from '../services/storage';
 import { fetchPrices } from '../services/prices';
 import { isValidAddress } from '../services/chain/keys';
+import { networkFor } from '../services/chain/chainParams';
 import { checkElectrumServer } from '../services/chain/electrumClient';
 import {
   DEFAULT_ELECTRUM_SERVER_URLS,
   ELECTRUM_SERVERS_STORAGE_KEY,
+  electrumServersStorageKey,
+  defaultServerUrlsFor,
   parseServerUrl,
   serverToUrl,
   setElectrumServers,
-  applyStoredElectrumServers,
   type ElectrumEndpoint,
 } from '../services/chain/network';
 import type {
@@ -46,6 +49,52 @@ import {
 
 // Module-level singleton — one service, one connection.
 const svc = new LiveWalletService();
+
+/** The active wallet's chain id (LiveNetworkId). Everything chain-dependent
+ *  (native ticker, protected assets, server pool, explorer, price) reads this so
+ *  it follows the active wallet. Exported so UI code (which chain is Send/Receive/
+ *  Settings operating on right now) can read the same source of truth instead of
+ *  re-deriving it from `wallets`/`activeWalletId` themselves. */
+export function activeChainId(): LiveNetworkId {
+  return svc.network();
+}
+
+/** Native coin ticker ('EVR' / 'RVN') of a chain (default = active chain).
+ *  Exported for chain-aware UI labels (fee notes, error text, unit suffixes). */
+export function nativeTickerFor(chainId: string = activeChainId()): 'EVR' | 'RVN' {
+  return networkFor(chainId as LiveNetworkId).ticker;
+}
+
+/** Whether `assetId` names the chain's NATIVE coin (EVR on Evrmore, RVN on
+ *  Ravencoin) rather than an issued asset. Send dispatch MUST use this, never a
+ *  hardcoded ticker: on a Ravencoin wallet the native coin arrives as 'RVN', and a
+ *  literal `=== 'EVR'` check routed it down the ASSET path, asking the chain for
+ *  an asset named "RVN" (which does not exist -> unknown-asset at review). */
+export function isNativeAssetId(assetId: string, chainId: string = activeChainId()): boolean {
+  return assetId.trim().toUpperCase() === nativeTickerFor(chainId);
+}
+
+/** Wallets that live on the SAME chain as `chainId` (default = active chain).
+ *
+ *  RULE (owner, applies to every future chain): cross-chain sends are impossible.
+ *  An R... wallet cannot receive EVR and an E... wallet cannot receive RVN, so
+ *  EVERY recipient picker (the My-wallets quick-pick, the address book, any
+ *  future suggestion UI) must be scoped to the active wallet's chain with this
+ *  helper, not shown unfiltered. */
+export function walletsOnChain<T extends { network: string }>(
+  wallets: T[],
+  chainId: string = activeChainId(),
+): T[] {
+  const chain = networkFor(chainId as LiveNetworkId).chainId;
+  return wallets.filter((w) => networkFor(w.network as LiveNetworkId).chainId === chain);
+}
+
+/** Whether Satori pool staking applies on this chain. SATORIEVR is an Evrmore
+ *  asset, so staking is Evrmore-only; it is inert on Ravencoin. Exported so the
+ *  UI can hide/guard the Stake action without re-deriving the chain check. */
+export function stakingSupported(chainId: string = activeChainId()): boolean {
+  return nativeTickerFor(chainId) === 'EVR';
+}
 
 /** The SATORIEVR asset name — the ONLY asset eligible for Satori pool staking. */
 const STAKING_ASSET = 'SATORIEVR';
@@ -197,11 +246,30 @@ export interface StakingState {
   loaded: boolean;
 }
 
-/** Default block-explorer URL template. `{txid}` is replaced with the real txid. */
+/** Default EVRMORE block-explorer URL template. `{txid}` is replaced with the
+ *  real txid. */
 export const DEFAULT_EXPLORER_URL = 'https://cryptoscope.io/evrmore/tx/?txid={txid}';
 
-/** The native coin — always shown first and never hideable/removable. */
-const NATIVE = 'EVR';
+/** Default RAVENCOIN block-explorer URL template. Sister site of the Evrmore
+ *  default (cryptoscope.io). VERIFIED LIVE 2026-07-21 with curl against the real
+ *  txid d88d5229636e92f6602ec9d9ed8496198721e048ea49b63a25ddfe5aa126f2f6 (block
+ *  4463131): https://cryptoscope.io/rvn/tx/?txid=<txid> answers HTTP 200 and the
+ *  page contains that txid and block height. (https://rvn.cryptoscope.io/tx/?txid=
+ *  301-redirects to this canonical /rvn/ URL, so we use the canonical form.) */
+export const DEFAULT_EXPLORER_URL_RVN = 'https://cryptoscope.io/rvn/tx/?txid={txid}';
+
+/** Block-explorer template default for a chain (default = active chain). */
+function defaultExplorerFor(chainId: string = activeChainId()): string {
+  return nativeTickerFor(chainId) === 'RVN' ? DEFAULT_EXPLORER_URL_RVN : DEFAULT_EXPLORER_URL;
+}
+
+/** Per-chain storage key for the user-editable explorer template. Evrmore keeps
+ *  the legacy bare key ('explorerUrlTemplate'); Ravencoin is suffixed. */
+function explorerKeyForChain(chainId: string = activeChainId()): string {
+  return nativeTickerFor(chainId) === 'RVN'
+    ? `${EXPLORER_URL_KEY}:ravencoin-mainnet`
+    : EXPLORER_URL_KEY;
+}
 
 /** Auto-refresh cadence for the quiet background poll. */
 const AUTO_REFRESH_MS = 20_000;
@@ -215,14 +283,15 @@ function persistList(key: string, value: string[]): void {
   }
 }
 
-/** Parse a list of wss:// URLs and make them the ACTIVE Electrum pool (an empty
- *  or all-invalid list falls back to the built-in defaults). Applied synchronously
- *  so a following reconnect/refresh already uses the new pool (no storage race). */
-function activateServerUrls(urls: string[]): void {
+/** Parse a list of wss:// URLs and make them the given CHAIN's Electrum pool (an
+ *  empty or all-invalid list falls back to that chain's built-in defaults).
+ *  Applied synchronously so a following reconnect/refresh already uses the new
+ *  pool (no storage race). Default chain = the active chain. */
+function activateServerUrls(urls: string[], chainId: string = activeChainId()): void {
   const parsed = urls
     .map(parseServerUrl)
     .filter((ep): ep is ElectrumEndpoint => ep !== null);
-  setElectrumServers(parsed.length > 0 ? parsed : null);
+  setElectrumServers(parsed.length > 0 ? parsed : null, chainId);
 }
 
 /** Read a persisted string list; empty array on a fresh install / error. */
@@ -279,28 +348,42 @@ async function readAddressBook(): Promise<Contact[]> {
 }
 
 /**
- * The two assets this wallet is FOR. They are always shown and can never be removed:
- * EVR because it is the coin that pays every fee, SATORIEVR because Satori GO is a
- * Satori-Network wallet. Neither shows a remove control anywhere in the UI, and
- * `removeAsset` refuses them even if called directly.
+ * The assets a wallet is FOR, per chain. Always shown, never removable:
+ *  - Evrmore: EVR (pays every fee) + SATORIEVR (Satori GO is a Satori-Network
+ *    wallet). Neither shows a remove control; `removeAsset` refuses them.
+ *  - Ravencoin: RVN only (no SATORIEVR — that is an Evrmore asset).
+ * Default chain = Evrmore, so the exported constant/helpers keep their historical
+ * behavior for every existing caller.
  */
-export const PROTECTED_ASSETS: readonly string[] = [NATIVE, 'SATORIEVR'];
-
-/** False for EVR and SATORIEVR. The single source of truth for every remove control. */
-export function isRemovableAsset(name: string): boolean {
-  return !PROTECTED_ASSETS.includes(name.trim().toUpperCase());
+export function protectedAssetsFor(chainId: string = activeChainId()): readonly string[] {
+  return nativeTickerFor(chainId) === 'RVN' ? ['RVN'] : ['EVR', 'SATORIEVR'];
 }
 
-/** Assets pinned out of the box, so nobody has to "Add token" for the asset the
- *  wallet exists for. EVR is not listed: it is always first, by construction. */
+/** Evrmore protected assets (historical default; kept for back-compat callers). */
+export const PROTECTED_ASSETS: readonly string[] = ['EVR', 'SATORIEVR'];
+
+/** False for a protected asset of the given chain (default active). The single
+ *  source of truth for every remove control. */
+export function isRemovableAsset(name: string, chainId: string = activeChainId()): boolean {
+  return !protectedAssetsFor(chainId).includes(name.trim().toUpperCase());
+}
+
+/** Assets pinned out of the box for a chain, so nobody has to "Add token" for the
+ *  asset the wallet exists for. The native coin is never listed: it is always
+ *  first, by construction. Evrmore pins SATORIEVR; Ravencoin pins nothing. */
+export function defaultPinsFor(chainId: string = activeChainId()): readonly string[] {
+  return nativeTickerFor(chainId) === 'RVN' ? [] : ['SATORIEVR'];
+}
+
+/** Evrmore default pins (historical default; kept for back-compat callers). */
 export const DEFAULT_PINNED_ASSETS = ['SATORIEVR'] as const;
 
 /**
- * Ensure the default assets are pinned. Returns the SAME array reference when
- * nothing changes, so callers can skip a pointless write to storage.
+ * Ensure the chain's default assets are pinned. Returns the SAME array reference
+ * when nothing changes, so callers can skip a pointless write to storage.
  */
-export function applyDefaultPins(pinned: string[]): string[] {
-  const missing = DEFAULT_PINNED_ASSETS.filter((name) => !pinned.includes(name));
+export function applyDefaultPins(pinned: string[], chainId: string = activeChainId()): string[] {
+  const missing = defaultPinsFor(chainId).filter((name) => !pinned.includes(name));
   return missing.length ? [...pinned, ...missing] : pinned;
 }
 
@@ -311,8 +394,8 @@ export function applyDefaultPins(pinned: string[]): string[] {
  * this, anyone who did that would keep an invisible SATORIEVR forever, with no
  * remove/restore control to undo it. Same reference back when there is nothing to do.
  */
-export function unhideProtected(hidden: string[]): string[] {
-  const kept = hidden.filter(isRemovableAsset);
+export function unhideProtected(hidden: string[], chainId: string = activeChainId()): string[] {
+  const kept = hidden.filter((n) => isRemovableAsset(n, chainId));
   return kept.length === hidden.length ? hidden : kept;
 }
 
@@ -325,23 +408,26 @@ export function computeDisplayedAssets(
   assets: LiveAssetBalance[],
   pinned: string[],
   hidden: string[],
+  chainId: string = activeChainId(),
 ): LiveAssetBalance[] {
-  const evr =
-    assets.find((a) => a.isNative || a.name === NATIVE) ??
-    ({ name: NATIVE, amount: 0, decimals: 8, isNative: true } as LiveAssetBalance);
+  // Native coin name for this chain (EVR / RVN) — always first, never hidden.
+  const native = nativeTickerFor(chainId);
+  const nativeRow =
+    assets.find((a) => a.isNative || a.name === native) ??
+    ({ name: native, amount: 0, decimals: 8, isNative: true } as LiveAssetBalance);
 
-  // A protected asset (EVR / SATORIEVR) can never be hidden, whatever the list says.
-  const hiddenSet = new Set(hidden.filter(isRemovableAsset));
+  // A protected asset can never be hidden, whatever the list says.
+  const hiddenSet = new Set(hidden.filter((n) => isRemovableAsset(n, chainId)));
 
   // Held (non-native) assets keyed by name.
   const byName = new Map<string, LiveAssetBalance>();
   for (const a of assets) {
-    if (a.isNative || a.name === NATIVE) continue;
+    if (a.isNative || a.name === native) continue;
     byName.set(a.name, a);
   }
   // Pinned-but-not-held show up with a 0 balance.
   for (const name of pinned) {
-    if (name === NATIVE) continue;
+    if (name === native) continue;
     if (!byName.has(name)) {
       byName.set(name, { name, amount: 0, decimals: 8, isNative: false });
     }
@@ -351,7 +437,7 @@ export function computeDisplayedAssets(
     .filter((a) => !hiddenSet.has(a.name))
     .sort((a, b) => a.name.localeCompare(b.name));
 
-  return [{ ...evr, name: NATIVE, isNative: true }, ...rest];
+  return [{ ...nativeRow, name: native, isNative: true }, ...rest];
 }
 
 /**
@@ -367,11 +453,13 @@ export function mergeAssetBalances(lists: LiveAssetBalance[][]): LiveAssetBalanc
       byName.set(a.name, prev ? { ...prev, amount: prev.amount + a.amount } : { ...a });
     }
   }
-  const evr = byName.get(NATIVE);
+  // The native coin (flagged isNative — EVR or RVN) is always first; the rest
+  // sort alphabetically. Chain-agnostic: never keys on a hardcoded 'EVR' name.
+  const native = Array.from(byName.values()).find((a) => a.isNative);
   const rest = Array.from(byName.values())
-    .filter((a) => a.name !== NATIVE)
+    .filter((a) => !a.isNative)
     .sort((a, b) => a.name.localeCompare(b.name));
-  return evr ? [evr, ...rest] : rest;
+  return native ? [native, ...rest] : rest;
 }
 
 /** Sort classified txs: pending (mempool) first, then confirmed by height desc.
@@ -426,8 +514,8 @@ interface LiveState {
   hiddenAssets: string[];
   txs: LiveTransaction[];
   /** Latest USD (≈ USDT) prices for the priced assets. Absent key = no price yet.
-   *  Only EVR and SATORIEVR are ever priced; every other asset has none. */
-  prices: { EVR?: number; SATORIEVR?: number };
+   *  EVR + SATORIEVR (Evrmore) and RVN (Ravencoin) are the only priced assets. */
+  prices: { EVR?: number; SATORIEVR?: number; RVN?: number };
   /** Number of transactions not yet viewed in Activity (drives the tab badge). */
   unreadActivity: number;
   /** Txids the active wallet has already seen (persisted per wallet). */
@@ -485,14 +573,24 @@ interface LiveState {
   error: string | null;
   /** Transient sync feedback (never persisted) — see LiveSyncing. */
   syncing: LiveSyncing;
+  /** Progress of the background tx-history classification for the active wallet.
+   *  Non-null (with total > 0) while a sync has txs left to classify this run;
+   *  null when idle / complete. Session-only, never persisted. */
+  syncProgress: { done: number; total: number } | null;
+  /** Wall-clock time the last background tx sync completed for the active
+   *  address, or null if none has this session. Session-only, never persisted;
+   *  cleared alongside `txs` on lock / wallet switch / unlock start. */
+  lastSyncAt: number | null;
 
   // --- actions --------------------------------------------------------------
   exists(): Promise<boolean>;
   init(): Promise<void>;
-  createWallet(password: string, name?: string): Promise<void>;
+  // The optional `network` selects the wallet's chain (default 'mainnet' = Evrmore).
+  // Phase-3 UI will pass it; plumbed through now so the chain reaches the service.
+  createWallet(password: string, name?: string, network?: LiveNetworkId): Promise<void>;
   clearPendingMnemonic(): void;
-  importWallet(mnemonic: string, password: string, name?: string): Promise<void>;
-  importPrivateKeyWallet(input: string, password: string, name?: string): Promise<void>;
+  importWallet(mnemonic: string, password: string, name?: string, network?: LiveNetworkId): Promise<void>;
+  importPrivateKeyWallet(input: string, password: string, name?: string, network?: LiveNetworkId): Promise<void>;
   unlock(password: string): Promise<boolean>;
   lock(): void;
 
@@ -582,6 +680,17 @@ function emptyStaking(): StakingState {
 let autoRefreshTimer: ReturnType<typeof setInterval> | null = null;
 let silentRefreshInFlight = false;
 
+// The FULL background tx classification currently running (identified by the
+// run OBJECT, not just its address). Both auto-refresh ticks and manual
+// refreshes check this so they never start a second concurrent classification
+// for the SAME wallet (which would just double the work). A refresh for a
+// DIFFERENT address (wallet switch) is allowed to start — the old run's results
+// are then discarded by its own address guard. Identity (not address) matters
+// for the cleanup: after lock -> unlock of the SAME wallet, a late-finishing old
+// run must not clear the marker owned by the newer run, or a third concurrent
+// sync could start against the same address.
+let txSyncRun: { address: string } | null = null;
+
 // Which address flipped `syncing` to 'initial'. A late-finishing refresh for a
 // PREVIOUS wallet must never clear (or leave stuck) the banner of the wallet
 // that is now active, so clearing is guarded by this module-level marker.
@@ -627,6 +736,8 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   offline: false,
   error: null,
   syncing: 'idle',
+  syncProgress: null,
+  lastSyncAt: null,
 
   // --- vault presence -------------------------------------------------------
   async exists() {
@@ -673,9 +784,10 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       electrumServers:
         storedServers.length > 0 ? storedServers : [...DEFAULT_ELECTRUM_SERVER_URLS],
     });
-    // Apply the persisted server pool to the network module BEFORE the first
-    // connect/refresh so the wallet honours the user's servers from the start.
-    await applyStoredElectrumServers();
+    // The active chain's server pool + explorer template are loaded and applied
+    // by loadWallets() below (it knows the active wallet's chain), BEFORE the
+    // first connect/refresh, so the wallet honours the user's servers from the
+    // start on whichever chain is active.
     try {
       const exists = await svc.exists();
       await get().loadWallets();
@@ -707,10 +819,13 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   },
 
   // --- create ---------------------------------------------------------------
-  async createWallet(password: string, name?: string) {
+  async createWallet(password: string, name?: string, network: LiveNetworkId = 'mainnet') {
     set({ error: null });
     try {
-      const { mnemonic } = await svc.create(password, name?.trim() ? { name: name.trim() } : undefined);
+      const { mnemonic } = await svc.create(password, {
+        network,
+        ...(name?.trim() ? { name: name.trim() } : {}),
+      });
       const address = svc.getAddress(0);
       // Stay in `onboarding` so LiveOnboarding renders the one-time recovery-phrase
       // backup screen (MnemonicView shows while pendingMnemonic is set). Advancing
@@ -724,6 +839,8 @@ export const useLiveStore = create<LiveState>((set, get) => ({
         txs: [],
         network: null,
         addingWallet: false,
+        syncProgress: null,
+        lastSyncAt: null,
       });
       void get().loadWallets();
       void get().loadWalletAssets();
@@ -742,10 +859,10 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   },
 
   // --- import ---------------------------------------------------------------
-  async importWallet(mnemonic: string, password: string, name?: string) {
+  async importWallet(mnemonic: string, password: string, name?: string, network: LiveNetworkId = 'mainnet') {
     set({ error: null });
     try {
-      await svc.import(mnemonic, password, 'mainnet', name?.trim() || undefined);
+      await svc.import(mnemonic, password, network, name?.trim() || undefined);
       const address = svc.getAddress(0);
       set({
         phase: 'ready',
@@ -755,6 +872,8 @@ export const useLiveStore = create<LiveState>((set, get) => ({
         txs: [],
         network: null,
         addingWallet: false,
+        syncProgress: null,
+        lastSyncAt: null,
       });
       void get().loadWallets();
       void get().loadWalletAssets();
@@ -768,12 +887,12 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   },
 
   // --- import a single private key (Satori-style single-address wallet) ------
-  async importPrivateKeyWallet(input: string, password: string, name?: string) {
+  async importPrivateKeyWallet(input: string, password: string, name?: string, network: LiveNetworkId = 'mainnet') {
     set({ error: null });
     try {
       // A single WIF/hex key becomes a one-address 'pk' wallet (how Satori-network
       // wallets are generated). An empty password makes it passwordless.
-      await svc.importPrivateKey(input.trim(), password, 'mainnet', name?.trim() || undefined);
+      await svc.importPrivateKey(input.trim(), password, network, name?.trim() || undefined);
       const address = svc.getAddress(0);
       set({
         phase: 'ready',
@@ -783,6 +902,8 @@ export const useLiveStore = create<LiveState>((set, get) => ({
         txs: [],
         network: null,
         addingWallet: false,
+        syncProgress: null,
+        lastSyncAt: null,
       });
       void get().loadWallets();
       void get().loadWalletAssets();
@@ -800,7 +921,12 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     const trimmedLabel = label.trim();
     const trimmedAddr = address.trim();
     if (!trimmedLabel) return { ok: false, error: 'Enter a name for this contact.' } as const;
-    if (!isValidAddress(trimmedAddr)) return { ok: false, error: 'Invalid EVRmore address.' } as const;
+    if (!isValidAddress(trimmedAddr)) {
+      return {
+        ok: false,
+        error: nativeTickerFor() === 'RVN' ? 'Invalid Ravencoin address.' : 'Invalid EVRmore address.',
+      } as const;
+    }
     const { addressBook } = get();
     // Replace any existing contact with the same address, then sort by label.
     const next = [
@@ -922,6 +1048,8 @@ export const useLiveStore = create<LiveState>((set, get) => ({
           assets: [],
           txs: [],
           network: null,
+          syncProgress: null,
+          lastSyncAt: null,
         });
         void get().loadWallets();
         void get().loadWalletAssets();
@@ -941,6 +1069,10 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   // --- lock -----------------------------------------------------------------
   lock() {
     get().stopAutoRefresh();
+    // Abandon any in-flight background classification: the address guard would
+    // discard its results anyway, but clear the marker so the next wallet's sync
+    // can start immediately.
+    txSyncRun = null;
     svc.lock();
     set({
       phase: 'locked',
@@ -957,6 +1089,8 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       sendPlan: null,
       error: null,
       syncing: 'idle',
+      syncProgress: null,
+      lastSyncAt: null,
       staking: emptyStaking(),
     });
   },
@@ -966,6 +1100,22 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     try {
       const wallets = await svc.listWallets();
       set({ wallets, activeWalletId: svc.activeWalletId() });
+      // The active chain may have just changed (init / switch / unlock / create /
+      // import / remove all route through here). Load THIS chain's own server pool
+      // + explorer template (per-chain storage keys; Evrmore uses the legacy keys)
+      // and apply the pool to the network module so the next connect uses it.
+      const chainId = activeChainId();
+      const [servers, explorer] = await Promise.all([
+        readList(electrumServersStorageKey(chainId)),
+        readValue<string>(explorerKeyForChain(chainId)),
+      ]);
+      const serverUrls = servers.length > 0 ? servers : defaultServerUrlsFor(chainId);
+      activateServerUrls(serverUrls, chainId);
+      set({
+        electrumServers: serverUrls,
+        explorerUrlTemplate:
+          typeof explorer === 'string' && explorer.trim() ? explorer : defaultExplorerFor(chainId),
+      });
     } catch {
       // ignore — listing is best-effort
     }
@@ -987,6 +1137,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
         return;
       }
       get().stopAutoRefresh();
+      txSyncRun = null;
       set({
         phase: 'locked',
         address: '',
@@ -999,6 +1150,8 @@ export const useLiveStore = create<LiveState>((set, get) => ({
         pendingMnemonic: null,
         addingWallet: false,
         error: null,
+        syncProgress: null,
+        lastSyncAt: null,
         staking: emptyStaking(),
       });
       await get().loadWallets();
@@ -1053,6 +1206,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     // Removing the LAST wallet returns to onboarding (nothing left to unlock).
     if (wallets.length === 0) {
       get().stopAutoRefresh();
+      txSyncRun = null;
       set({
         phase: 'onboarding',
         wallets: [],
@@ -1068,6 +1222,8 @@ export const useLiveStore = create<LiveState>((set, get) => ({
         addingWallet: false,
         error: null,
         syncing: 'idle',
+        syncProgress: null,
+        lastSyncAt: null,
         staking: emptyStaking(),
       });
       return;
@@ -1077,6 +1233,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     // cleared the seed, so it is now locked and needs its own password.
     if (wasActive) {
       get().stopAutoRefresh();
+      txSyncRun = null;
       set({
         phase: 'locked',
         address: '',
@@ -1089,6 +1246,8 @@ export const useLiveStore = create<LiveState>((set, get) => ({
         pendingMnemonic: null,
         error: null,
         syncing: 'idle',
+        syncProgress: null,
+        lastSyncAt: null,
         staking: emptyStaking(),
       });
     }
@@ -1162,17 +1321,17 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     };
 
     const provider = dynProvider();
+
+    // BALANCE-FIRST: await ONLY the cheap network status + per-address balances
+    // (one listunspent each), then commit them immediately so the balance shows
+    // within seconds no matter how large the transaction history is. The full
+    // history classification runs detached below — it must never gate the
+    // balance appearing.
     try {
-      const [networkStatus, assets, txs] = await Promise.allSettled([
+      const [networkStatus, assets] = await Promise.allSettled([
         provider.getNetworkStatus(),
         // Per-address balances fetched in parallel, then summed per asset name.
         Promise.all(addrs.map((a) => provider.getAllAssetBalances(a))).then(mergeAssetBalances),
-        // Incremental: only NEW / changed txs are fetched + classified; the rest
-        // are reused from the per-address caches, so refreshes stay fast. The
-        // merged view dedupes txs that touch several of our own addresses.
-        Promise.all(addrs.map((a) => refreshTransactionCache(a, cacheProvider()))).then(
-          mergeTransactions,
-        ),
       ]);
 
       // A wallet switch (address change) mid-flight must not clobber the new
@@ -1183,21 +1342,79 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       }
 
       const netOk = networkStatus.status === 'fulfilled';
-      const nextTxs = txs.status === 'fulfilled' ? txs.value : get().txs;
       set({
         loadingRefresh: false,
+        // A balances rejection still marks the wallet offline (as before); a
+        // tx-sync failure alone never does (handled in the background block).
         offline: !netOk || networkStatus.value.state === 'offline' || assets.status === 'rejected',
         network: netOk ? networkStatus.value : get().network,
         assets: assets.status === 'fulfilled' ? assets.value : get().assets,
-        txs: nextTxs,
-        unreadActivity: countUnread(nextTxs, get().seenTxids),
       });
-      clearInitial();
     } catch {
       clearInitial();
       if (get().address !== address) return;
       set({ loadingRefresh: false, offline: true });
+      return;
     }
+
+    // BACKGROUND tx-history sync (detached). Only one full classification runs
+    // per wallet at a time: an overlapping tick (auto-refresh or manual) for the
+    // SAME wallet is skipped — the already-running sync will finish and update
+    // txs + clear the banner. A different wallet (switch) is allowed to start.
+    if (txSyncRun?.address === address) return;
+    const run = { address };
+    txSyncRun = run;
+
+    // Per-address classification progress, summed for a single overall bar.
+    const progressByAddr = new Map<string, { done: number; total: number }>();
+    const reportProgress = () => {
+      if (get().address !== address) return;
+      let done = 0;
+      let total = 0;
+      for (const p of progressByAddr.values()) {
+        done += p.done;
+        total += p.total;
+      }
+      set({ syncProgress: total > 0 ? { done, total } : null });
+    };
+
+    void (async () => {
+      try {
+        // Incremental + checkpointed: only NEW / changed txs are classified; the
+        // rest are reused from the per-address caches. The merged view dedupes
+        // txs that touch several of our own addresses.
+        const lists = await Promise.all(
+          addrs.map((a) =>
+            refreshTransactionCache(a, cacheProvider(), (done, total) => {
+              progressByAddr.set(a, { done, total });
+              reportProgress();
+            }),
+          ),
+        );
+        // Discard stale results if the active wallet changed while we classified.
+        if (get().address !== address) return;
+        const nextTxs = mergeTransactions(lists);
+        set({
+          txs: nextTxs,
+          unreadActivity: countUnread(nextTxs, get().seenTxids),
+          lastSyncAt: Date.now(),
+          syncProgress: null,
+        });
+        clearInitial();
+      } catch {
+        // A tx-sync failure must NOT flip the wallet offline or wipe cached txs:
+        // keep whatever is on screen and retry on the next tick. Just clear the
+        // transient progress + first-sync banner so the UI doesn't hang on them.
+        if (get().address === address) {
+          set({ syncProgress: null });
+          clearInitial();
+        }
+      } finally {
+        // Only clear the marker if it still points at THIS run (a wallet switch
+        // or lock/unlock cycle may have started a newer sync that now owns it).
+        if (txSyncRun === run) txSyncRun = null;
+      }
+    })();
   },
 
   // --- prices ---------------------------------------------------------------
@@ -1207,12 +1424,17 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   // 60s, so calling this on every auto-refresh tick still fetches at most once/min.
   async loadPrices() {
     try {
-      const next = await fetchPrices();
+      // Only fetch the RVN price when an RVN wallet is active — EVR-only users add
+      // no extra ticker chatter. Merge so an asset whose fetch failed keeps its
+      // previous value.
+      const includeRvn = nativeTickerFor() === 'RVN';
+      const next = await fetchPrices({ includeRvn });
       const prev = get().prices;
       set({
         prices: {
           EVR: next.EVR ?? prev.EVR,
           SATORIEVR: next.SATORIEVR ?? prev.SATORIEVR,
+          RVN: next.RVN ?? prev.RVN,
         },
       });
     } catch {
@@ -1247,18 +1469,21 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   // --- add / remove asset (MetaMask-style pin/hide) -------------------------
   async addAsset(name: string) {
     const normalized = name.trim().toUpperCase();
-    if (!normalized || normalized === NATIVE || normalized === 'RVN') {
-      return { ok: false, error: 'Enter an asset name other than EVR.' };
+    // Reject the active chain's native coin (it is always shown first). Both 'EVR'
+    // and 'RVN' are rejected defensively regardless of the active chain.
+    const nativeTicker = nativeTickerFor();
+    if (!normalized || normalized === 'EVR' || normalized === 'RVN' || normalized === nativeTicker) {
+      return { ok: false, error: `Enter an asset name other than ${nativeTicker}.` };
     }
 
     let meta: LiveAssetMeta | null;
     try {
       meta = await dynProvider().getAssetMeta(normalized);
     } catch {
-      return { ok: false, error: 'Could not reach the EVRmore network. Please try again.' };
+      return { ok: false, error: 'Could not reach the network. Please try again.' };
     }
     if (!meta || !meta.exists) {
-      return { ok: false, error: `Asset "${normalized}" was not found on the EVRmore network.` };
+      return { ok: false, error: `Asset "${normalized}" was not found on the network.` };
     }
 
     const id = svc.activeWalletId();
@@ -1277,9 +1502,10 @@ export const useLiveStore = create<LiveState>((set, get) => ({
 
   removeAsset(name: string) {
     const normalized = name.trim().toUpperCase();
-    // EVR and SATORIEVR are never removable (see PROTECTED_ASSETS). The UI hides
-    // their remove controls; this refuses the call regardless.
-    if (!normalized || !isRemovableAsset(normalized)) return;
+    // The active chain's protected assets are never removable (Evrmore: EVR +
+    // SATORIEVR; Ravencoin: RVN). The UI hides their remove controls; this refuses
+    // the call regardless.
+    if (!normalized || !isRemovableAsset(normalized, activeChainId())) return;
     const id = svc.activeWalletId();
     const { pinnedAssets, hiddenAssets } = get();
     const nextHidden = hiddenAssets.includes(normalized) ? hiddenAssets : [...hiddenAssets, normalized];
@@ -1325,17 +1551,19 @@ export const useLiveStore = create<LiveState>((set, get) => ({
         // ignore — best-effort cleanup
       }
     }
-    // Satori GO is a Satori-Network wallet, so SATORIEVR is pinned out of the box —
-    // nobody should have to "Add token" for the one asset the wallet exists for.
-    // Applied only when the user has expressed NO opinion about it: removeAsset()
-    // moves a name into `hidden`, so an asset the user deleted is never resurrected.
-    const withDefaults = applyDefaultPins(pinned);
+    // On Evrmore, SATORIEVR is pinned out of the box (nobody should have to "Add
+    // token" for the one asset the wallet exists for). On Ravencoin there are no
+    // default pins. Applied only when the user has expressed NO opinion about it:
+    // removeAsset() moves a name into `hidden`, so a deleted asset is never
+    // resurrected. Keyed to the ACTIVE chain.
+    const chainId = activeChainId();
+    const withDefaults = applyDefaultPins(pinned, chainId);
     if (withDefaults !== pinned) {
       pinned = withDefaults;
       persistList(pinnedKey(id), pinned);
     }
     // Undo any removal of a now-protected asset made by an older build.
-    const visible = unhideProtected(hidden);
+    const visible = unhideProtected(hidden, chainId);
     if (visible !== hidden) {
       hidden = visible;
       persistList(hiddenKey(id), hidden);
@@ -1357,6 +1585,12 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   // the UI. Requires the wallet unlocked (keysHoldingAsset derives per-address
   // keys); it is, in the ready phase where the screen lives.
   async refreshStaking() {
+    // Staking is Evrmore-only (SATORIEVR). Inert on Ravencoin: report an empty,
+    // loaded state without touching the Satori pool server.
+    if (!stakingSupported()) {
+      set({ staking: { ...emptyStaking(), loaded: true } });
+      return;
+    }
     set((s) => ({ staking: { ...s.staking, loading: true, error: null } }));
     try {
       // Fetch pools and figure out which of our addresses hold SATORIEVR (only
@@ -1403,6 +1637,12 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   },
 
   async joinPool(poolAddress: string) {
+    // Evrmore-only: the store refuses on Ravencoin even if the UI (phase 3) is hidden.
+    if (!stakingSupported()) {
+      const error = 'Staking is only available on Evrmore.';
+      set((s) => ({ staking: { ...s.staking, error } }));
+      return { ok: false, error };
+    }
     set((s) => ({ staking: { ...s.staking, submitting: true, error: null } }));
     try {
       const keys = await svc.keysHoldingAsset(STAKING_ASSET);
@@ -1456,6 +1696,12 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   },
 
   async leavePool() {
+    // Evrmore-only: the store refuses on Ravencoin even if the UI (phase 3) is hidden.
+    if (!stakingSupported()) {
+      const error = 'Staking is only available on Evrmore.';
+      set((s) => ({ staking: { ...s.staking, error } }));
+      return { ok: false, error };
+    }
     set((s) => ({ staking: { ...s.staking, submitting: true, error: null } }));
     try {
       const keys = await svc.keysHoldingAsset(STAKING_ASSET);
@@ -1520,7 +1766,9 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     try {
       const amountSats = BigInt(Math.round(amountDecimal * 1e8));
       let plan: LiveSendPlan;
-      if (assetId === 'EVR') {
+      // Chain-aware native check ('EVR' on Evrmore, 'RVN' on Ravencoin). A literal
+      // 'EVR' here sent native RVN down the asset path (unknown-asset at review).
+      if (isNativeAssetId(assetId)) {
         plan = await svc.buildEvrSend(to, amountSats);
       } else {
         plan = await svc.buildAssetSend(to, assetId, amountSats);
@@ -1600,7 +1848,8 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   },
 
   setExplorerUrlTemplate(url: string) {
-    persistValue(EXPLORER_URL_KEY, url);
+    // Persist under the ACTIVE chain's key (Evrmore uses the legacy bare key).
+    persistValue(explorerKeyForChain(activeChainId()), url);
     set({ explorerUrlTemplate: url });
   },
 
@@ -1636,9 +1885,11 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     if (current.includes(normalized)) {
       return { ok: false, error: 'That server is already in the list.' } as const;
     }
+    // Operate on the ACTIVE chain's pool (its own per-chain storage key).
+    const chainId = activeChainId();
     const next = [...current, normalized];
-    persistList(ELECTRUM_SERVERS_STORAGE_KEY, next);
-    activateServerUrls(next);
+    persistList(electrumServersStorageKey(chainId), next);
+    activateServerUrls(next, chainId);
     svc.reconnect();
     set({ electrumServers: next });
     void get().refresh({ silent: true });
@@ -1649,19 +1900,21 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     const current = get().electrumServers;
     // Never remove the LAST server — keep at least one so a pool always exists.
     if (current.length <= 1) return;
+    const chainId = activeChainId();
     const filtered = current.filter((u) => u !== url);
-    const next = filtered.length > 0 ? filtered : [...DEFAULT_ELECTRUM_SERVER_URLS];
-    persistList(ELECTRUM_SERVERS_STORAGE_KEY, next);
-    activateServerUrls(next);
+    const next = filtered.length > 0 ? filtered : defaultServerUrlsFor(chainId);
+    persistList(electrumServersStorageKey(chainId), next);
+    activateServerUrls(next, chainId);
     svc.reconnect();
     set({ electrumServers: next });
     void get().refresh({ silent: true });
   },
 
   resetElectrumServers() {
-    const next = [...DEFAULT_ELECTRUM_SERVER_URLS];
-    persistList(ELECTRUM_SERVERS_STORAGE_KEY, next);
-    activateServerUrls(next);
+    const chainId = activeChainId();
+    const next = defaultServerUrlsFor(chainId);
+    persistList(electrumServersStorageKey(chainId), next);
+    activateServerUrls(next, chainId);
     svc.reconnect();
     set({ electrumServers: next });
     void get().refresh({ silent: true });
@@ -1687,6 +1940,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   // --- reset ----------------------------------------------------------------
   async resetLiveWallet() {
     get().stopAutoRefresh();
+    txSyncRun = null;
     try {
       await svc.reset();
     } catch {
@@ -1708,6 +1962,8 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       error: null,
       offline: false,
       syncing: 'idle',
+      syncProgress: null,
+      lastSyncAt: null,
       staking: emptyStaking(),
     });
   },

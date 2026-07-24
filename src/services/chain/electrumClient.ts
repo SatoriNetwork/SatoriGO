@@ -37,6 +37,10 @@ export interface ElectrumClientOptions {
   connectTimeoutMs?: number;
   /** Lets tests inject a mock; defaults to the global WebSocket. */
   WebSocketImpl?: typeof WebSocket;
+  /** Which chain's server pool this client resolves at connect time when no
+   *  explicit `servers` list is given. Default = Evrmore. Ravencoin clients pass
+   *  'ravencoin-mainnet'. Ignored when an explicit `servers` array is supplied. */
+  chainId?: string;
 }
 
 interface PendingRequest {
@@ -69,6 +73,11 @@ export class WssElectrumClient implements ElectrumClient {
   private readonly requestTimeoutMs: number;
   private readonly connectTimeoutMs: number;
   private readonly WebSocketImpl: typeof WebSocket;
+  /** Chain whose pool doConnect() resolves when no explicit servers were given.
+   *  Mutable so the foreground service can retarget it on an active-wallet chain
+   *  change (setPoolChain); the client is closed on change so the next connect
+   *  re-resolves against the new chain's pool. */
+  private poolChainId: string | undefined;
 
   private ws: WebSocket | null = null;
   private url: string | null = null;
@@ -83,6 +92,7 @@ export class WssElectrumClient implements ElectrumClient {
     // An explicit array (as the tests pass) is used verbatim; with no argument
     // the pool is resolved live in doConnect() from getElectrumServerPool().
     this.explicitServers = servers ?? null;
+    this.poolChainId = opts.chainId;
     this.requestTimeoutMs = opts.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.connectTimeoutMs = opts.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
     const impl = opts.WebSocketImpl ?? (globalThis as { WebSocket?: typeof WebSocket }).WebSocket;
@@ -113,7 +123,7 @@ export class WssElectrumClient implements ElectrumClient {
     const errors: string[] = [];
     // Resolve the pool lazily so servers the user configures AFTER startup are
     // honoured on the next connect. An explicit list (unit tests) is used as-is.
-    const servers = this.explicitServers ?? getElectrumServerPool();
+    const servers = this.explicitServers ?? getElectrumServerPool(this.poolChainId);
     for (const server of servers) {
       const url = electrumWssUrl(server);
       try {
@@ -338,6 +348,16 @@ export class WssElectrumClient implements ElectrumClient {
 
   endpoint(): string | null {
     return this.isConnected() ? this.url : null;
+  }
+
+  /** Retarget the chain whose pool doConnect() resolves (Evrmore vs Ravencoin).
+   *  A no-op when unchanged. Does NOT itself close the socket — the caller (the
+   *  live service) closes on an actual chain change so the next connect
+   *  re-resolves against the new chain's pool. Ignored while explicit servers
+   *  were supplied at construction (unit tests). */
+  setPoolChain(chainId: string): void {
+    if (this.explicitServers) return;
+    this.poolChainId = chainId;
   }
 }
 

@@ -7,10 +7,14 @@ import {
   PROTECTED_ASSETS,
   applyDefaultPins,
   computeDisplayedAssets,
+  defaultPinsFor,
   isRemovableAsset,
+  protectedAssetsFor,
   unhideProtected,
 } from './liveStore';
 import type { LiveAssetBalance } from '../services/chain/electrumProvider';
+
+const RVN = 'ravencoin-mainnet';
 
 const asset = (name: string, amount = 0, isNative = false): LiveAssetBalance =>
   ({ name, amount, decimals: 8, isNative }) as LiveAssetBalance;
@@ -93,5 +97,41 @@ describe('computeDisplayedAssets', () => {
     const held = [asset('EVR', 1, true), asset('FOO', 5)];
     const displayed = computeDisplayedAssets(held, [], ['FOO']);
     expect(displayed.map((a) => a.name)).toEqual(['EVR']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Per-chain protected assets / default pins (Ravencoin). Evrmore stays the
+// default for every existing (no-chain) caller above; passing the RVN chain id
+// switches the protected set to RVN-only with no default pins.
+// ---------------------------------------------------------------------------
+describe('per-chain protected assets (Ravencoin)', () => {
+  it('protects RVN only (no EVR / SATORIEVR) on Ravencoin', () => {
+    expect([...protectedAssetsFor(RVN)]).toEqual(['RVN']);
+    expect(isRemovableAsset('RVN', RVN)).toBe(false);
+    expect(isRemovableAsset('rvn', RVN)).toBe(false);
+    // SATORIEVR and EVR are NOT protected on Ravencoin (Evrmore assets).
+    expect(isRemovableAsset('SATORIEVR', RVN)).toBe(true);
+    expect(isRemovableAsset('EVR', RVN)).toBe(true);
+  });
+
+  it('has NO default pins on Ravencoin (SATORIEVR is Evrmore-only)', () => {
+    expect([...defaultPinsFor(RVN)]).toEqual([]);
+    const pinned: string[] = [];
+    // Same reference back (nothing to add) so callers skip a write.
+    expect(applyDefaultPins(pinned, RVN)).toBe(pinned);
+  });
+
+  it('computeDisplayedAssets shows RVN first and pins nothing by default', () => {
+    const held = [asset('RVN', 3, true)];
+    const displayed = computeDisplayedAssets(held, applyDefaultPins([], RVN), [], RVN);
+    expect(displayed.map((a) => a.name)).toEqual(['RVN']);
+    expect(displayed[0].amount).toBe(3);
+  });
+
+  it('Evrmore default is unchanged when no chain id is passed', () => {
+    expect([...protectedAssetsFor()]).toEqual(['EVR', 'SATORIEVR']);
+    expect([...PROTECTED_ASSETS]).toEqual(['EVR', 'SATORIEVR']);
+    expect([...DEFAULT_PINNED_ASSETS]).toEqual(['SATORIEVR']);
   });
 });

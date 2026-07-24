@@ -260,18 +260,18 @@ try {
   check(/not found/i.test(addErr), `add-asset: bogus name rejected -> "${addErr}"`);
   await page.getByRole('button', { name: /^Cancel$/i }).click({ timeout: 10_000 });
 
-  // Receive: QR + full address. Every displayed asset shares ONE receive address,
-  // so the SATORIEVR chip must show the identical real EVR address.
+  // Receive: QR + full address + network header. Every asset on a chain shares ONE
+  // receive address, so the screen shows the network (not clickable per-asset chips).
   await byId('live-receive').click();
   await byId('live-receive-qr').waitFor({ timeout: 10_000 });
   const full = (await byId('live-receive-address').innerText()).trim();
   check(full.startsWith('E') && full.length === 34, `receive shows full real address (${full.length} chars)`);
-  await byId('live-receive-asset-SATORIEVR').click({ timeout: 10_000 });
-  const assetAddr = (await byId('live-receive-address').innerText()).trim();
   check(
-    assetAddr === full && assetAddr.startsWith('E') && assetAddr.length === 34,
-    `SATORIEVR receive uses same real address (${assetAddr})`,
+    (await page.locator('[data-testid^="live-receive-asset-"]').count()) === 0,
+    'receive: per-asset token chips removed (one address for all assets)',
   );
+  const netText = (await byId('live-receive-network').innerText()).replace(/\s+/g, ' ').trim();
+  check(/EVR/.test(netText) && /EVRmore/i.test(netText), `receive shows the network header -> "${netText}"`);
 
   // Multi-address (new in 1.8.0): a seed wallet starts with ONE address (no
   // picker yet); "New address" derives a second, the picker appears with two
@@ -802,18 +802,30 @@ try {
   await byId('live-send').click({ timeout: 10_000 });
   await byId('live-send-to').waitFor({ timeout: 10_000 });
 
-  // My-wallets quick-pick (1.9.0): chips named after your OTHER wallets sit
-  // under the recipient field; tapping one fills the address and confirms
-  // "→ <name>" next to the field.
+  // My-wallets quick-pick: chips named after your OTHER wallets sit under the
+  // recipient field; tapping one fills the address AND highlights that chip green
+  // (aria-pressed) instead of adding a separate confirmation line that shifts the
+  // layout.
   await byId('live-send-wallet-0').waitFor({ timeout: 10_000 });
   const chipName = (await byId('live-send-wallet-0').innerText()).trim();
+  check(
+    (await byId('live-send-wallet-0').getAttribute('aria-pressed')) !== 'true',
+    'my-wallets chip is NOT highlighted before it is picked',
+  );
   await byId('live-send-wallet-0').click();
   const pickedTo = (await byId('live-send-to').inputValue()).trim();
   check(/^E[a-zA-Z0-9]{20,40}$/.test(pickedTo), `my-wallets chip fills the recipient (${pickedTo})`);
-  const pickedLabel = (await byId('live-send-wallet-selected').innerText().catch(() => '')).trim();
   check(
-    chipName.length > 0 && pickedLabel.includes(chipName),
-    `my-wallets pick confirms by name -> "${pickedLabel}" (chip "${chipName}")`,
+    (await byId('live-send-wallet-0').getAttribute('aria-pressed')) === 'true',
+    `my-wallets pick highlights the chosen chip ("${chipName}") instead of a shifting confirmation line`,
+  );
+  check(
+    (await page.locator('[data-testid="live-send-wallet-selected"]').count()) === 0,
+    'my-wallets: the old separate confirmation line is gone (no layout shift)',
+  );
+  check(
+    (await page.locator('[data-testid="live-send-save-contact"]').count()) === 0,
+    'my-wallets: no "Save to address book" for your own wallet (already in My wallets)',
   );
 
   await byId('live-send-to').fill(RECIPIENT);
@@ -827,6 +839,68 @@ try {
     check(/insufficient|fund/i.test(pwlErr), `passwordless: send gated at coin selection, no password step -> "${pwlErr.trim()}"`);
   }
   await page.screenshot({ path: path.join(shotsDir, '26-live-passwordless.png') });
+
+  // --- Ravencoin wallet: chain scoping + the native-send dispatch ------------
+  // Two regressions this section pins down, both found by the owner's live test:
+  //   1. buildSend dispatched on a literal 'EVR', so native RVN went down the
+  //      ASSET path -> `Asset "RVN" was not found on the Ravencoin network.`
+  //      at review. The Review click below is the ONLY thing that exercises the
+  //      dispatch; three earlier probe runs looked green because they never
+  //      clicked it.
+  //   2. Recipient pickers must be scoped to the active wallet's chain: the
+  //      wallets created above are all Evrmore, so on this RVN wallet the
+  //      My-wallets quick-pick and the EVR address-book contact must NOT appear.
+  await backToHome();
+  await byId('live-wallet-switcher').click({ timeout: 10_000 });
+  await byId('live-add-wallet').click({ timeout: 10_000 });
+  await byId('live-onboarding').waitFor({ timeout: 10_000 });
+  await page.getByRole('button', { name: /Create new wallet/i }).click();
+  await byId('live-create').waitFor({ timeout: 10_000 });
+  await page
+    .locator('[data-testid^="live-create-chain"]')
+    .filter({ hasText: /Ravencoin/i })
+    .first()
+    .click();
+  await byId('live-wallet-name').fill('RVN Wallet');
+  await byId('live-no-password').check();
+  const rvnAck = byId('passwordless-ack');
+  if (await rvnAck.count()) await rvnAck.check();
+  await byId('live-create-submit').click();
+  await byId('live-mnemonic-saved').waitFor({ timeout: 20_000 });
+  await byId('live-mnemonic-saved').click();
+  await page.getByRole('button', { name: /I saved it/i }).click();
+  await byId('live-home').waitFor({ timeout: 30_000 });
+  const rvnAddr = (await byId('live-address').innerText()).trim();
+  check(/^R/.test(rvnAddr), `RVN wallet created -> R-address shown (${rvnAddr})`);
+
+  await byId('live-send').click({ timeout: 10_000 });
+  await byId('live-send-to').waitFor({ timeout: 10_000 });
+  check(
+    (await byId('live-send-my-wallets').count()) === 0,
+    'chain scoping: My-wallets hides the Evrmore wallets on a Ravencoin wallet',
+  );
+  check(
+    (await byId('live-send-contacts').count()) === 0,
+    'chain scoping: the EVR address-book contact is not offered on a Ravencoin wallet',
+  );
+  // Native RVN dispatch: review an unfunded send. The native path fails with
+  // insufficient funds; the asset path would fail FIRST with unknown-asset
+  // ("was not found"), so the two outcomes are unambiguous even at 0 balance.
+  await byId('live-send-to').fill('R9aKqDufsEYFGFn4vp2KczgmFkGWiLMRxY');
+  await byId('live-send-amount').fill('1');
+  await page.getByRole('button', { name: /Review transaction/i }).click();
+  let rvnSendErr = '';
+  for (let i = 0; i < 25; i++) {
+    rvnSendErr = (await byId('live-send-error').innerText().catch(() => '')) || '';
+    if (rvnSendErr) break;
+    await page.waitForTimeout(1000);
+  }
+  check(
+    /insufficient rvn/i.test(rvnSendErr) && !/was not found/i.test(rvnSendErr),
+    `native RVN send takes the NATIVE path -> "${rvnSendErr.trim()}"`,
+  );
+  await page.screenshot({ path: path.join(shotsDir, '31-live-rvn-send.png') });
+  await backToHome();
 
   // Reopen persistence: reload the popup and confirm the wallet is still there
   // (locked or home) — i.e. the real wallet is the app, no demo fallback.

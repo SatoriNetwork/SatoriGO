@@ -11,10 +11,19 @@ import { LiveAddAsset } from './LiveAddAsset';
 import { LiveNetwork } from './LiveNetwork';
 import { LiveNav, useNav } from './LiveNav';
 import { isDetachedWindow, openDetachedWindow } from '../../services/detachWindow';
-import { useLiveStore, computeDisplayedAssets, isRemovableAsset, usdValue } from '../../store/liveStore';
+import {
+  useLiveStore,
+  computeDisplayedAssets,
+  isRemovableAsset,
+  usdValue,
+  nativeTickerFor,
+  stakingSupported,
+  type LiveSyncing,
+} from '../../store/liveStore';
 import { getAppVersion } from '../../services/constants';
 import { isLegacyAsset, getAssetNote } from '../../services/assetNotes';
 import type { LiveAssetBalance, LiveTransaction } from '../../services/chain/electrumProvider';
+import type { NetworkStatus } from '../../types/domain';
 import {
   mergeActivity,
   filterActivity,
@@ -50,10 +59,14 @@ function fmtUsd(value: number): string {
   return `$${value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-/** USD price for a given asset name (only EVR + SATORIEVR are ever priced). */
-function priceForAsset(name: string, prices: { EVR?: number; SATORIEVR?: number }): number | undefined {
+/** USD price for a given asset name (only EVR, SATORIEVR and RVN are ever priced). */
+function priceForAsset(
+  name: string,
+  prices: { EVR?: number; SATORIEVR?: number; RVN?: number },
+): number | undefined {
   if (name === 'EVR') return prices.EVR;
   if (name === 'SATORIEVR') return prices.SATORIEVR;
+  if (name === 'RVN') return prices.RVN;
   return undefined;
 }
 
@@ -70,6 +83,88 @@ function fmtTxTime(ts: number): string {
 }
 
 type LedState = 'connected' | 'syncing' | 'offline';
+
+/** Inputs the header sync status (and the LED next to it) is derived from.
+ *  Kept as a plain struct rather than reading the store directly so the
+ *  derivation itself stays a pure, unit-testable function. */
+export interface SyncStatusInput {
+  offline: boolean;
+  loadingRefresh: boolean;
+  syncing: LiveSyncing;
+  network: NetworkStatus | null;
+  syncProgress: { done: number; total: number } | null;
+  lastSyncAt: number | null;
+}
+
+/** The compact header label + LED color it drives, plus a fuller tooltip
+ *  string for the title attribute. */
+export interface SyncStatus {
+  ledState: LedState;
+  /** Short text for the header, e.g. "Synced" / "Syncing 120/3400". */
+  label: string;
+  /** Fuller text for the title attribute, e.g. "Fully synced". */
+  tooltip: string;
+}
+
+/**
+ * Derive the header sync-status label (and the LED color it shares) from the
+ * store's transient sync fields. Priority, highest first:
+ *   1. offline                      -> red LED, "Offline"
+ *   2. syncProgress non-null        -> yellow LED (pulses), "Syncing X/Y" —
+ *      this fires EVEN IF none of the older "syncing" conditions below would,
+ *      because a background classification can keep running quietly after
+ *      the initial-load flags have all cleared.
+ *   3. loadingRefresh / syncing !== 'idle' / no network yet -> "Syncing…"
+ *   4. connected + idle + lastSyncAt set   -> green LED, "Synced" (the
+ *      "fully synced" signal the owner asked for)
+ *   5. connected + idle + lastSyncAt null  -> "Syncing…" (right after unlock,
+ *      before the first background sync has completed this session)
+ * Pure + exported so this can be unit-tested without mounting the screen.
+ */
+export function deriveSyncStatus(input: SyncStatusInput): SyncStatus {
+  const { offline, loadingRefresh, syncing, network, syncProgress, lastSyncAt } = input;
+
+  if (offline) {
+    return { ledState: 'offline', label: 'Offline', tooltip: 'Offline' };
+  }
+
+  if (syncProgress) {
+    const done = syncProgress.done.toLocaleString('en-US');
+    const total = syncProgress.total.toLocaleString('en-US');
+    return {
+      ledState: 'syncing',
+      label: `Syncing ${done}/${total}`,
+      tooltip: `Syncing transaction history: ${done} of ${total}`,
+    };
+  }
+
+  if (loadingRefresh || syncing !== 'idle' || !network) {
+    return { ledState: 'syncing', label: 'Syncing…', tooltip: 'Syncing…' };
+  }
+
+  if (lastSyncAt != null) {
+    return { ledState: 'connected', label: 'Synced', tooltip: 'Fully synced' };
+  }
+
+  // Connected + idle, but no background sync has completed yet this session
+  // (e.g. right after unlock, before the detached classification finishes).
+  return { ledState: 'syncing', label: 'Syncing…', tooltip: 'Syncing…' };
+}
+
+/**
+ * First-sync banner copy. With a known delta (syncProgress set) it shows live
+ * progress numbers; otherwise it keeps the original open-ended wording, since
+ * the total isn't known yet (e.g. the classification hasn't reported its
+ * first batch). Pure + exported for tests.
+ */
+export function formatSyncBannerText(syncProgress: { done: number; total: number } | null): string {
+  if (!syncProgress) {
+    return 'Syncing wallet data from the blockchain… this can take a while for wallets with history.';
+  }
+  const done = syncProgress.done.toLocaleString('en-US');
+  const total = syncProgress.total.toLocaleString('en-US');
+  return `Syncing wallet data from the blockchain… ${done} of ${total} transactions.`;
+}
 
 /** Small connection LED in the header: green = connected, yellow = downloading
  *  wallet data (refresh / initial or switching sync), red = offline. */
@@ -141,17 +236,24 @@ function TxRow({ tx, onOpen }: { tx: LiveTransaction; onOpen?: (txid: string) =>
       </div>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontSize: 12.5, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6 }}>
-          {isIn ? 'Received' : 'Sent'} {tx.asset}
+          <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {isIn ? 'Received' : 'Sent'} {tx.asset}
+          </span>
           {tx.status === 'pending' && (
-            <span className="chip warning" style={{ fontSize: 9, padding: '1px 5px' }}>pending</span>
+            <span className="chip warning" style={{ fontSize: 9, padding: '1px 5px', flexShrink: 0 }}>pending</span>
           )}
         </div>
         <div className="text-dim mono" style={{ fontSize: 10.5, marginTop: 1 }}>
           {tx.txid ? `${tx.txid.slice(0, 10)}...` : 'n/a'}
         </div>
       </div>
-      <div style={{ textAlign: 'right', flexShrink: 0 }}>
-        <div style={{ fontSize: 12.5, fontWeight: 600, color: isIn ? 'var(--success)' : 'var(--text)' }}>
+      {/* Right-aligned amount: cap its width and single-line ellipsis so a long
+          asset ticker (e.g. "+123.45 JACKDAWTOKEN.COM/WHITEPAPER") truncates from
+          the ticker end while the numeric amount at the start stays visible and
+          the left column keeps a readable share of the row. Short amounts fit
+          under the cap and render exactly as before. */}
+      <div style={{ textAlign: 'right', flexShrink: 0, minWidth: 0, maxWidth: '60%' }}>
+        <div style={{ fontSize: 12.5, fontWeight: 600, color: isIn ? 'var(--success)' : 'var(--text)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
           {isIn ? '+' : '-'}{fmtAmount(tx.amount)} {tx.asset}
         </div>
         <div className="text-dim" style={{ fontSize: 10.5, whiteSpace: 'nowrap' }}>
@@ -218,6 +320,7 @@ function BalanceRow({
   onRemove,
   onSelect,
   staked,
+  nativeTicker,
 }: {
   asset: LiveAssetBalance;
   price?: number;
@@ -225,6 +328,8 @@ function BalanceRow({
   onSelect?: (name: string) => void;
   /** Present only for SATORIEVR when the wallet is registered with a pool. */
   staked?: { poolAlias: string | null; poolAddress: string };
+  /** Active chain's native ticker; gates the Evrmore-only "legacy SATORI" pill. */
+  nativeTicker: 'EVR' | 'RVN';
 }) {
   // Secondary USD value for this row — only when a price exists for the asset.
   const usd = usdValue(asset.amount, price);
@@ -249,13 +354,13 @@ function BalanceRow({
       <TokenIcon assetId={asset.name} size={26} />
       <div
         className="token-name"
-        style={{ flex: 1, minWidth: 0, fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 6 }}
+        style={{ flex: 1, minWidth: '3.5em', fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 6 }}
       >
-        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{asset.name}</span>
-        {isLegacyAsset(asset.name) && (
+        <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{asset.name}</span>
+        {isLegacyAsset(asset.name, nativeTicker) && (
           <span
             data-testid="legacy-asset-pill"
-            title={getAssetNote(asset.name)?.note}
+            title={getAssetNote(asset.name, nativeTicker)?.note}
             style={{
               flexShrink: 0,
               fontSize: 9.5,
@@ -285,10 +390,18 @@ function BalanceRow({
           </span>
         )}
       </div>
-      {/* Compact single line: amount + USD side by side, right-aligned. */}
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 7, flexShrink: 0, whiteSpace: 'nowrap' }}>
+      {/* Compact single line: amount + USD side by side, right-aligned. The group
+          may shrink (flexShrink:1) and clips its overflow, but its automatic
+          min-content floor equals the bold amount, so the AMOUNT is never
+          squeezed. Only the secondary USD gives way (it carries minWidth:0, so
+          it contributes nothing to that floor and is the part that clips). The
+          maxWidth cap and the name's minWidth floor keep a readable name + a real
+          gap before the Remove button on a funded (very wide) balance. At a zero
+          or normal balance the content fits, nothing clips, and it renders
+          identically to before. */}
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 7, flexShrink: 1, maxWidth: '62%', overflow: 'hidden', whiteSpace: 'nowrap' }}>
         <span
-          style={{ fontWeight: 700, fontSize: 13, fontVariantNumeric: 'tabular-nums' }}
+          style={{ fontWeight: 700, fontSize: 13, fontVariantNumeric: 'tabular-nums', flexShrink: 0 }}
           data-testid={`live-balance-${asset.name}`}
         >
           {fmtAmount(asset.amount)}
@@ -297,7 +410,7 @@ function BalanceRow({
           <span
             className="text-dim"
             data-testid={`live-asset-usd-${asset.name}`}
-            style={{ fontSize: 11 }}
+            style={{ fontSize: 11, minWidth: 0 }}
           >
             ≈ {fmtUsd(usd)}
           </span>
@@ -344,6 +457,8 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx }: LiveH
   const removeWallet = useLiveStore((s) => s.removeWallet);
   const addWalletStart = useLiveStore((s) => s.addWalletStart);
   const syncing = useLiveStore((s) => s.syncing);
+  const syncProgress = useLiveStore((s) => s.syncProgress);
+  const lastSyncAt = useLiveStore((s) => s.lastSyncAt);
   const unreadActivity = useLiveStore((s) => s.unreadActivity);
   const markActivitySeen = useLiveStore((s) => s.markActivitySeen);
   const staking = useLiveStore((s) => s.staking);
@@ -405,7 +520,11 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx }: LiveH
     : null;
 
   const activeWallet = wallets.find((w) => w.id === activeWalletId);
-  const activeWalletName = activeWallet?.name ?? 'Real EVRmore mainnet';
+  // Native ticker of the ACTIVE chain (follows svc.network(), independent of
+  // whether `activeWallet` was found in the list) — drives the hero label/unit.
+  const nativeTicker = nativeTickerFor();
+  const activeWalletName =
+    activeWallet?.name ?? (nativeTicker === 'RVN' ? 'Real Ravencoin mainnet' : 'Real EVRmore mainnet');
   const activeIsPk = activeWallet?.kind === 'pk';
   const deleteTarget = wallets.find((w) => w.id === deleteWalletId) ?? null;
 
@@ -414,9 +533,11 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx }: LiveH
     if (id !== activeWalletId) void switchWallet(id);
   };
 
-  // Dynamic (MetaMask-style) list: held ∪ pinned − hidden, EVR always first.
+  // Dynamic (MetaMask-style) list: held ∪ pinned − hidden, the native coin always
+  // first (EVR on Evrmore, RVN on Ravencoin — computeDisplayedAssets always flags
+  // it `isNative`, so this reads correctly on either chain).
   const displayAssets = computeDisplayedAssets(assets, pinnedAssets, hiddenAssets);
-  const evrBalance = displayAssets.find((a) => a.name === 'EVR')?.amount ?? 0;
+  const evrBalance = displayAssets.find((a) => a.isNative)?.amount ?? 0;
   const firstLoad = loadingRefresh && assets.length === 0;
 
   // Total portfolio USD = sum of (amount × price) over the priced displayed assets
@@ -428,19 +549,38 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx }: LiveH
     return v != null ? sum + v : sum;
   }, 0);
 
-  // Connection LED: red = unreachable, yellow = downloading wallet data (manual
-  // refresh, first sync of an unseen wallet, or no status yet), green = synced.
-  const ledState: LedState = offline
-    ? 'offline'
-    : loadingRefresh || syncing !== 'idle' || !network
-    ? 'syncing'
-    : 'connected';
+  // Connection LED + header sync-status label share one derivation: red =
+  // unreachable, yellow = downloading wallet data (manual refresh, first sync
+  // of an unseen wallet, a background classification still in progress, or no
+  // status yet), green = fully synced. See deriveSyncStatus for the priority
+  // order between these signals.
+  const syncStatus = deriveSyncStatus({ offline, loadingRefresh, syncing, network, syncProgress, lastSyncAt });
+  const ledState = syncStatus.ledState;
+  // The LED's own aria-label stays exactly as before (block height when
+  // connected) — the new, separate sync-status text next to it is what
+  // surfaces "Synced" / progress numbers.
   const ledLabel =
     ledState === 'offline'
       ? 'Offline'
       : ledState === 'syncing'
       ? 'Syncing…'
       : `Connected, block ${network ? network.blockHeight.toLocaleString('en-US') : 'n/a'}`;
+
+  // Version + Satori Network identity footer. Shared by every tab. On the assets
+  // tab it lives INSIDE the scrollable asset list (so it scrolls with the rows and
+  // never steals height from them / hides the last row); on the other tabs it sits
+  // at the end of the normally-scrolling panel exactly as before.
+  const footer = (
+    <div
+      className="text-faint"
+      style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3, padding: '18px 0 8px' }}
+    >
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 10.5, fontWeight: 600 }}>
+        <BrandLogo slot="satori" size={13} alt="Satori Network" /> Satori Network
+      </span>
+      <span style={{ fontSize: 10 }}>Satori GO v{getAppVersion()}</span>
+    </div>
+  );
 
   return (
     <div className="app-frame screen-enter" data-testid="live-home">
@@ -449,9 +589,29 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx }: LiveH
         <div className="brand">
           <BrandLogo slot="satori" size={34} alt="Satori Network" />
           <div style={{ minWidth: 0, display: 'flex', flexDirection: 'column' }}>
-            <div className="brand-title" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <div className="brand-title" style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
               Satori GO
               <ConnectionLed state={ledState} label={ledLabel} />
+              {/* Subtle sync-status text: tells the user "Synced" vs "Syncing"
+                  (with live progress numbers) without needing to hover the LED.
+                  It — not the brand name — is the element that shrinks/ellipses
+                  if the popup is too narrow to fit everything. */}
+              <span
+                data-testid="sync-status"
+                title={syncStatus.tooltip}
+                style={{
+                  fontSize: 9.5,
+                  fontWeight: 400,
+                  color: 'var(--text-faint)',
+                  whiteSpace: 'nowrap',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  minWidth: 0,
+                  flexShrink: 1,
+                }}
+              >
+                {syncStatus.label}
+              </span>
             </div>
             <button
               type="button"
@@ -533,12 +693,22 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx }: LiveH
                 style={{ gap: 7, flex: 1, minWidth: 0 }}
               >
                 {w.kind === 'pk' && <BrandLogo slot="satori" size={16} alt="Satori" />}
+                {w.network === 'ravencoin-mainnet' && <BrandLogo slot="rvn" size={16} alt="RVN" />}
                 <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {w.name}
                 </span>
                 <span className="chip neutral" style={{ fontSize: 8.5, padding: '1px 4px', flexShrink: 0 }}>
                   {w.kind === 'pk' ? 'Satori' : 'Seed'}
                 </span>
+                {w.network === 'ravencoin-mainnet' && (
+                  <span
+                    className="chip neutral"
+                    data-testid={`live-wallet-item-chain-${i}`}
+                    style={{ fontSize: 8.5, padding: '1px 4px', flexShrink: 0 }}
+                  >
+                    RVN
+                  </span>
+                )}
                 {w.passwordless && (
                   <span className="chip warning" style={{ fontSize: 8.5, padding: '1px 4px', flexShrink: 0 }}>No pw</span>
                 )}
@@ -577,12 +747,15 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx }: LiveH
         />
       )}
 
-      <div className="app-content" data-testid={`live-tab-panel-${tab}`}>
+      <div
+        className={tab === 'assets' ? 'app-content home-pinned' : 'app-content'}
+        data-testid={`live-tab-panel-${tab}`}
+      >
         {/* First-sync banner: non-blocking — data streams in while it shows. */}
         {syncing === 'initial' && (
           <div className="banner info" style={{ marginBottom: 10 }} data-testid="live-sync-banner">
             <span className="spinner" style={{ width: 13, height: 13, flexShrink: 0 }} />
-            Syncing wallet data from the blockchain… this can take a while for wallets with history.
+            {formatSyncBannerText(syncProgress)}
           </div>
         )}
 
@@ -626,15 +799,17 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx }: LiveH
               </div>
             </div>
 
-            {/* Hero balance — the .hero pattern. */}
+            {/* Hero balance — the .hero pattern. The testid is parametrised by the
+                native ticker: on an Evrmore wallet it still evaluates to the exact
+                historical 'live-balance-EVR' the live smoke asserts on. */}
             <div className="hero">
-              <div className="hero-label">EVR Balance</div>
+              <div className="hero-label">{nativeTicker} Balance</div>
               {firstLoad ? (
                 <Skeleton width={160} height={36} style={{ margin: '4px auto' }} />
               ) : (
-                <div className="hero-value" data-testid="live-balance-EVR">
+                <div className="hero-value" data-testid={`live-balance-${nativeTicker}`}>
                   {fmtAmount(evrBalance)}
-                  <span style={{ fontSize: 16, fontWeight: 500, marginLeft: 8, color: 'var(--text-dim)' }}>EVR</span>
+                  <span style={{ fontSize: 16, fontWeight: 500, marginLeft: 8, color: 'var(--text-dim)' }}>{nativeTicker}</span>
                 </div>
               )}
               {!firstLoad && hasPrice && (
@@ -700,35 +875,47 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx }: LiveH
                 <Plus size={13} /> Add token
               </button>
             </div>
-            {firstLoad ? (
-              <>
-                <TokenRowSkeleton />
-                <div style={{ marginTop: 9 }}>
+            {/* ONLY this region scrolls when the asset list grows. The footer
+                rides at its end so it scrolls with the rows and never hides the
+                last row. Everything above (hero, Send/Receive, Assets + Add
+                token) stays pinned in place. */}
+            <div className="home-scroll">
+              {firstLoad ? (
+                <>
                   <TokenRowSkeleton />
+                  <div style={{ marginTop: 9 }}>
+                    <TokenRowSkeleton />
+                  </div>
+                </>
+              ) : (
+                <div className="stack">
+                  {displayAssets.map((asset) => (
+                    <BalanceRow
+                      key={asset.name}
+                      asset={asset}
+                      price={priceForAsset(asset.name, prices)}
+                      onRemove={removeAsset}
+                      onSelect={onSelectAsset}
+                      nativeTicker={nativeTicker}
+                      staked={
+                        asset.name === 'SATORIEVR' && isStakedSatori && stakedPoolAddress
+                          ? { poolAlias: stakedPoolAlias, poolAddress: stakedPoolAddress }
+                          : undefined
+                      }
+                    />
+                  ))}
                 </div>
-              </>
-            ) : (
-              <div className="stack">
-                {displayAssets.map((asset) => (
-                  <BalanceRow
-                    key={asset.name}
-                    asset={asset}
-                    price={priceForAsset(asset.name, prices)}
-                    onRemove={removeAsset}
-                    onSelect={onSelectAsset}
-                    staked={
-                      asset.name === 'SATORIEVR' && isStakedSatori && stakedPoolAddress
-                        ? { poolAlias: stakedPoolAlias, poolAddress: stakedPoolAddress }
-                        : undefined
-                    }
-                  />
-                ))}
-              </div>
-            )}
+              )}
+              {footer}
+            </div>
           </>
         ) : tab === 'network' ? (
-          <LiveNetwork />
+          <>
+            <LiveNetwork />
+            {footer}
+          </>
         ) : (
+          <>
           <div data-testid="live-activity-list">
             <div className="section-label" style={{ marginTop: 2 }}>Activity</div>
             {loadingRefresh && mergedActivity.length === 0 ? (
@@ -740,7 +927,11 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx }: LiveH
               <EmptyState
                 icon={<Wifi size={20} />}
                 title="No transactions yet"
-                description="Activity will appear here once you send or receive EVR, or stake to a pool."
+                description={
+                  stakingSupported()
+                    ? `Activity will appear here once you send or receive ${nativeTicker}, or stake to a pool.`
+                    : `Activity will appear here once you send or receive ${nativeTicker}.`
+                }
               />
             ) : (
               <>
@@ -820,18 +1011,9 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx }: LiveH
               </>
             )}
           </div>
+          {footer}
+          </>
         )}
-
-        {/* Version + Satori Network identity footer */}
-        <div
-          className="text-faint"
-          style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3, padding: '18px 0 8px' }}
-        >
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 10.5, fontWeight: 600 }}>
-            <BrandLogo slot="satori" size={13} alt="Satori Network" /> Satori Network
-          </span>
-          <span style={{ fontSize: 10 }}>Satori GO v{getAppVersion()}</span>
-        </div>
       </div>
 
       <LiveNav />

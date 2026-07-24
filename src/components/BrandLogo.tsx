@@ -6,9 +6,15 @@ import { useBrandingStore } from '../store/brandingStore';
 import type { LogoSlot } from '../services/branding';
 import evrLogoUrl from '../assets/evrmore-logo.svg';
 import satoriLogoUrl from '../assets/satori-logo.png';
+// Official Ravencoin (RVN) logo. Source: RavenProject/Ravencoin repo,
+// src/qt/res/icons/raven.png (MIT licensed), downscaled from 1024x1024 to
+// 256x256. https://raw.githubusercontent.com/RavenProject/Ravencoin/master/src/qt/res/icons/raven.png
+import rvnLogoUrl from '../assets/raven-logo.png';
 
 export function officialLogoUrl(slot: LogoSlot): string {
-  return slot === 'satori' ? satoriLogoUrl : evrLogoUrl;
+  if (slot === 'satori') return satoriLogoUrl;
+  if (slot === 'rvn') return rvnLogoUrl;
+  return evrLogoUrl;
 }
 
 const SIZE_FACTOR = { sm: 0.85, md: 1, lg: 1.22 } as const;
@@ -44,8 +50,9 @@ export function BrandLogo({ slot, size, bare = false, alt = '', className }: Bra
 }
 
 interface TokenIconProps {
-  /** Any EVRmore asset name. "EVR" -> EVR logo; a name containing "SATORI" ->
-   *  the Satori logo; anything else -> a generic deterministic badge. */
+  /** Any EVRmore asset name. "EVR" -> EVR logo; "RVN" -> the Ravencoin logo;
+   *  a name containing "SATORI" -> the Satori logo; anything else -> a
+   *  generic deterministic badge. */
   assetId: string;
   size?: number;
 }
@@ -90,6 +97,7 @@ function GenericTokenBadge({ name, size }: { name: string; size: number }) {
 export function TokenIcon({ assetId, size = 38 }: TokenIconProps) {
   const name = (assetId ?? '').toUpperCase();
   if (name === 'EVR') return <BrandLogo slot="evr" size={size} alt="EVR" />;
+  if (name === 'RVN') return <BrandLogo slot="rvn" size={size} alt="RVN" />;
   if (name.includes('SATORI')) return <BrandLogo slot="satori" size={size} alt={name} />;
   return <GenericTokenBadge name={name} size={size} />;
 }

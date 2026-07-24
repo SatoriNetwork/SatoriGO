@@ -40,7 +40,7 @@
 import { hexToBytes, bytesToHex } from '@noble/hashes/utils';
 import { txid as computeTxid } from './txBuilder';
 import { electrumGetRawTx } from './electrumClient';
-import { decodeAssetScript } from './assetScript';
+import { decodeAssetScript, DEFAULT_MARKER_PREFIX, type AssetMarkerPrefix } from './assetScript';
 import type { ElectrumClient } from './electrumTypes';
 
 /** A single parsed output of a raw transaction: its 8-byte nValue and the raw
@@ -148,10 +148,16 @@ export interface VerifiableInput {
  * Throws `input-verify-failed` (fetch/parse/txid/script mismatch, unknown kind)
  * or `input-value-mismatch` (a value/amount lie) — either aborts the send BEFORE
  * signing. Fails CLOSED on everything unexpected.
+ *
+ * `assetMarkerPrefix` is the ACTIVE chain's marker family ('evr'|'rvn'); asset
+ * prevouts are decoded ONLY as that family, so a prevout carrying a different
+ * chain's marker (e.g. an "evrt" output while sending on Ravencoin) fails closed.
+ * Defaults to 'evr' to keep Evrmore callers/tests unchanged.
  */
 export async function verifyInputAmounts(
   client: ElectrumClient,
   inputs: VerifiableInput[],
+  assetMarkerPrefix: AssetMarkerPrefix = DEFAULT_MARKER_PREFIX,
 ): Promise<void> {
   const cache = new Map<string, TxOutput[]>();
   for (const inp of inputs) {
@@ -179,8 +185,8 @@ export async function verifyInputAmounts(
       // issuance/reissue prevout is a valid asset output with a different byte
       // layout than a reconstructed transfer script).
       if (out.nValue !== 0n) throw new Error('input-value-mismatch');
-      const onChain = decodeAssetScript(out.scriptHex);
-      const claimed = decodeAssetScript(claimedScript);
+      const onChain = decodeAssetScript(out.scriptHex, assetMarkerPrefix);
+      const claimed = decodeAssetScript(claimedScript, assetMarkerPrefix);
       // The claimed script is one we built, so it must decode; the on-chain one
       // must decode as an asset output too. Anything else: fail closed.
       if (!onChain || !claimed) throw new Error('input-verify-failed');

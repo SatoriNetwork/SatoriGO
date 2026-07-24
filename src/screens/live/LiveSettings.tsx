@@ -40,7 +40,8 @@ import { BrandLogo } from '../../components/BrandLogo';
 import { EmptyState } from '../../components/EmptyState';
 import { AccentSwatches } from '../settings/AppearanceSettings';
 import { useSettingsStore } from '../../store/settingsStore';
-import { useLiveStore } from '../../store/liveStore';
+import { useLiveStore, activeChainId } from '../../store/liveStore';
+import { networkFor } from '../../services/chain/chainParams';
 import { MIN_PASSWORD_LENGTH, getAppVersion } from '../../services/constants';
 import type { ThemeMode } from '../../services/settings';
 import type { LiveTransaction } from '../../services/chain/electrumProvider';
@@ -859,7 +860,7 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
           <div className="list-row">
             <span className="row-main">
               <span className="row-title">Notify on incoming funds</span>
-              <span className="row-desc">Show a desktop notification when EVR or an asset arrives in any wallet.</span>
+              <span className="row-desc">Show a desktop notification when a coin or asset arrives in any wallet.</span>
             </span>
             <Toggle
               checked={notifyDeposits}
@@ -1047,6 +1048,13 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
 
       {section === 'network' && (
         <>
+          <p
+            className="text-faint"
+            data-testid="live-network-chain-caption"
+            style={{ fontSize: 11, margin: '0 2px 10px', lineHeight: 1.5 }}
+          >
+            Servers for: {networkFor(activeChainId()).displayName}
+          </p>
           <TextField
             label="Block explorer URL"
             placeholder="https://example.com/tx/{txid}"
@@ -1320,7 +1328,7 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
             data-testid="live-about-intro"
             style={{ fontSize: 11, margin: '0 2px 10px', lineHeight: 1.6 }}
           >
-            Satori GO is a non-custodial wallet for the Satori Network, a decentralized AI network
+            Satori GO is a non-custodial wallet made by Satori Network, the decentralized AI network
             whose neurons predict the future and earn SATORIEVR for it. Your keys are encrypted and
             never leave this device.
           </p>
@@ -1330,9 +1338,8 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
             data-testid="live-about-multichain"
             style={{ fontSize: 11, margin: '0 2px 10px', lineHeight: 1.6 }}
           >
-            EVRmore is the first chain it speaks, not the only one it is built for. The wallet is
-            designed to carry several networks, including the smaller chains that rarely get a
-            wallet of their own.
+            This is a multi-chain wallet, not built around any single network. It is designed to
+            carry several chains, including the smaller ones that rarely get a wallet of their own.
           </p>
 
           <p

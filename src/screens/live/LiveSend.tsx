@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ChevronLeft, AlertTriangle, CheckCircle, BookUser, Wallet } from 'lucide-react';
+import { ChevronLeft, AlertTriangle, CheckCircle, BookUser, Check, Wallet } from 'lucide-react';
 import { Button } from '../../components/Button';
 import { TextField, PasswordField } from '../../components/TextField';
 import { TokenIcon } from '../../components/BrandLogo';
-import { useLiveStore, computeDisplayedAssets } from '../../store/liveStore';
+import { useLiveStore, computeDisplayedAssets, walletsOnChain } from '../../store/liveStore';
 import { isValidAddress, isP2pkhAddress } from '../../services/chain/keys';
-import { EVRMORE_MAINNET } from '../../services/chain/chainParams';
+import { networkFor } from '../../services/chain/chainParams';
 import { isLegacyAsset } from '../../services/assetNotes';
-import type { LiveSendPlan } from '../../services/chain/liveWallet';
+import type { LiveSendPlan, LiveNetworkId } from '../../services/chain/liveWallet';
 import { LiveNav } from './LiveNav';
 
 interface LiveSendProps {
@@ -47,26 +47,40 @@ function fmtBalance(amount: number, decimals: number): string {
   return dp === 0 ? s : s.replace(/\.?0+$/, '');
 }
 
-/** Turn a raw build/broadcast error code into a clear, human message. */
-function friendlyError(msg: string, assetId: string): string {
+/** Turn a raw build/broadcast error code into a clear, human message. `native`
+ *  is the active chain's ticker ('EVR' or 'RVN'): every message keeps its exact
+ *  historical EVR wording (the live smoke asserts on it) and only branches for
+ *  a Ravencoin wallet. */
+function friendlyError(msg: string, assetId: string, native: 'EVR' | 'RVN'): string {
+  const isRvn = native === 'RVN';
   switch (msg) {
     case 'insufficient-asset':
       return `Insufficient ${assetId} balance for this transfer.`;
     case 'insufficient-evr-for-fee':
-      return 'Not enough EVR to cover the network fee for this asset transfer.';
+      return isRvn
+        ? 'Not enough RVN to cover the network fee for this asset transfer.'
+        : 'Not enough EVR to cover the network fee for this asset transfer.';
     case 'invalid-amount-precision':
       return `That amount is finer than ${assetId} allows. Reduce the number of decimals.`;
     case 'unknown-asset':
-      return `Asset "${assetId}" was not found on the EVRmore network.`;
+      return isRvn
+        ? `Asset "${assetId}" was not found on the Ravencoin network.`
+        : `Asset "${assetId}" was not found on the EVRmore network.`;
     case 'invalid-amount':
       return 'Enter a valid amount greater than 0.';
     case 'insufficient-funds':
-      return 'Insufficient EVR balance for this transaction (amount + network fee).';
+      return isRvn
+        ? 'Insufficient RVN balance for this transaction (amount + network fee).'
+        : 'Insufficient EVR balance for this transaction (amount + network fee).';
     case 'unsupported-address-type':
-      return 'That is not a standard EVRmore address (only addresses starting with E are supported; P2SH / wrong-network addresses are rejected).';
+      return isRvn
+        ? 'That is not a standard Ravencoin address (only addresses starting with R are supported; P2SH / wrong-network addresses are rejected).'
+        : 'That is not a standard EVRmore address (only addresses starting with E are supported; P2SH / wrong-network addresses are rejected).';
     case 'input-verify-failed':
     case 'input-value-mismatch':
       return 'Could not verify your coins against the network (the server may be faulty or malicious). Nothing was sent. Try another Electrum server in Settings.';
+    case 'broadcast-unconfirmed':
+      return 'The server had a problem and the transaction could not be confirmed as sent. Nothing appears on the network. It is safe to try again.';
     default:
       return msg;
   }
@@ -91,43 +105,58 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
   const hiddenAssets = useLiveStore((s) => s.hiddenAssets);
   const estimateMaxEvr = useLiveStore((s) => s.estimateMaxEvr);
 
-  // Resolve which asset we're sending. Absent / 'EVR' => native coin.
-  const assetId = asset && asset.toUpperCase() !== 'EVR' ? asset.toUpperCase() : 'EVR';
-  const isAsset = assetId !== 'EVR';
-
-  // Displayed (spendable) balance for the selected asset — the same list the
-  // home screen shows. EVR is always present; an asset falls back to a raw
-  // balance lookup (or 0) if it isn't in the displayed set.
-  const displayedAssets = computeDisplayedAssets(assets, pinnedAssets, hiddenAssets);
-  const balanceRow =
-    displayedAssets.find((a) => a.name === assetId) ?? assets.find((a) => a.name === assetId);
-  const availableBalance = balanceRow?.amount ?? 0;
-  const assetDecimals = balanceRow?.decimals ?? 8;
-
-  // Every asset transfer pays its network fee exclusively from EVR UTXOs
-  // (LiveWalletService.buildAssetSend -> 'insufficient-evr-for-fee'). With 0 EVR,
-  // no asset can ever be sent, no matter the asset amount. Detect that up front
-  // (same `assets` list the rest of the screen reads EVR from) and block the
-  // send before the user hits the build-time error. Nonzero-but-insufficient EVR
-  // still flows to the existing build-time error, since the exact fee isn't
-  // known until build.
-  const evrBalance = assets.find((a) => a.isNative || a.name === 'EVR')?.amount ?? 0;
-  const noEvrForGas = isAsset && evrBalance === 0;
-
   // A passwordless wallet has no password to confirm — skip the whole password
   // step (no `live-send-password` field). Otherwise honour the user setting.
   const activeWallet = wallets.find((w) => w.id === activeWalletId);
   const isPasswordless = activeWallet?.passwordless ?? false;
   const requirePassword = requirePasswordToSend && !isPasswordless;
 
+  // The active wallet's chain (defaults to Evrmore mainnet, same as the store's
+  // own default) drives address validation + every chain-aware label below.
+  const activeNet = networkFor((activeWallet?.network as LiveNetworkId | undefined) ?? 'mainnet');
+  const nativeTicker = activeNet.ticker; // 'EVR' | 'RVN'
+
+  // Resolve which asset we're sending. Absent / the chain's native ticker => the
+  // native coin (EVR on Evrmore, RVN on Ravencoin).
+  const assetId = asset && asset.toUpperCase() !== nativeTicker ? asset.toUpperCase() : nativeTicker;
+  const isAsset = assetId !== nativeTicker;
+
+  // Displayed (spendable) balance for the selected asset — the same list the
+  // home screen shows. The native coin is always present; an asset falls back to
+  // a raw balance lookup (or 0) if it isn't in the displayed set.
+  const displayedAssets = computeDisplayedAssets(assets, pinnedAssets, hiddenAssets);
+  const balanceRow =
+    displayedAssets.find((a) => a.name === assetId) ?? assets.find((a) => a.name === assetId);
+  const availableBalance = balanceRow?.amount ?? 0;
+  const assetDecimals = balanceRow?.decimals ?? 8;
+
+  // Every asset transfer pays its network fee exclusively from the chain's native
+  // UTXOs (LiveWalletService.buildAssetSend -> 'insufficient-evr-for-fee'). With
+  // 0 native balance, no asset can ever be sent, no matter the asset amount.
+  // Detect that up front (same `assets` list the rest of the screen reads the
+  // native balance from) and block the send before the user hits the build-time
+  // error. Nonzero-but-insufficient native balance still flows to the existing
+  // build-time error, since the exact fee isn't known until build.
+  const evrBalance = assets.find((a) => a.isNative || a.name === nativeTicker)?.amount ?? 0;
+  const noEvrForGas = isAsset && evrBalance === 0;
+
   // Other wallets you own (skip the active one + any with no known address) so
-  // funds can be moved between your wallets in one tap.
-  const myWallets = wallets.filter((w) => w.id !== activeWalletId && w.address);
+  // funds can be moved between your wallets in one tap. Scoped to the ACTIVE
+  // chain: cross-chain sends are impossible (an R... wallet cannot receive EVR and
+  // vice versa), so wallets on other chains must never be offered as recipients.
+  // Same rule for every future chain.
+  const myWallets = walletsOnChain(wallets, activeWallet?.network).filter(
+    (w) => w.id !== activeWalletId && w.address,
+  );
+
+  // Address-book entries are plain addresses with no chain tag, so scope them by
+  // what the address itself decodes to: only P2PKH addresses of the ACTIVE chain
+  // are offered (an EVR contact on a Ravencoin wallet is a guaranteed error).
+  const chainContacts = addressBook.filter((c) => isP2pkhAddress(c.address, activeNet));
 
   const [step, setStep] = useState<SendStep>('form');
   const [to, setTo] = useState('');
   // Name of the own wallet the recipient was quick-picked from ('' = none).
-  const [myWalletPicked, setMyWalletPicked] = useState('');
   const [amount, setAmount] = useState('');
   const [fieldError, setFieldError] = useState('');
   const [plan, setPlan] = useState<LiveSendPlan | null>(null);
@@ -191,20 +220,22 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
 
   const trimmedTo = to.trim();
   const alreadySaved = addressBook.some((c) => c.address === trimmedTo);
-  const canSaveContact = isValidAddress(trimmedTo) && !alreadySaved;
+  // Don't offer "Save to address book" for one of your OWN wallets: it is already
+  // in the My-wallets list, so saving it as a contact is redundant.
+  const isOwnWallet = myWallets.some((w) => w.address === trimmedTo);
+  const canSaveContact = isValidAddress(trimmedTo) && !alreadySaved && !isOwnWallet;
 
   const fillRecipient = (addr: string) => {
     setTo(addr);
-    setMyWalletPicked('');
     setContactSaved(false);
     setSavingContact(false);
   };
 
-  // Quick-pick one of your own wallets by NAME: fills the recipient and shows a
-  // "→ <name>" confirmation next to the field.
-  const pickMyWallet = (addr: string, name: string) => {
+  // Quick-pick one of your own wallets: fills the recipient. The picked wallet is
+  // shown by HIGHLIGHTING its own chip (below), not by a separate confirmation line
+  // that would shift the layout, so it stays obvious even with many wallets.
+  const pickMyWallet = (addr: string) => {
     fillRecipient(addr);
-    setMyWalletPicked(name);
     setFieldError('');
   };
 
@@ -258,17 +289,19 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
     }
   };
 
-  // Network-fee note under the chips.
+  // Network-fee note under the chips. Interpolating `nativeTicker` reproduces the
+  // exact historical 'EVR' wording on an Evrmore wallet (nativeTicker === 'EVR'),
+  // and reads correctly ('RVN') on a Ravencoin one.
   const feeNote = isAsset
-    ? 'Network fee: paid in EVR (from your EVR balance).'
+    ? `Network fee: paid in ${nativeTicker} (from your ${nativeTicker} balance).`
     : maxUsed && maxFeeEvr != null
-    ? `Network fee: ~${fmtBalance(maxFeeEvr, 8)} EVR (deducted from Max)`
+    ? `Network fee: ~${fmtBalance(maxFeeEvr, 8)} ${nativeTicker} (deducted from Max)`
     : typicalFeeEvr != null && typicalFeeEvr > 0
-    ? `Network fee: ~${fmtBalance(typicalFeeEvr, 8)} EVR (deducted from your EVR balance at review).`
-    : 'Network fee: deducted from your EVR balance at review.';
+    ? `Network fee: ~${fmtBalance(typicalFeeEvr, 8)} ${nativeTicker} (deducted from your ${nativeTicker} balance at review).`
+    : `Network fee: deducted from your ${nativeTicker} balance at review.`;
 
   // The store keeps raw error codes; map them for display on this screen.
-  const mappedStoreError = storeError ? friendlyError(storeError, assetId) : null;
+  const mappedStoreError = storeError ? friendlyError(storeError, assetId, nativeTicker) : null;
 
   const handleBuild = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -279,13 +312,19 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
       return;
     }
     if (!isValidAddress(to.trim())) {
-      setFieldError('Invalid EVRmore address.');
+      setFieldError(nativeTicker === 'RVN' ? 'Invalid Ravencoin address.' : 'Invalid EVRmore address.');
       return;
     }
     // Only standard P2PKH recipients are spendable — the builder emits P2PKH
     // outputs, so a P2SH ('e…') / wrong-network address would burn the funds.
-    if (!isP2pkhAddress(to.trim(), EVRMORE_MAINNET)) {
-      setFieldError('Only standard EVRmore addresses (starting with E) are supported. P2SH / wrong-network addresses are rejected.');
+    // Validated against the ACTIVE WALLET's chain (not a hardcoded Evrmore
+    // constant), so an RVN wallet accepts R... and rejects E... here too.
+    if (!isP2pkhAddress(to.trim(), activeNet)) {
+      setFieldError(
+        nativeTicker === 'RVN'
+          ? 'Only standard Ravencoin addresses (starting with R) are supported. P2SH / wrong-network addresses are rejected.'
+          : 'Only standard EVRmore addresses (starting with E) are supported. P2SH / wrong-network addresses are rejected.',
+      );
       return;
     }
     const amountNum = parseFloat(amount);
@@ -353,8 +392,13 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
   };
 
   const displayFormError = fieldError || (step === 'form' ? mappedStoreError : null);
-  // The unit shown on the review's amount row (asset name for asset sends).
-  const amountUnit = plan?.assetName ?? 'EVR';
+  // The unit shown on the review's amount row (asset name for asset sends; the
+  // chain's native ticker for a native send).
+  const amountUnit = plan?.assetName ?? nativeTicker;
+  // "EVRmore"/"Ravencoin network" mention on the review + success screens. Kept
+  // as an explicit branch (not net.displayName) so the Evrmore wording stays the
+  // exact historical "EVRmore network" the live smoke asserts on.
+  const chainNetworkName = nativeTicker === 'RVN' ? 'Ravencoin network' : 'EVRmore network';
 
   if (step === 'success') {
     return (
@@ -372,7 +416,7 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
               <CheckCircle size={32} />
             </div>
             <h3>Broadcast successful</h3>
-            <p>Your transaction has been submitted to the EVRmore network.</p>
+            <p>Your transaction has been submitted to the {chainNetworkName}.</p>
             <div
               className="card"
               style={{ marginTop: 16, width: '100%', textAlign: 'left' }}
@@ -408,7 +452,7 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
         <div className="app-content" data-testid="live-send-review">
           <div className="banner warning" style={{ marginBottom: 14 }}>
             <AlertTriangle size={14} />
-            This broadcasts a real {amountUnit} transaction to the EVRmore network. Sends cannot be undone.
+            This broadcasts a real {amountUnit} transaction to the {chainNetworkName}. Sends cannot be undone.
           </div>
 
           <div className="card solid" style={{ marginBottom: 14 }}>
@@ -423,7 +467,7 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
               </div>
               <div className="sum-row" data-testid="live-review-fee">
                 <span className="sum-key">Network fee</span>
-                <span className="sum-val">{fmtSats(plan.feeSats)} EVR</span>
+                <span className="sum-val">{fmtSats(plan.feeSats)} {nativeTicker}</span>
               </div>
               <div className="sum-row">
                 <span className="sum-key">Virtual size</span>
@@ -475,7 +519,7 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
                 <span
                   role="alert"
                   data-testid="live-send-password-error"
-                  style={{ fontSize: 11.5, color: 'var(--danger)', display: 'block', marginTop: -6 }}
+                  style={{ fontSize: 11.5, color: 'var(--danger)', display: 'block', marginTop: 4 }}
                 >
                   {passwordError}
                 </span>
@@ -521,56 +565,57 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
         <form onSubmit={handleBuild}>
           <TextField
             label="Recipient address"
-            placeholder="EVR address (starts with E)"
+            placeholder={nativeTicker === 'RVN' ? 'RVN address (starts with R)' : 'EVR address (starts with E)'}
             value={to}
-            onChange={(e) => { setTo(e.target.value); setMyWalletPicked(''); setContactSaved(false); }}
+            onChange={(e) => { setTo(e.target.value); setContactSaved(false); }}
             testId="live-send-to"
           />
-          {myWalletPicked && (
-            <div
-              data-testid="live-send-wallet-selected"
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 5,
-                fontSize: 11.5,
-                fontWeight: 600,
-                color: 'var(--success)',
-                margin: '-6px 2px 10px',
-              }}
-            >
-              <Wallet size={12} /> → {myWalletPicked}
-            </div>
-          )}
 
-          {/* Quick-pick your OWN wallets by name: one tap moves funds between them. */}
+          {/* Quick-pick your OWN wallets: one tap fills the recipient. The chosen
+              wallet's chip highlights green (matched by address, so it survives
+              duplicate names and clears itself when you edit the recipient). No
+              separate confirmation line, so picking never shifts the layout. */}
           {myWallets.length > 0 && (
-            <div data-testid="live-send-my-wallets" style={{ margin: '2px 0 12px' }}>
+            <div data-testid="live-send-my-wallets" style={{ margin: '10px 0 12px' }}>
               <div className="section-label" style={{ marginTop: 0, marginBottom: 6 }}>My wallets</div>
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                {myWallets.map((w, i) => (
-                  <button
-                    key={w.id}
-                    type="button"
-                    className="chip neutral"
-                    onClick={() => pickMyWallet(w.address, w.name)}
-                    aria-label={`Send to my wallet ${w.name}`}
-                    title={`${w.name}: ${w.address}`}
-                    data-testid={`live-send-wallet-${i}`}
-                    style={{ cursor: 'pointer', maxWidth: '100%' }}
-                  >
-                    <Wallet size={11} style={{ flexShrink: 0 }} />
-                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {w.name}
-                    </span>
-                  </button>
-                ))}
+                {myWallets.map((w, i) => {
+                  const isPicked = !!w.address && trimmedTo === w.address;
+                  return (
+                    <button
+                      key={w.id}
+                      type="button"
+                      className="chip"
+                      onClick={() => pickMyWallet(w.address)}
+                      aria-label={`Send to my wallet ${w.name}`}
+                      aria-pressed={isPicked}
+                      title={`${w.name}: ${w.address}`}
+                      data-testid={`live-send-wallet-${i}`}
+                      style={{
+                        cursor: 'pointer',
+                        maxWidth: '100%',
+                        color: isPicked ? 'var(--success)' : 'var(--text-dim)',
+                        background: isPicked ? 'var(--success-bg)' : 'var(--card)',
+                        border: isPicked
+                          ? '1px solid color-mix(in srgb, var(--success) 45%, transparent)'
+                          : '1px solid var(--border)',
+                        fontWeight: isPicked ? 700 : 600,
+                        transition: 'all 0.15s',
+                      }}
+                    >
+                      {isPicked ? <Check size={11} style={{ flexShrink: 0 }} /> : <Wallet size={11} style={{ flexShrink: 0 }} />}
+                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {w.name}
+                      </span>
+                    </button>
+                  );
+                })}
               </div>
             </div>
           )}
 
           {/* Saved contacts from the address book. */}
-          {addressBook.length > 0 && (
+          {chainContacts.length > 0 && (
             <div style={{ display: 'flex', gap: 8, margin: '2px 0 12px', flexWrap: 'wrap' }}>
               <select
                 data-testid="live-send-contacts"
@@ -581,7 +626,7 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
                 style={{ flex: 1, minWidth: 128 }}
               >
                 <option value="">From address book…</option>
-                {addressBook.map((c) => (
+                {chainContacts.map((c) => (
                   <option key={c.address} value={c.address}>
                     {c.label} · {c.address.slice(0, 8)}…
                   </option>
@@ -642,11 +687,13 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
             error={displayFormError ?? undefined}
           />
 
-          {/* Available balance for the selected asset. */}
+          {/* Available balance for the selected asset. A small positive top margin
+              keeps a clear gap under the amount field (its focus ring extends a few
+              px); a negative margin here made "Available" touch the input. */}
           <div
             className="text-dim"
             data-testid="live-send-available"
-            style={{ fontSize: 11.5, margin: '-4px 2px 8px' }}
+            style={{ fontSize: 11.5, margin: '6px 2px 8px' }}
           >
             Available: {fmtBalance(availableBalance, assetDecimals)} {assetId}
           </div>
@@ -688,14 +735,44 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
           </p>
 
           <div className="section-label">Asset</div>
+          {/* Name over description in a shrinkable column so a long asset name
+              (e.g. JACKDAWTOKEN.COM/WHITEPAPER) truncates cleanly instead of
+              crushing the description into a 4-line sliver. */}
           <div className="token-row" style={{ marginBottom: 6 }}>
             <TokenIcon assetId={assetId} size={30} />
-            <span style={{ fontWeight: 700, fontSize: 13, marginLeft: 8 }}>{assetId}</span>
-            <span className="text-dim" style={{ fontSize: 11.5, flex: 1, marginLeft: 8 }}>
-              {isAsset ? 'EVRmore asset · fee paid in EVR' : 'EVRmore'}
-            </span>
+            <div style={{ minWidth: 0, marginLeft: 8, flex: 1 }}>
+              <div
+                style={{
+                  fontWeight: 700,
+                  fontSize: 13,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+                title={assetId}
+              >
+                {assetId}
+              </div>
+              <div
+                className="text-dim"
+                style={{
+                  fontSize: 11.5,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {nativeTicker === 'RVN'
+                  ? isAsset
+                    ? 'Ravencoin asset · fee paid in RVN'
+                    : 'Ravencoin'
+                  : isAsset
+                  ? 'EVRmore asset · fee paid in EVR'
+                  : 'EVRmore'}
+              </div>
+            </div>
           </div>
-          {isLegacyAsset(assetId) && (
+          {isLegacyAsset(assetId, nativeTicker) && (
             <p
               className="text-dim"
               data-testid="legacy-asset-send-note"
@@ -706,14 +783,14 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
           )}
           <p className="text-dim" style={{ fontSize: 11.5, margin: '0 2px 14px', lineHeight: 1.5 }}>
             {isAsset
-              ? `Sending ${assetId}. Network fees are always paid in EVR.`
-              : 'Sending the native EVR coin.'}
+              ? `Sending ${assetId}. Network fees are always paid in ${nativeTicker}.`
+              : `Sending the native ${nativeTicker} coin.`}
           </p>
 
           {noEvrForGas && (
             <div className="banner danger" data-testid="no-evr-gas-banner" style={{ marginBottom: 10 }}>
               <AlertTriangle size={14} />
-              You need EVR to pay the network fee. You can&apos;t send assets while your EVR balance is 0.
+              You need {nativeTicker} to pay the network fee. You can&apos;t send assets while your {nativeTicker} balance is 0.
             </div>
           )}
 

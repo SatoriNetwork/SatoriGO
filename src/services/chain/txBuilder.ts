@@ -25,7 +25,11 @@ import { hmac } from '@noble/hashes/hmac';
 import { concatBytes, hexToBytes, bytesToHex } from '@noble/hashes/utils';
 import * as secp256k1 from '@noble/secp256k1';
 import { p2pkhScript, addressToHash160 } from './keys';
-import { buildTransferAssetScriptFromHash160 } from './assetScript';
+import {
+  buildTransferAssetScriptFromHash160,
+  DEFAULT_MARKER_PREFIX,
+  type AssetMarkerPrefix,
+} from './assetScript';
 
 // @noble/secp256k1 v2's synchronous `sign` needs a synchronous HMAC-SHA256 for
 // its RFC6979 deterministic-k generation. The library ships an async HMAC (via
@@ -492,8 +496,12 @@ export function buildAndSignAssetTransfer(params: {
   assetChange?: AssetTxOutput;
   evrChangeAddress: string;
   feeSats: bigint;
+  /** Active chain's asset-marker family ('evr'|'rvn'). Defaults to 'evr' so
+   *  pre-existing Evrmore callers/tests build byte-identical scripts. */
+  assetMarkerPrefix?: AssetMarkerPrefix;
 }): BuiltTx {
   const { assetInputs, evrInputs, assetOut, assetChange, evrChangeAddress, feeSats } = params;
+  const markerPrefix = params.assetMarkerPrefix ?? DEFAULT_MARKER_PREFIX;
   if (assetInputs.length === 0) {
     throw new Error('buildAndSignAssetTransfer: no asset inputs');
   }
@@ -519,6 +527,7 @@ export function buildAndSignAssetTransfer(params: {
       assetRecipientHash,
       assetOut.assetName,
       assetOut.amountSats,
+      markerPrefix,
     ),
   });
 
@@ -531,6 +540,7 @@ export function buildAndSignAssetTransfer(params: {
         assetChangeHash,
         assetChange.assetName,
         assetChange.amountSats,
+        markerPrefix,
       ),
     });
   }

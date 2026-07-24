@@ -6,6 +6,20 @@
 // the address history; every subsequent load reuses the cache and touches only
 // the delta — so it is much faster.
 //
+// Fast + interruption-safe for LARGE histories (e.g. Satori pool-reward wallets
+// with thousands of small txs — the case that used to make first sync take tens
+// of minutes and never finish because a popup close / auto-lock wiped all
+// progress). Two properties make that bearable:
+//   - Newest-first: the delta is classified mempool-first then by height DESC,
+//     so recent activity lands in the cache first (what the user cares about).
+//   - Concurrent + CHECKPOINTED: txs are classified in small concurrent batches
+//     and the cache is persisted every CHECKPOINT_EVERY classified txs (not only
+//     at the very end). `knownHeights` already records which tx_hashes are done,
+//     so an interrupted run RESUMES from the last checkpoint on the next refresh
+//     instead of restarting from zero.
+// An optional onProgress hook reports classification progress (done / total) so
+// the UI can show a first-sync indicator.
+//
 // CSP-safe: this module only uses getStorage() and the small provider hook
 // below; it never opens a socket or touches the ElectrumClient directly.
 
@@ -37,6 +51,16 @@ export interface TransactionCacheProvider {
 }
 
 const CACHE_VERSION = 1;
+
+/** How many txs are classified concurrently per batch. Small enough to stay kind
+ *  to the Electrum server (each classify may fetch prevouts too), large enough to
+ *  cut the wall-clock time of a big first sync well below the old serial loop. */
+const CLASSIFY_BATCH_SIZE = 5;
+
+/** Persist a CHECKPOINT after this many freshly classified txs (= 4 batches of
+ *  CLASSIFY_BATCH_SIZE). Bounds how much progress a mid-sync interruption
+ *  (auto-lock / popup close) can cost to at most this many re-classifications. */
+const CHECKPOINT_EVERY = 20;
 
 /** Persisted shape under `txcache:<address>`. `knownHeights` records the last
  *  seen height per tx_hash (the authority for "have we classified this?") so a
@@ -87,16 +111,27 @@ export async function getCachedTransactions(address: string): Promise<LiveTransa
  * 1. Fetch light history (tx_hash + height).
  * 2. Diff against `knownHeights`: classify ONLY tx_hashes we have never seen,
  *    plus any previously-seen tx whose height changed (e.g. pending→confirmed).
- * 3. Merge the freshly classified txs over the cached ones, prune anything no
- *    longer in history (dropped/replaced mempool txs), sort, persist, return.
+ *    The delta is ordered newest-first (mempool, then height DESC) so recent
+ *    activity is classified before old history.
+ * 3. Classify the delta in small concurrent batches, persisting a CHECKPOINT
+ *    every CHECKPOINT_EVERY txs so an interrupted run resumes instead of
+ *    restarting. Merge over the cached txs, prune anything no longer in history
+ *    (dropped/replaced mempool txs), sort, persist the final view, return.
+ *
+ * `onProgress` (optional) is invoked as (done, total) after each batch, where
+ * `total` is the number of txs to classify this run; it is also called once with
+ * (0, total) before the first batch when there is anything to do (total > 0).
  *
  * Resilient: if the history fetch fails, the existing cache is returned intact.
  * A per-tx classification failure just leaves that tx for the next refresh — it
- * never wipes successfully cached transactions.
+ * never wipes successfully cached transactions. Because the cache is checkpointed
+ * during the run, a mid-sync interruption (auto-lock / popup close) loses at most
+ * the last partial checkpoint, not the whole sync.
  */
 export async function refreshTransactionCache(
   address: string,
   provider: TransactionCacheProvider,
+  onProgress?: (done: number, total: number) => void,
 ): Promise<LiveTransaction[]> {
   const existing = await readCache(address);
   const cachedTxs = existing?.txs ?? [];
@@ -126,20 +161,65 @@ export async function refreshTransactionCache(
     }
   }
 
-  // Classify only the delta. Record the height even when classification returns
-  // null (so a genuinely no-op tx isn't refetched forever); a per-tx failure is
-  // swallowed so it retries next refresh without losing the rest.
-  for (const item of toClassify) {
+  // Newest-first: mempool (height<=0) first, then confirmed by height DESC, so
+  // the txs the user is most likely to look for are classified (and checkpointed)
+  // before the long tail of old history.
+  toClassify.sort((a, b) => {
+    const aMempool = a.height <= 0;
+    const bMempool = b.height <= 0;
+    if (aMempool && !bMempool) return -1;
+    if (!aMempool && bMempool) return 1;
+    return b.height - a.height;
+  });
+
+  // Persist the current (possibly-partial) view. Used both for mid-run
+  // checkpoints and the final write; best-effort so it never throws.
+  const persist = async (): Promise<void> => {
+    const entry: TxCacheEntry = {
+      version: CACHE_VERSION,
+      txs: Array.from(byTxid.values()).sort(compareLiveTx),
+      knownHeights,
+    };
     try {
-      const classified = await provider.classifyTxHash(address, item.tx_hash, item.height);
-      if (classified) {
-        byTxid.set(item.tx_hash, classified);
-      } else {
-        byTxid.delete(item.tx_hash);
-      }
-      knownHeights[item.tx_hash] = item.height;
+      await getStorage().set(cacheKey(address), entry);
     } catch {
-      // Keep any existing cached version of this tx; retry on the next refresh.
+      // Persisting is best-effort; the in-memory view is still returned/continued.
+    }
+  };
+
+  const total = toClassify.length;
+  if (total > 0) onProgress?.(0, total);
+
+  // Classify the delta in small concurrent batches. Record the height even when
+  // classification returns null (so a genuinely no-op tx isn't refetched forever);
+  // a per-tx failure (rejected settle) is swallowed so it retries next refresh
+  // without losing the rest. Checkpoint every CHECKPOINT_EVERY classified txs.
+  let sinceCheckpoint = 0;
+  for (let i = 0; i < total; i += CLASSIFY_BATCH_SIZE) {
+    const batch = toClassify.slice(i, i + CLASSIFY_BATCH_SIZE);
+    const results = await Promise.allSettled(
+      batch.map((item) => provider.classifyTxHash(address, item.tx_hash, item.height)),
+    );
+    results.forEach((res, j) => {
+      const item = batch[j];
+      if (res.status === 'fulfilled') {
+        if (res.value) {
+          byTxid.set(item.tx_hash, res.value);
+        } else {
+          byTxid.delete(item.tx_hash);
+        }
+        knownHeights[item.tx_hash] = item.height;
+      }
+      // rejected: keep any existing cached version of this tx; retry next refresh.
+    });
+
+    const done = Math.min(i + batch.length, total);
+    onProgress?.(done, total);
+
+    sinceCheckpoint += batch.length;
+    if (sinceCheckpoint >= CHECKPOINT_EVERY) {
+      await persist();
+      sinceCheckpoint = 0;
     }
   }
 
@@ -154,12 +234,9 @@ export async function refreshTransactionCache(
 
   const merged = Array.from(byTxid.values()).sort(compareLiveTx);
 
-  const entry: TxCacheEntry = { version: CACHE_VERSION, txs: merged, knownHeights };
-  try {
-    await getStorage().set(cacheKey(address), entry);
-  } catch {
-    // Persisting is best-effort; still return the freshly merged view.
-  }
+  // Final write (after pruning). Always persist so the pruned + fully-classified
+  // view is the resume point for the next refresh.
+  await persist();
 
   return merged;
 }

@@ -2,7 +2,7 @@
 
 **Last updated: 13 July 2026**
 
-Satori GO is a non-custodial EVRmore (EVR) wallet distributed as a Chrome extension.
+Satori GO is a non-custodial multi-chain wallet distributed as a Chrome extension.
 This policy describes exactly what data the extension handles, what leaves your
 device, and who can see it.
 
@@ -52,20 +52,28 @@ Default servers: `electrumx1.satorinet.io`, `electrum1-mainnet.evrmorecoin.org`,
 transactions you broadcast, and your IP address. This is inherent to how every light
 wallet works. Running your own Electrum server avoids it.
 
-**2. Price sources** — to display an approximate USD value.
+**2. Ravencoin ElectrumX server:** to read balances and transaction history, and to
+broadcast transactions you have explicitly confirmed, for any Ravencoin wallet you
+create. Default server: `rvnx.satorinet.io`. You can change or replace this in
+**Settings → Network**, including pointing it at your own server.
+*What they can see:* the script hashes derived from your wallet addresses, the
+transactions you broadcast, and your IP address. This is inherent to how every light
+wallet works. Running your own Electrum server avoids it.
+
+**3. Price sources** — to display an approximate USD value.
 `api.coinex.com` (EVR price), `satorinet.io` (SATORIEVR price), `safe.trade`
 (fallback SATORIEVR price).
 *What they can see:* your IP address. **No wallet data, address, or balance is sent
 to them** — these are plain public price lookups.
 
-**3. The Satori pool API (`network.satorinet.io`)** — **only if you use SATORIEVR
+**4. The Satori pool API (`network.satorinet.io`)** — **only if you use SATORIEVR
 staking.** Joining or leaving a pool registers your address as a pool lender; it is
 not a blockchain transaction and moves no funds. To do this, the extension sends your
 EVRmore address and a signature proving you control it.
 *What they can see:* your EVRmore address and IP. If you never open the staking
 screen, this endpoint is never contacted.
 
-**4. A logo URL you type in yourself** — if you add a custom logo for an asset, the
+**5. A logo URL you type in yourself** — if you add a custom logo for an asset, the
 extension fetches that exact URL once, at the moment you save it. If you never do
 this, no such request is made.
 

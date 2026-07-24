@@ -221,6 +221,31 @@ body {
 .app-content::-webkit-scrollbar { width: 6px; }
 .app-content::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 3px; }
 
+/* Home assets tab only: pin the header/hero/actions/Assets label so Send +
+   Receive stay in one fixed place, and let ONLY the asset list scroll. LiveHome
+   adds .home-pinned to .app-content while the assets tab is active; every other
+   tab keeps the default full-panel .app-content scrolling above. The container
+   stops scrolling and becomes a flex column; the .home-scroll child takes the
+   leftover height and scrolls its overflow (rows + footer) with the same thin
+   scrollbar the panel already uses. Pinned children keep their natural height
+   (default min-height:auto); .home-scroll gets min-height:0 so it absorbs all
+   the shrinkage instead of squeezing the pinned block. */
+.app-content.home-pinned {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.app-content.home-pinned .home-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+.app-content.home-pinned .home-scroll::-webkit-scrollbar { width: 6px; }
+.app-content.home-pinned .home-scroll::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 3px; }
+
 .screen-enter { animation: screenIn var(--dur) var(--ease); }
 @keyframes screenIn {
   from { opacity: 0; transform: translateY(10px); }
@@ -276,7 +301,16 @@ body {
   align-items: center;
   padding: 10px var(--pad-screen) 6px;
 }
-.sub-header h2 { font-size: 15.5px; text-align: center; }
+/* min-width:0 lets the h2 shrink inside the 1fr grid track; the rest truncates a
+   long title (e.g. "Send JACKDAWTOKEN.COM/WHITEPAPER") instead of overflowing. */
+.sub-header h2 {
+  font-size: 15.5px;
+  text-align: center;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 /* ----- Logo rendering ----------------------------------------------------- */
 .logo-frame {

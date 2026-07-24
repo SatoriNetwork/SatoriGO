@@ -4,7 +4,13 @@
 // the config the future ElectrumWalletDataProvider consumes; it does not open
 // any connection by itself.
 
-import { EVRMORE_MAINNET, EVRMORE_TESTNET, type EvrmoreNetwork } from './chainParams';
+import {
+  EVRMORE_MAINNET,
+  EVRMORE_TESTNET,
+  networkFor,
+  type ChainId,
+  type EvrmoreNetwork,
+} from './chainParams';
 import { getStorage } from '../storage';
 
 export interface ElectrumEndpoint {
@@ -35,38 +41,107 @@ export const PUBLIC_ELECTRUM_SERVERS: ElectrumEndpoint[] = [
   { host: 'electrum2-mainnet.evrmorecoin.org', wssPort: 50004, sslPort: 50002, network: 'mainnet' },
 ];
 
+/** Ravencoin ElectrumX servers exposing browser-usable wss:// (valid TLS cert).
+ *  EXACTLY ONE endpoint: the owner's pending self-hosted, Cloudflare-fronted node
+ *  on port 443 (rvnx.satorinet.io). It is being deployed by the owner.
+ *
+ *  DO NOT add cipig (electrum{1,2,3}.cipig.net) or any generic public Ravencoin
+ *  ElectrumX as an RVN fallback: cipig runs PLAIN (upstream) ElectrumX which
+ *  REJECTS the Evrmore/Ravencoin asset dialect (get_balance(sh, asset),
+ *  listunspent(sh, true), asset.get_meta). Mixing a plain node into this failover
+ *  pool would let a mid-failover reconnect land on a server that throws on every
+ *  asset call, silently breaking asset balances/history. Verified by live probe
+ *  2026-07-15 and 2026-07-21: cipig answers server.version but errors the asset
+ *  methods. The pool must stay single-dialect. */
+export const PUBLIC_RVN_ELECTRUM_SERVERS: ElectrumEndpoint[] = [
+  { host: 'rvnx.satorinet.io', wssPort: 443, sslPort: 50002, network: 'mainnet' },
+];
+
 export function electrumWssUrl(endpoint: ElectrumEndpoint): string {
   return `wss://${endpoint.host}:${endpoint.wssPort}`;
 }
 
 // ---------------------------------------------------------------------------
-// User-managed Electrum server pool
+// User-managed Electrum server pool (PER CHAIN)
 //
-// PUBLIC_ELECTRUM_SERVERS above are the built-in defaults. The user may override
-// the pool (add/edit/remove/reset) in Settings → Network; those choices are
-// persisted as `wss://host:port` strings under the `electrumServers` storage
-// key and applied to this module-level pool via applyStoredElectrumServers().
-// The Electrum client reads getElectrumServerPool() lazily AT CONNECT TIME, so a
-// change here is honoured on the next (re)connect without a page reload.
+// PUBLIC_ELECTRUM_SERVERS (Evrmore) / PUBLIC_RVN_ELECTRUM_SERVERS (Ravencoin) are
+// the built-in defaults. The user may override a chain's pool (add/edit/remove/
+// reset) in Settings → Network; those choices are persisted as `wss://host:port`
+// strings under a chain-keyed storage key and applied to the per-chain module
+// pool via applyStoredElectrumServers(chainId). The Electrum client reads
+// getElectrumServerPool(chainId) lazily AT CONNECT TIME, so a change here is
+// honoured on the next (re)connect without a page reload.
+//
+// The pool is keyed by chain (not by ambient "active chain" state) so the
+// BACKGROUND worker can poll a MIX of Evrmore and Ravencoin wallets concurrently
+// with a separate client per chain, each resolving its own pool. The two chains'
+// ElectrumX servers speak the SAME asset dialect but are DIFFERENT hosts, and
+// their pools must never be blended (see PUBLIC_RVN_ELECTRUM_SERVERS).
 
-/** Storage key holding the user's server pool as `wss://host:port` strings. */
+/** Storage key holding the user's EVRMORE server pool as `wss://host:port`
+ *  strings. Kept as the bare 'electrumServers' for BACKWARD COMPATIBILITY with
+ *  existing installs (pre-multichain, Evrmore-only). Ravencoin uses a suffixed
+ *  key (see electrumServersStorageKey). */
 export const ELECTRUM_SERVERS_STORAGE_KEY = 'electrumServers';
 
-/** The built-in default pool as `wss://host:port` URL strings (for the UI/reset). */
-export const DEFAULT_ELECTRUM_SERVER_URLS: string[] = PUBLIC_ELECTRUM_SERVERS.map(electrumWssUrl);
-
-/** Active user-configured pool (null = fall back to PUBLIC_ELECTRUM_SERVERS). */
-let activeServers: ElectrumEndpoint[] | null = null;
-
-/** Set the active pool. Passing null (or an empty array) restores the defaults. */
-export function setElectrumServers(endpoints: ElectrumEndpoint[] | null): void {
-  activeServers = endpoints && endpoints.length > 0 ? endpoints : null;
+/** Canonical per-chain pool key: 'evrmore' (mainnet + testnet share the same
+ *  server-role pool) or 'ravencoin-mainnet'. Ambient default = Evrmore. */
+type PoolKey = 'evrmore' | 'ravencoin-mainnet';
+function poolKey(chainId?: string): PoolKey {
+  if (!chainId) return 'evrmore';
+  // networkFor falls back to Evrmore mainnet for any unrecognised id, so an
+  // arbitrary string safely resolves to the Evrmore pool.
+  return networkFor(chainId as ChainId).chainId === 'ravencoin-mainnet'
+    ? 'ravencoin-mainnet'
+    : 'evrmore';
 }
 
-/** The pool the client should try, in order: the user's pool when configured,
- *  otherwise the built-in PUBLIC_ELECTRUM_SERVERS defaults. */
-export function getElectrumServerPool(): ElectrumEndpoint[] {
-  return activeServers && activeServers.length > 0 ? activeServers : PUBLIC_ELECTRUM_SERVERS;
+/** Storage key for a chain's user server pool. Evrmore keeps the legacy bare key
+ *  ('electrumServers'); Ravencoin is suffixed ('electrumServers:ravencoin-mainnet'). */
+export function electrumServersStorageKey(chainId?: string): string {
+  return poolKey(chainId) === 'ravencoin-mainnet'
+    ? `${ELECTRUM_SERVERS_STORAGE_KEY}:ravencoin-mainnet`
+    : ELECTRUM_SERVERS_STORAGE_KEY;
+}
+
+/** The built-in default EVRMORE pool as `wss://host:port` URL strings (UI/reset). */
+export const DEFAULT_ELECTRUM_SERVER_URLS: string[] = PUBLIC_ELECTRUM_SERVERS.map(electrumWssUrl);
+/** The built-in default RAVENCOIN pool as `wss://host:port` URL strings (UI/reset). */
+export const DEFAULT_RVN_ELECTRUM_SERVER_URLS: string[] = PUBLIC_RVN_ELECTRUM_SERVERS.map(electrumWssUrl);
+
+/** Built-in default endpoints for a chain (Evrmore vs Ravencoin). */
+function defaultPoolFor(key: PoolKey): ElectrumEndpoint[] {
+  return key === 'ravencoin-mainnet' ? PUBLIC_RVN_ELECTRUM_SERVERS : PUBLIC_ELECTRUM_SERVERS;
+}
+
+/** The built-in default pool URLs for a chain (UI/reset). */
+export function defaultServerUrlsFor(chainId?: string): string[] {
+  return defaultPoolFor(poolKey(chainId)).map(electrumWssUrl);
+}
+
+/** Active user-configured pool PER CHAIN (absent key = fall back to that chain's
+ *  built-in defaults). */
+const activeServersByChain = new Map<PoolKey, ElectrumEndpoint[]>();
+
+/** Set the active pool for a chain (default Evrmore). Passing null (or an empty
+ *  array) restores that chain's defaults. */
+export function setElectrumServers(
+  endpoints: ElectrumEndpoint[] | null,
+  chainId?: string,
+): void {
+  const key = poolKey(chainId);
+  if (endpoints && endpoints.length > 0) activeServersByChain.set(key, endpoints);
+  else activeServersByChain.delete(key);
+}
+
+/** The pool a chain's client should try, in order: the user's pool when
+ *  configured, otherwise that chain's built-in defaults (default Evrmore). */
+export function getElectrumServerPool(
+  chainId?: string,
+): ElectrumEndpoint[] {
+  const key = poolKey(chainId);
+  const active = activeServersByChain.get(key);
+  return active && active.length > 0 ? active : defaultPoolFor(key);
 }
 
 /** Serialize an endpoint back to its `wss://host:port` URL. */
@@ -105,21 +180,24 @@ export function parseServerUrl(input: string): ElectrumEndpoint | null {
   return { host, wssPort: port, sslPort: 50002, network: 'mainnet' };
 }
 
-/** Load the user's persisted server pool from storage and make it active. Reads
- *  the `electrumServers` string[] (wss URLs), parses each, and sets the pool
- *  (null → defaults when none are valid). Best-effort: storage may be absent. */
-export async function applyStoredElectrumServers(): Promise<void> {
+/** Load a CHAIN's persisted server pool from storage and make it active. Reads
+ *  that chain's stored string[] (wss URLs), parses each, and sets the pool (null →
+ *  defaults when none are valid). Default chain = Evrmore (legacy key). Best-effort:
+ *  storage may be absent. */
+export async function applyStoredElectrumServers(
+  chainId?: string,
+): Promise<void> {
   try {
-    const urls = await getStorage().get<string[]>(ELECTRUM_SERVERS_STORAGE_KEY);
+    const urls = await getStorage().get<string[]>(electrumServersStorageKey(chainId));
     if (!Array.isArray(urls)) {
-      setElectrumServers(null);
+      setElectrumServers(null, chainId);
       return;
     }
     const parsed = urls
       .filter((u): u is string => typeof u === 'string')
       .map(parseServerUrl)
       .filter((ep): ep is ElectrumEndpoint => ep !== null);
-    setElectrumServers(parsed.length > 0 ? parsed : null);
+    setElectrumServers(parsed.length > 0 ? parsed : null, chainId);
   } catch {
     // storage unavailable (jsdom/tests) — keep the current pool.
   }

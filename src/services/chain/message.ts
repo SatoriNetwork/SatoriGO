@@ -35,6 +35,10 @@ secp256k1.etc.hmacSha256Sync = (key: Uint8Array, ...msgs: Uint8Array[]): Uint8Ar
 /** Evrmore's message magic — byte-exact match to Evrmore Core / python-evrmorelib. */
 export const EVRMORE_MESSAGE_MAGIC = 'Evrmore Signed Message:\n';
 
+/** Ravencoin's message magic — byte-exact match to RavenProject/Ravencoin
+ *  src/validation.cpp:129 (`strMessageMagic = "Raven Signed Message:\n"`). */
+export const RAVEN_MESSAGE_MAGIC = 'Raven Signed Message:\n';
+
 const utf8 = new TextEncoder();
 
 /** Bitcoin CompactSize (varint) encoding of a non-negative length. Message and
@@ -57,9 +61,11 @@ function varstr(bytes: Uint8Array): Uint8Array {
 /**
  * The 32-byte double-SHA256 digest that gets signed:
  *   sha256(sha256( varstr(magic) || varstr(message) )).
+ * `magic` defaults to the Evrmore magic so every existing caller (Satori login on
+ * EVR) is byte-for-byte unchanged; pass a chain's magic for other chains.
  */
-export function messageHash(message: string): Uint8Array {
-  const preimage = concatBytes(varstr(utf8.encode(EVRMORE_MESSAGE_MAGIC)), varstr(utf8.encode(message)));
+export function messageHash(message: string, magic: string = EVRMORE_MESSAGE_MAGIC): Uint8Array {
+  const preimage = concatBytes(varstr(utf8.encode(magic)), varstr(utf8.encode(message)));
   return sha256(sha256(preimage));
 }
 
@@ -69,8 +75,13 @@ export function messageHash(message: string): Uint8Array {
  * was derived (all our wallets use compressed keys) or verification recovers a
  * different address. RFC6979-deterministic, canonical low-S.
  */
-export function signMessageWithKey(privateKey: Uint8Array, message: string, compressed = true): string {
-  const sig = secp256k1.sign(messageHash(message), privateKey, { lowS: true });
+export function signMessageWithKey(
+  privateKey: Uint8Array,
+  message: string,
+  compressed = true,
+  magic: string = EVRMORE_MESSAGE_MAGIC,
+): string {
+  const sig = secp256k1.sign(messageHash(message, magic), privateKey, { lowS: true });
   const header = 27 + sig.recovery + (compressed ? 4 : 0);
   const out = new Uint8Array(65);
   out[0] = header;
@@ -100,7 +111,7 @@ export function verifyMessage(
     const compressed = ((header - 27) & 4) !== 0;
     const recovered = secp256k1.Signature.fromCompact(bytes.slice(1))
       .addRecoveryBit(recId)
-      .recoverPublicKey(messageHash(message));
+      .recoverPublicKey(messageHash(message, net.messageMagic));
     return pubkeyToAddress(recovered.toRawBytes(compressed), net) === address;
   } catch {
     return false;

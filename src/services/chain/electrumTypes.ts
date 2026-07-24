@@ -45,6 +45,10 @@ export interface ElectrumClient {
   isConnected(): boolean;
   /** wss:// URL of the currently connected server (for the Network UI). */
   endpoint(): string | null;
+  /** OPTIONAL: retarget which chain's server pool this client resolves at connect
+   *  time (Evrmore vs Ravencoin). Only the concrete wss client implements it; the
+   *  in-memory test fakes omit it. Callers must use optional-call (`?.`). */
+  setPoolChain?(chainId: string): void;
 }
 
 export type ElectrumClientFactory = () => ElectrumClient;

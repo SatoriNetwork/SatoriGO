@@ -20,6 +20,7 @@ import { getStorage } from '../services/storage';
 import { createElectrumClient } from '../services/chain/electrumClient';
 import { ElectrumWalletDataProvider } from '../services/chain/electrumProvider';
 import { applyStoredElectrumServers } from '../services/chain/network';
+import { networkFor } from '../services/chain/chainParams';
 import { diffDeposits, type BalanceMap } from './deposits';
 import {
   addApproval,
@@ -28,11 +29,14 @@ import {
   type ApprovedEntry,
 } from './approvals';
 
-// Best-effort: adopt the user's configured Electrum server pool so the dApp
-// worker's watch-only reads (getBalances) use the SAME servers as the wallet UI.
-// The provider resolves the pool lazily at connect time, so this just needs to
-// run before the first getBalances — awaiting is unnecessary.
-void applyStoredElectrumServers();
+// Best-effort: adopt the user's configured Electrum server pools so the dApp
+// worker's watch-only reads (getBalances) and the deposit poll use the SAME
+// servers as the wallet UI. Applied PER CHAIN (each chain's pool is keyed
+// separately) so an RVN wallet polls RVN servers and an EVR wallet polls EVR
+// servers. The provider resolves the pool lazily at connect time, so this just
+// needs to run before the first read — awaiting is unnecessary.
+void applyStoredElectrumServers('evrmore-mainnet');
+void applyStoredElectrumServers('ravencoin-mainnet');
 
 /** storage (local, namespaced): list of {origin, walletId} approvals the user granted
  *  via Connect. An origin is "connected" only while an entry matches the request
@@ -86,6 +90,9 @@ interface PublicWalletEntry {
   name?: string;
   address?: string;
   passwordless?: boolean;
+  /** Stored LiveNetworkId ('mainnet'|'testnet'|'ravencoin-mainnet'). Absent =
+   *  legacy Evrmore. Used to poll each wallet against its own chain's pool. */
+  network?: string;
 }
 interface PublicWalletsRecord {
   version: number;
@@ -115,6 +122,16 @@ async function getActiveWalletAddress(): Promise<string | null> {
   if (!store || !Array.isArray(store.wallets)) return null;
   const entry = store.wallets.find((w) => w.id === store.activeId);
   return entry?.address ? entry.address : null;
+}
+
+/** The active wallet's { address, network } (public record). Network drives which
+ *  chain's pool/ticker the dApp getBalances read uses. Null when no active wallet. */
+async function getActiveWallet(): Promise<{ address: string; network: string } | null> {
+  const store = await getStorage().get<PublicWalletsRecord>(WALLETS_KEY);
+  if (!store || !Array.isArray(store.wallets)) return null;
+  const entry = store.wallets.find((w) => w.id === store.activeId);
+  if (!entry?.address) return null;
+  return { address: entry.address, network: entry.network ?? 'mainnet' };
 }
 
 // --- approved origins --------------------------------------------------------
@@ -152,10 +169,22 @@ async function addApprovedOrigin(origin: string): Promise<void> {
 
 // --- watch-only chain reads ----------------------------------------------------
 
-let provider: ElectrumWalletDataProvider | null = null;
-function getProvider(): ElectrumWalletDataProvider {
-  if (!provider) provider = new ElectrumWalletDataProvider(createElectrumClient());
-  return provider;
+// One provider (and its own Electrum client) PER CHAIN. The deposit poll can see
+// a MIX of Evrmore and Ravencoin wallets, and a single ambient-chain client can't
+// serve both concurrently (different hosts, and the native ticker differs). Each
+// per-chain client resolves that chain's pool at connect time; each provider
+// reports the right native name (EVR / RVN). Cached so we reuse one socket/chain.
+const providersByChain = new Map<string, ElectrumWalletDataProvider>();
+function getProviderForChain(chainId: string): ElectrumWalletDataProvider {
+  let p = providersByChain.get(chainId);
+  if (!p) {
+    const net = networkFor(chainId as never);
+    p = new ElectrumWalletDataProvider(createElectrumClient(undefined, { chainId }), {
+      network: net,
+    });
+    providersByChain.set(chainId, p);
+  }
+  return p;
 }
 
 // --- incoming-funds notifications --------------------------------------------
@@ -210,16 +239,18 @@ async function walletUiOpen(): Promise<boolean> {
   }
 }
 
-/** Unique { address, name } of every wallet's primary address (public record). */
-async function getWatchTargets(): Promise<{ address: string; name: string }[]> {
+/** Unique { address, name, chainId } of every wallet's primary address (public
+ *  record). chainId is the wallet's stored network so the poll hits the right
+ *  chain's server pool + native ticker. */
+async function getWatchTargets(): Promise<{ address: string; name: string; chainId: string }[]> {
   const store = await getStorage().get<PublicWalletsRecord>(WALLETS_KEY);
   if (!store || !Array.isArray(store.wallets)) return [];
   const seen = new Set<string>();
-  const out: { address: string; name: string }[] = [];
+  const out: { address: string; name: string; chainId: string }[] = [];
   for (const w of store.wallets) {
     if (typeof w.address === 'string' && w.address && !seen.has(w.address)) {
       seen.add(w.address);
-      out.push({ address: w.address, name: w.name || 'Wallet' });
+      out.push({ address: w.address, name: w.name || 'Wallet', chainId: w.network ?? 'mainnet' });
     }
   }
   return out;
@@ -256,12 +287,16 @@ async function checkDeposits(): Promise<void> {
   const snapshot = (await getStorage().get<DepositSnapshot>(DEPOSIT_SNAPSHOT_KEY)) ?? {};
   let changed = false;
 
-  for (const { address, name } of targets) {
+  // Group by chain so each group polls its OWN chain's pool via a per-chain
+  // provider/client. A chain whose pool is unreachable fails silently for that
+  // chain (the inner try/continue) WITHOUT affecting the other chain — no retry
+  // loop, bounded to one attempt per address per tick.
+  for (const { address, name, chainId } of targets) {
     let balances;
     try {
-      balances = await getProvider().getAllAssetBalances(address);
+      balances = await getProviderForChain(chainId).getAllAssetBalances(address);
     } catch {
-      continue; // address unreachable this cycle — try again next tick
+      continue; // address/chain unreachable this cycle — try again next tick
     }
     const current: BalanceMap = {};
     for (const b of balances) current[b.name] = b.amount;
@@ -382,11 +417,12 @@ async function handleDappRequest(
     }
     case 'getBalances': {
       if (!approved) return { error: 'not-connected' };
-      const address = await getActiveWalletAddress();
-      if (!address) return { error: 'no-wallet' };
+      const active = await getActiveWallet();
+      if (!active) return { error: 'no-wallet' };
       // Watch-only: dynamic per-asset balances (incl. SATORIEVR) for the PUBLIC
-      // address. No unlock, no keys — the page gets [{name, amount, decimals}].
-      const balances = await getProvider().getAllAssetBalances(address);
+      // address, read against the ACTIVE wallet's own chain (right pool + native
+      // ticker). No unlock, no keys — the page gets [{name, amount, decimals}].
+      const balances = await getProviderForChain(active.network).getAllAssetBalances(active.address);
       return {
         result: balances.map((b) => ({ name: b.name, amount: b.amount, decimals: b.decimals })),
       };

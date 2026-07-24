@@ -5,7 +5,7 @@
 import { ArrowDownLeft, ArrowUpRight, ChevronLeft, Info, Landmark, Trash2 } from 'lucide-react';
 import { TokenIcon } from '../../components/BrandLogo';
 import { EmptyState } from '../../components/EmptyState';
-import { useLiveStore, isRemovableAsset } from '../../store/liveStore';
+import { useLiveStore, isRemovableAsset, nativeTickerFor } from '../../store/liveStore';
 import { isLegacyAsset, getAssetNote } from '../../services/assetNotes';
 import type { LiveAssetBalance, LiveTransaction } from '../../services/chain/electrumProvider';
 import { LiveNav } from './LiveNav';
@@ -24,11 +24,14 @@ interface LiveAssetDetailProps {
 /** SATORIEVR is the only asset eligible for Satori pool staking. */
 const STAKING_ASSET = 'SATORIEVR';
 
-/** Human sub-label for an asset (mirrors LiveHome). */
-function assetSubLabel(asset: LiveAssetBalance): string {
+/** Human sub-label for an asset (mirrors LiveHome). `nativeTicker` is the active
+ *  chain's native coin ('EVR' or 'RVN') so a Ravencoin wallet reads correctly
+ *  instead of always assuming Evrmore. */
+function assetSubLabel(asset: LiveAssetBalance, nativeTicker: 'EVR' | 'RVN'): string {
   if (asset.name === 'EVR') return 'EVRmore';
+  if (asset.name === 'RVN') return 'Ravencoin';
   if (asset.name.includes('SATORI')) return 'Satori Network';
-  return 'EVRmore asset';
+  return nativeTicker === 'RVN' ? 'Ravencoin asset' : 'EVRmore asset';
 }
 
 /** Format a whole-unit amount using the asset's declared decimal precision. */
@@ -117,6 +120,7 @@ export function LiveAssetDetail({ asset, onBack, onReceive, onSend, onSelectTx, 
   const removeAsset = useLiveStore((s) => s.removeAsset);
   const txs = useLiveStore((s) => s.txs);
   const stakingStatuses = useLiveStore((s) => s.staking.addressStatuses);
+  const nativeTicker = nativeTickerFor();
   const canStake = asset.name === STAKING_ASSET && !!onStake;
   // "Staked" header chip when any SATORIEVR-holding address is registered with a
   // pool. Nice-to-have; only meaningful once the staking screen has fetched status.
@@ -142,14 +146,14 @@ export function LiveAssetDetail({ asset, onBack, onReceive, onSend, onSelectTx, 
       </div>
 
       <div className="app-content" data-testid="live-asset-detail">
-        {isLegacyAsset(asset.name) && (
+        {isLegacyAsset(asset.name, nativeTicker) && (
           <div
             className="banner info"
             data-testid="legacy-asset-banner"
             style={{ alignItems: 'flex-start' }}
           >
             <Info size={14} />
-            <span>{getAssetNote(asset.name)?.note}</span>
+            <span>{getAssetNote(asset.name, nativeTicker)?.note}</span>
           </div>
         )}
 
@@ -164,7 +168,22 @@ export function LiveAssetDetail({ asset, onBack, onReceive, onSend, onSelectTx, 
           }}
         >
           <TokenIcon assetId={asset.name} size={56} />
-          <div style={{ fontWeight: 700, fontSize: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
+          {/* Title may wrap (a long asset name breaks onto lines instead of
+              overflowing the centered header); the Staked chip stays on its own row. */}
+          <div
+            style={{
+              fontWeight: 700,
+              fontSize: 16,
+              display: 'flex',
+              flexWrap: 'wrap',
+              justifyContent: 'center',
+              alignItems: 'center',
+              gap: 8,
+              maxWidth: '100%',
+              wordBreak: 'break-word',
+              textAlign: 'center',
+            }}
+          >
             {asset.name}
             {isStaked && (
               <span className="chip" data-testid="live-asset-staked-chip" style={{ fontSize: 10 }}>
@@ -172,11 +191,11 @@ export function LiveAssetDetail({ asset, onBack, onReceive, onSend, onSelectTx, 
               </span>
             )}
           </div>
-          <div className="text-dim" style={{ fontSize: 12 }}>{assetSubLabel(asset)}</div>
+          <div className="text-dim" style={{ fontSize: 12 }}>{assetSubLabel(asset, nativeTicker)}</div>
           <div
             className="hero-value"
             data-testid={`live-asset-detail-balance-${asset.name}`}
-            style={{ marginTop: 4 }}
+            style={{ marginTop: 4, maxWidth: '100%', textAlign: 'center', wordBreak: 'break-word' }}
           >
             {fmtWithDecimals(asset.amount, asset.decimals)}
             <span style={{ fontSize: 15, fontWeight: 500, marginLeft: 8, color: 'var(--text-dim)' }}>

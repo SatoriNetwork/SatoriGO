@@ -3,13 +3,16 @@ import { QRCodeView } from '../../components/QRCodeView';
 import { CopyButton } from '../../components/CopyButton';
 import { Button } from '../../components/Button';
 import { TokenIcon } from '../../components/BrandLogo';
-import { useLiveStore, computeDisplayedAssets } from '../../store/liveStore';
+import { useLiveStore, nativeTickerFor } from '../../store/liveStore';
+import { networkFor } from '../../services/chain/chainParams';
+import type { LiveNetworkId } from '../../services/chain/liveWallet';
 import { ChevronLeft, CheckCircle, Plus } from 'lucide-react';
 import { LiveNav } from './LiveNav';
 
 interface LiveReceiveProps {
   onBack(): void;
-  /** Preselect this asset's receive chip (falls back to EVR when absent/removed). */
+  /** Kept for call-site compatibility; the receive address is chain-wide, so the
+   *  screen no longer branches on a specific asset. */
   initialAsset?: string;
 }
 
@@ -18,26 +21,25 @@ function shortAddr(address: string): string {
   return address.length > 22 ? `${address.slice(0, 10)}…${address.slice(-8)}` : address;
 }
 
-export function LiveReceive({ onBack, initialAsset }: LiveReceiveProps) {
+export function LiveReceive({ onBack }: LiveReceiveProps) {
   const address = useLiveStore((s) => s.address);
   const addresses = useLiveStore((s) => s.addresses);
-  const assets = useLiveStore((s) => s.assets);
-  const pinnedAssets = useLiveStore((s) => s.pinnedAssets);
-  const hiddenAssets = useLiveStore((s) => s.hiddenAssets);
   const wallets = useLiveStore((s) => s.wallets);
   const activeWalletId = useLiveStore((s) => s.activeWalletId);
   const addReceiveAddress = useLiveStore((s) => s.addReceiveAddress);
 
-  // EVR + the user's currently displayed assets — all share ONE receive address.
-  const displayAssets = computeDisplayedAssets(assets, pinnedAssets, hiddenAssets);
-  const [asset, setAsset] = useState(initialAsset ?? 'EVR');
-
-  // If the selected asset was just removed, fall back to EVR.
-  const active = displayAssets.some((a) => a.name === asset) ? asset : 'EVR';
+  // The active chain's native ticker (EVR on Evrmore, RVN on Ravencoin) and full
+  // network name. Every asset on a chain shares ONE receive address, so the screen
+  // shows the network, not a per-asset picker.
+  const activeWallet = wallets.find((w) => w.id === activeWalletId);
+  const nativeTicker = nativeTickerFor();
+  const networkName = nativeTicker === 'RVN' ? 'Ravencoin' : 'EVRmore';
+  // Kept for potential future use of the resolved chain params (no branch today).
+  void networkFor((activeWallet?.network as LiveNetworkId | undefined) ?? 'mainnet');
 
   // The active wallet's kind gates the add-address affordance: only seed wallets
   // can derive more addresses (a pk / Satori wallet has one fixed address).
-  const isSeedWallet = wallets.find((w) => w.id === activeWalletId)?.kind === 'seed';
+  const isSeedWallet = activeWallet?.kind === 'seed';
 
   // Which derived address the QR / copy row shows. Default = primary (index 0);
   // falls back to the primary when the selection is stale (e.g. wallet switch).
@@ -65,10 +67,8 @@ export function LiveReceive({ onBack, initialAsset }: LiveReceiveProps) {
     if (last) setSelectedIndex(last.index);
   };
 
-  const helper =
-    active === 'EVR'
-      ? 'Send EVR to this address.'
-      : `Send the ${active} asset to this address. EVR and ${active} share the same receive address on EVRmore.`;
+  // One address receives the native coin AND every asset on this chain.
+  const helper = `Send ${nativeTicker} or any ${networkName} asset to this address. They all share it.`;
 
   return (
     <div className="app-frame screen-enter">
@@ -82,43 +82,31 @@ export function LiveReceive({ onBack, initialAsset }: LiveReceiveProps) {
       <div className="app-content" data-testid="live-receive">
         <div className="banner info" style={{ marginBottom: 14 }}>
           <CheckCircle size={14} />
-          Ready to receive. This is your real EVRmore address.
+          {nativeTicker === 'RVN'
+            ? 'Ready to receive. This is your real Ravencoin address.'
+            : 'Ready to receive. This is your real EVRmore address.'}
         </div>
 
-        {/* Asset chips — informational: every asset shares one receive address. */}
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
-          {displayAssets.map((a) => {
-            const isActive = active === a.name;
-            return (
-              <button
-                key={a.name}
-                type="button"
-                onClick={() => setAsset(a.name)}
-                data-testid={`live-receive-asset-${a.name}`}
-                aria-pressed={isActive}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: 7,
-                  padding: '9px 14px',
-                  borderRadius: 'var(--r-md)',
-                  cursor: 'pointer',
-                  fontSize: 13,
-                  fontWeight: 700,
-                  background: isActive ? 'var(--accent-soft)' : 'var(--card)',
-                  color: isActive ? 'var(--accent-text)' : 'var(--text-dim)',
-                  border: isActive
-                    ? '1px solid color-mix(in srgb, var(--accent) 45%, transparent)'
-                    : '1px solid var(--border)',
-                  transition: 'all 0.15s',
-                }}
-              >
-                <TokenIcon assetId={a.name} size={18} />
-                {a.name}
-              </button>
-            );
-          })}
+        {/* Network header: which chain this address is on. Assets are not listed
+            here, because every asset on the chain shares this one address. */}
+        <div
+          data-testid="live-receive-network"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            padding: '10px 12px',
+            marginBottom: 12,
+            borderRadius: 'var(--r-md)',
+            background: 'var(--card)',
+            border: '1px solid var(--border)',
+          }}
+        >
+          <TokenIcon assetId={nativeTicker} size={26} />
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 13.5, fontWeight: 700 }}>{nativeTicker}</div>
+            <div className="text-dim" style={{ fontSize: 11 }}>{networkName} network</div>
+          </div>
         </div>
 
         <p className="text-dim" style={{ fontSize: 12, margin: '0 2px 14px', lineHeight: 1.5 }}>
