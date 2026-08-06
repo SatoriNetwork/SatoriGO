@@ -296,12 +296,13 @@ interface EvrmoreProvider {
 
 ## Documentation
 
-Start here if you're picking this project up (human or AI):
+Start here if you're picking this project up:
 
 | Doc | What it's for |
 |---|---|
-| **[`AGENTS.md`](AGENTS.md)** | **Read first.** Onboarding: golden rules, commands, architecture map, invariants you must not break. |
+| [`REVIEWERS.md`](REVIEWERS.md) | Build environment and exact steps to reproduce the published add-on package. |
 | [`KNOWN_LIMITATIONS.md`](KNOWN_LIMITATIONS.md) | Honest limitations of the shipping wallet. |
+| [`PRIVACY.md`](PRIVACY.md) | What the wallet stores and what it talks to. |
 
 ## License
 
