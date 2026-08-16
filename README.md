@@ -18,27 +18,28 @@ create or import a wallet on any of them from the same onboarding flow. Chains
 are described by parameters rather than by name, so support is a data entry
 rather than a special case.
 
-Two of the seven have had a funded send confirmed by a human on mainnet. The
-rest are verified for derivation, address validation, balance reading, fee
-estimation and transaction building, but not for a real send. See
-`KNOWN_LIMITATIONS.md`, which says exactly which is which.
+All seven have had a funded send confirmed on mainnet by the project owner's
+own testing (2026-08-16), on top of the automated verification of derivation,
+address validation, balance reading, fee estimation and transaction building.
+See `KNOWN_LIMITATIONS.md` for what is and is not covered by that.
 
 ### Supported networks
 
 Listed in the order the wallet shows them. "Assets" means the chain has its own
 on-chain token layer that the wallet reads; the others carry their native coin
 only. "Funded send" records whether a real transaction has been sent and
-confirmed by a person, which is the bar this project treats as proof.
+confirmed by a person, which is the bar this project treats as proof. Every one
+of them has been, by the owner's own testing rather than by an automated run.
 
 | Network | Ticker | Addresses | Assets | Funded send | Project |
 |---|---|---|---|---|---|
-| Bitcoin | BTC | native segwit | no | not yet | [bitcoin.org](https://bitcoin.org) |
-| Litecoin | LTC | native segwit | no | not yet | [litecoin.org](https://litecoin.org) |
-| Dogecoin | DOGE | legacy | no | not yet | [dogecoin.com](https://dogecoin.com) |
+| Bitcoin | BTC | native segwit | no | **confirmed** | [bitcoin.org](https://bitcoin.org) |
+| Litecoin | LTC | native segwit | no | **confirmed** | [litecoin.org](https://litecoin.org) |
+| Dogecoin | DOGE | legacy | no | **confirmed** | [dogecoin.com](https://dogecoin.com) |
 | Evrmore | EVR | legacy | yes | **confirmed** | [evrmore.com](https://evrmore.com) |
 | Ravencoin | RVN | legacy | yes | **confirmed** | [ravencoin.org](https://ravencoin.org) |
-| Bitcoin Gold S | BTGS | native segwit | no | not yet | [bitcoingold.site](https://bitcoingold.site) |
-| WojakCoin | WJK | legacy | no | not yet | [wojakcoin.cash](https://wojakcoin.cash) |
+| Bitcoin Gold S | BTGS | native segwit | no | **confirmed** | [bitcoingold.site](https://bitcoingold.site) |
+| WojakCoin | WJK | legacy | no | **confirmed** | [wojakcoin.cash](https://wojakcoin.cash) |
 
 Bitcoin Gold S is a new Bitcoin Core fork and is **not** the 2017 Bitcoin Gold
 (BTG). It and WojakCoin are young networks with little mining power, and the

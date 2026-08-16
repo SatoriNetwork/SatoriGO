@@ -3,8 +3,8 @@
 Current, honest limitations of the wallet (v1.3.0).
 
 Satori GO is a non-custodial multi-chain wallet. Seven chains ship in this
-version. Only two of them have had a funded send confirmed by a human on
-mainnet, and item 7 says exactly which. Nothing below is marketing.
+version, and each has had a funded send confirmed by the owner on mainnet
+(item 7). Nothing below is marketing.
 
 ## Security / trust
 
@@ -39,13 +39,15 @@ mainnet, and item 7 says exactly which. Nothing below is marketing.
 
 ## Chains
 
-7. **Only Evrmore and Ravencoin have owner-verified funded sends.** The other
-   five chains (Bitcoin, Litecoin, Dogecoin, Bitcoin Gold S, WojakCoin) are
-   verified for parameters, address derivation, address validation, balance
-   reading, fee estimation and transaction building, each against live servers
+7. **All seven chains have an owner-verified funded send (2026-08-16).** Each
+   was also verified for parameters, address derivation, address validation,
+   balance reading, fee estimation and transaction building against live servers
    and independent sources, and the segwit signing path is proven against a real
-   on-chain transaction. **A funded send on those five has not been confirmed by
-   a human.** Treat them accordingly and test small first.
+   on-chain transaction. The funded sends were run by the project owner
+   personally, not by an automated suite, so they are recorded here as
+   owner-verified. There is still no automated end-to-end send test on any
+   chain, because that would mean broadcasting real transactions from CI. Test
+   small first on any chain you have not used yourself.
 8. **Sending is P2PKH and native segwit only.** P2SH addresses are refused on
    every chain, on purpose: the builder cannot construct a P2SH output, so
    accepting one would strand the coins. Taproot recipients are accepted only on

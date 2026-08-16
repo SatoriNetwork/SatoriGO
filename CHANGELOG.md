@@ -82,5 +82,6 @@ explanation of what that risk means for your coins.
 ### Worth knowing
 
 `KNOWN_LIMITATIONS.md` is kept deliberately honest and is worth a minute of your
-time. In particular: two of the seven networks have had a funded send confirmed
-by a person, and the other five have not. Test with a small amount first.
+time. Every one of the seven networks has had a funded send confirmed on mainnet
+by the owner personally, but there is still no automated end-to-end send test,
+and some of these networks are small. Test with a small amount first.
