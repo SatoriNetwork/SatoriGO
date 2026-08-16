@@ -66,12 +66,12 @@ version, and each has had a funded send confirmed by the owner on mainnet
 12. **Amounts above about 90,071,992 coins** lose precision in the decimal to
     base-unit conversion (a float 2^53 limit). Not reachable with realistic
     balances.
-13. **Bitcoin Gold S and WojakCoin are young, thin networks** and the wallet
-    marks them as such. Bitcoin Gold S stopped producing blocks for hours at a
+13. **BitcoinGold and WojakCoin are young, thin networks** and the wallet
+    marks them as such. BitcoinGold stopped producing blocks for hours at a
     time during development, which leaves a payment unconfirmed through no fault
     of the wallet. The header now reports the age of the chain tip when it goes
     stale, so a stalled chain no longer looks healthy.
-14. **No inscription or token-meta-protocol support** (BGC-20 on Bitcoin Gold S,
+14. **No inscription or token-meta-protocol support** (BGC-20 on BitcoinGold,
     or anything ordinals-based). Those balances live in an off-chain indexer, not
     in the UTXO set, so the wallet cannot see them. **Consequence you should
     know: coin selection treats every UTXO as ordinary money**, so an inscription

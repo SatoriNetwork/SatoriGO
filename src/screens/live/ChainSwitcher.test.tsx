@@ -64,7 +64,7 @@ const CHAIN_INFO = vi.hoisted(
       mainnet: { ticker: 'EVR', displayName: 'Evrmore', homepage: 'https://evrmore.com' },
       'ravencoin-mainnet': { ticker: 'RVN', displayName: 'Ravencoin', homepage: 'https://ravencoin.org' },
       // young: true mirrors the real params for the two thin networks.
-      'bitcoingold-mainnet': { ticker: 'BTGS', displayName: 'Bitcoin Gold S', homepage: 'https://bitcoingold.site', young: true },
+      'bitcoingold-mainnet': { ticker: 'BTGS', displayName: 'BitcoinGold', homepage: 'https://bitcoingold.site', young: true },
       'litecoin-mainnet': { ticker: 'LTC', displayName: 'Litecoin', homepage: 'https://litecoin.org' },
       'wojakcoin-mainnet': { ticker: 'WJK', displayName: 'WojakCoin', homepage: 'https://wojakcoin.cash', young: true },
       'bitcoin-mainnet': { ticker: 'BTC', displayName: 'Bitcoin', homepage: 'https://bitcoin.org' },
@@ -188,7 +188,7 @@ describe('ChainSwitcher', () => {
 
     expect(switchChain).not.toHaveBeenCalled();
     const panel = screen.getByTestId('live-chain-enable-panel');
-    expect(panel.textContent).toMatch(/Enable Bitcoin Gold S for this wallet\?/);
+    expect(panel.textContent).toMatch(/Enable BitcoinGold for this wallet\?/);
     expect(panel.textContent).toMatch(/from the same recovery phrase/i);
   });
 

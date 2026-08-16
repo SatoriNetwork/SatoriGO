@@ -17,7 +17,7 @@ multi-chain one.
 ### Seven networks, one wallet
 
 Satori GO now carries Bitcoin, Litecoin, Dogecoin, Evrmore, Ravencoin,
-Bitcoin Gold S and WojakCoin.
+BitcoinGold and WojakCoin.
 
 Switch between them from the header. Each network gets its own receiving
 address, its own servers, its own block explorer and its own fee rules, and the

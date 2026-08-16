@@ -41,7 +41,7 @@ of them has been, by the owner's own testing rather than by an automated run.
 | BitcoinGold | BTGS | native segwit | no | **confirmed** | [bitcoingold.site](https://bitcoingold.site) |
 | WojakCoin | WJK | legacy | no | **confirmed** | [wojakcoin.cash](https://wojakcoin.cash) |
 
-Bitcoin Gold S is a new Bitcoin Core fork and is **not** the 2017 Bitcoin Gold
+BitcoinGold is a new Bitcoin Core fork and is **not** the 2017 Bitcoin Gold
 (BTG). It and WojakCoin are young networks with little mining power, and the
 wallet marks them as such in the network list.
 

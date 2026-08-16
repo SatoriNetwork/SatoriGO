@@ -106,7 +106,7 @@ describe('formatSyncBannerText', () => {
 });
 
 // A wallet can be perfectly synced to a chain that has stopped producing blocks.
-// Bitcoin Gold S did exactly that for hours while real deposits sat unconfirmed,
+// BitcoinGold did exactly that for hours while real deposits sat unconfirmed,
 // and the header still read a green "Synced".
 describe('stale chain tip', () => {
   const HOUR = 60 * 60 * 1000;

@@ -517,11 +517,14 @@ export const BITCOINGOLD_MAINNET: EvrmoreNetwork = {
   addressFormat: 'p2wpkh', // segwit active from genesis; receive addrs are bcg1…
   messageMagic: 'Bitcoin Signed Message:\n', // src/common/signmessage.cpp
   ticker: 'BTGS',
-  // "Bitcoin Gold S" (the project's own name), NOT "Bitcoin Gold": the trailing S
-  // is what separates this new chain from the 2017 BTG it would otherwise be
-  // mistaken for. Owner-specified 2026-08-14. Every user-facing label reads this
-  // field, so this literal is the only place the name is spelled out.
-  displayName: 'Bitcoin Gold S',
+  // "BitcoinGold", ONE WORD, and not a typo for "Bitcoin Gold". The single word
+  // is the project's own spelling and is the only thing separating it, in a
+  // label, from the 2017 Bitcoin Gold (BTG) it would otherwise be taken for.
+  // Owner-specified: "Bitcoin Gold S" 2026-08-14, then "BitcoinGold" 2026-08-16.
+  // Do not "correct" the spacing. Every user-facing label reads this field, so
+  // this literal is the only place the name is written out; the ticker BTGS and
+  // the homepage below are what disambiguate it beyond the name itself.
+  displayName: 'BitcoinGold',
   taprootActive: true, // chainparams.cpp: DEPLOYMENT_TAPROOT = ALWAYS_ACTIVE
   // Verified 2026-08-14. Shown prominently BECAUSE the name is close to the
   // 2017 Bitcoin Gold (BTG): this is a different, newer chain.

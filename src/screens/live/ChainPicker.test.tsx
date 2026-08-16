@@ -41,7 +41,7 @@ describe('ChainPicker', () => {
     const dogeOption = screen.getByTestId('test-chain-dogecoin-mainnet');
     expect(evrOption).toHaveTextContent('Evrmore');
     expect(rvnOption).toHaveTextContent('Ravencoin');
-    expect(btgsOption).toHaveTextContent('Bitcoin Gold S');
+    expect(btgsOption).toHaveTextContent('BitcoinGold');
     expect(ltcOption).toHaveTextContent('Litecoin');
     expect(wjkOption).toHaveTextContent('WojakCoin');
     expect(btcOption).toHaveTextContent('Bitcoin');

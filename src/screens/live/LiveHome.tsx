@@ -958,7 +958,7 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx }: LiveH
               {/* Address block, with the project's own site under it (owner's
                   placement — it identifies THIS wallet's chain project the
                   same way the address identifies the wallet). Several chain
-                  names sit close to better-known coins ("Bitcoin Gold S" is
+                  names sit close to better-known coins ("BitcoinGold" is
                   NOT the 2017 BTG), so the domain is what actually tells the
                   user which project they are on, and where to go read about
                   it. */}

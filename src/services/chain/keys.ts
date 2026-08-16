@@ -647,7 +647,7 @@ export interface PrivateKeyOrigin {
  *
  * WHAT THIS CANNOT DO, WHICH IS MOST OF IT. WIF version bytes are not unique
  * across the chains this wallet ships: 128 is Evrmore, Ravencoin AND Bitcoin;
- * 176 is Bitcoin Gold S AND Litecoin. So the single most likely mistake a user
+ * 176 is BitcoinGold AND Litecoin. So the single most likely mistake a user
  * can make, pasting a Bitcoin WIF while Evrmore is selected, is INVISIBLE here
  * and always will be: the two keys are the same string, byte for byte. This
  * catches a key from a different FAMILY (Litecoin into Bitcoin) and a key from

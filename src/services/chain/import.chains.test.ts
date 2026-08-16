@@ -720,7 +720,7 @@ describe('E) LiveWalletService import paths', () => {
   // what enableChain() relies on. What changed is that the private-key FORM now
   // shows a warning naming the other chain before the user submits (see
   // pkChainNotice in LiveOnboarding.tsx). It warns rather than blocks: 176 is
-  // Bitcoin Gold S and Litecoin both, so the byte is a hint, never proof.
+  // BitcoinGold and Litecoin both, so the byte is a hint, never proof.
   it('importing a Litecoin WIF while "Bitcoin" is selected creates a Bitcoin wallet', async () => {
     const PRIV = Uint8Array.from(
       ('1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30'.match(/../g) as string[]).map(

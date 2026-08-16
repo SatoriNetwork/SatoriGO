@@ -37,7 +37,7 @@ function mapPkError(msg: string): string {
  *  this set belongs to nothing the user could have selected. */
 const PICKABLE_NETWORKS: EvrmoreNetwork[] = CHAIN_OPTIONS.map((o) => networkFor(o.value));
 
-/** "Litecoin", "Litecoin or Bitcoin Gold S", "A, B or C" — names from the chain
+/** "Litecoin", "Litecoin or BitcoinGold", "A, B or C" — names from the chain
  *  params, never hardcoded. */
 function joinChainNames(nets: readonly EvrmoreNetwork[]): string {
   const names = nets.map((n) => n.displayName);
