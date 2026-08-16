@@ -42,6 +42,56 @@ describe('isNativeAssetId', () => {
     expect(isNativeAssetId('EVR', 'testnet')).toBe(true);
     expect(isNativeAssetId('RVN', 'testnet')).toBe(false);
   });
+
+  it('BTGS is native on Bitcoin Gold; the other chains\' tickers are not', () => {
+    expect(isNativeAssetId('BTGS', 'bitcoingold-mainnet')).toBe(true);
+    expect(isNativeAssetId(' btgs ', 'bitcoingold-mainnet')).toBe(true);
+    expect(isNativeAssetId('EVR', 'bitcoingold-mainnet')).toBe(false);
+    expect(isNativeAssetId('RVN', 'bitcoingold-mainnet')).toBe(false);
+    expect(isNativeAssetId('BTGS', 'mainnet')).toBe(false);
+  });
+
+  it('LTC is native on Litecoin; the other chains\' tickers are not', () => {
+    expect(isNativeAssetId('LTC', 'litecoin-mainnet')).toBe(true);
+    expect(isNativeAssetId(' ltc ', 'litecoin-mainnet')).toBe(true);
+    expect(isNativeAssetId('EVR', 'litecoin-mainnet')).toBe(false);
+    expect(isNativeAssetId('RVN', 'litecoin-mainnet')).toBe(false);
+    expect(isNativeAssetId('BTGS', 'litecoin-mainnet')).toBe(false);
+    expect(isNativeAssetId('LTC', 'mainnet')).toBe(false);
+  });
+
+  it('WJK is native on WojakCoin; the other chains\' tickers are not', () => {
+    expect(isNativeAssetId('WJK', 'wojakcoin-mainnet')).toBe(true);
+    expect(isNativeAssetId(' wjk ', 'wojakcoin-mainnet')).toBe(true);
+    expect(isNativeAssetId('EVR', 'wojakcoin-mainnet')).toBe(false);
+    expect(isNativeAssetId('RVN', 'wojakcoin-mainnet')).toBe(false);
+    expect(isNativeAssetId('BTGS', 'wojakcoin-mainnet')).toBe(false);
+    expect(isNativeAssetId('LTC', 'wojakcoin-mainnet')).toBe(false);
+    expect(isNativeAssetId('WJK', 'mainnet')).toBe(false);
+  });
+
+  it('BTC is native on Bitcoin; the other chains\' tickers are not', () => {
+    expect(isNativeAssetId('BTC', 'bitcoin-mainnet')).toBe(true);
+    expect(isNativeAssetId(' btc ', 'bitcoin-mainnet')).toBe(true);
+    expect(isNativeAssetId('EVR', 'bitcoin-mainnet')).toBe(false);
+    expect(isNativeAssetId('RVN', 'bitcoin-mainnet')).toBe(false);
+    expect(isNativeAssetId('BTGS', 'bitcoin-mainnet')).toBe(false);
+    expect(isNativeAssetId('LTC', 'bitcoin-mainnet')).toBe(false);
+    expect(isNativeAssetId('WJK', 'bitcoin-mainnet')).toBe(false);
+    expect(isNativeAssetId('BTC', 'mainnet')).toBe(false);
+  });
+
+  it('DOGE is native on Dogecoin; the other chains\' tickers are not', () => {
+    expect(isNativeAssetId('DOGE', 'dogecoin-mainnet')).toBe(true);
+    expect(isNativeAssetId(' doge ', 'dogecoin-mainnet')).toBe(true);
+    expect(isNativeAssetId('EVR', 'dogecoin-mainnet')).toBe(false);
+    expect(isNativeAssetId('RVN', 'dogecoin-mainnet')).toBe(false);
+    expect(isNativeAssetId('BTGS', 'dogecoin-mainnet')).toBe(false);
+    expect(isNativeAssetId('LTC', 'dogecoin-mainnet')).toBe(false);
+    expect(isNativeAssetId('WJK', 'dogecoin-mainnet')).toBe(false);
+    expect(isNativeAssetId('BTC', 'dogecoin-mainnet')).toBe(false);
+    expect(isNativeAssetId('DOGE', 'mainnet')).toBe(false);
+  });
 });
 
 describe('walletsOnChain', () => {
@@ -50,6 +100,11 @@ describe('walletsOnChain', () => {
     { id: 'b', network: 'ravencoin-mainnet' },
     { id: 'c', network: 'mainnet' },
     { id: 'd', network: 'testnet' },
+    { id: 'e', network: 'bitcoingold-mainnet' },
+    { id: 'f', network: 'litecoin-mainnet' },
+    { id: 'g', network: 'wojakcoin-mainnet' },
+    { id: 'h', network: 'bitcoin-mainnet' },
+    { id: 'i', network: 'dogecoin-mainnet' },
   ];
 
   it('an Evrmore wallet only ever sees Evrmore-mainnet wallets', () => {
@@ -66,5 +121,25 @@ describe('walletsOnChain', () => {
 
   it('no same-chain wallets means an empty list, never a cross-chain fallback', () => {
     expect(walletsOnChain([{ id: 'x', network: 'mainnet' }], 'ravencoin-mainnet')).toEqual([]);
+  });
+
+  it('a Bitcoin Gold wallet only ever sees Bitcoin Gold wallets', () => {
+    expect(walletsOnChain(mixed, 'bitcoingold-mainnet').map((w) => w.id)).toEqual(['e']);
+  });
+
+  it('a Litecoin wallet only ever sees Litecoin wallets', () => {
+    expect(walletsOnChain(mixed, 'litecoin-mainnet').map((w) => w.id)).toEqual(['f']);
+  });
+
+  it('a WojakCoin wallet only ever sees WojakCoin wallets', () => {
+    expect(walletsOnChain(mixed, 'wojakcoin-mainnet').map((w) => w.id)).toEqual(['g']);
+  });
+
+  it('a Bitcoin wallet only ever sees Bitcoin wallets', () => {
+    expect(walletsOnChain(mixed, 'bitcoin-mainnet').map((w) => w.id)).toEqual(['h']);
+  });
+
+  it('a Dogecoin wallet only ever sees Dogecoin wallets', () => {
+    expect(walletsOnChain(mixed, 'dogecoin-mainnet').map((w) => w.id)).toEqual(['i']);
   });
 });

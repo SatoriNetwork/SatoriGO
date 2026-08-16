@@ -1,6 +1,14 @@
-// Live (real-chain) watch-only data provider for the Evrmore wallet.
-// Implements WalletDataProvider by reading the live Evrmore chain over Electrum.
+// Live (real-chain) watch-only data provider for the wallet's ACTIVE chain.
+// Implements WalletDataProvider by reading that chain over Electrum.
 // CSP-safe, no Node APIs — only the ElectrumClient transport abstraction.
+//
+// DIALECT: Evrmore/Ravencoin ElectrumX servers speak an ASSET dialect —
+// get_balance(sh, asset), listunspent(sh, true), blockchain.asset.* — that a
+// PLAIN Bitcoin-style server (e.g. Fulcrum on Bitcoin Gold) does not implement:
+// sending the extra asset argument there makes the call error or misbehave.
+// Every asset-dialect call below is therefore gated on supportsAssets(net), i.e.
+// on the chain's CAPABILITY, never on its name — a future plain chain works with
+// no edits here.
 
 import type { WalletDataProvider } from '../provider';
 import { NetworkOfflineError } from '../provider';
@@ -22,7 +30,7 @@ import type {
 } from './electrumTypes';
 import { addressToElectrumScripthash } from './keys';
 import { ELECTRUM_METHODS, SATORI_ASSET } from './network';
-import { EVRMORE_MAINNET, type EvrmoreNetwork } from './chainParams';
+import { EVRMORE_MAINNET, supportsAssets, type EvrmoreNetwork } from './chainParams';
 
 // ---------------------------------------------------------------------------
 // Dynamic (MetaMask-style) asset detection types + helpers.
@@ -54,6 +62,49 @@ import { EVRMORE_MAINNET, type EvrmoreNetwork } from './chainParams';
 //   asset.get_meta("SATORI") -> { sats_in_circulation, divisions, reissuable,
 //                                 has_ipfs, ipfs, source, ... }
 //   asset.get_meta("SATOREVR") -> {}   // {} == asset does not exist.
+
+/**
+ * The server ANSWERED a history request and REFUSED it.
+ *
+ * Distinct from NetworkOfflineError on purpose. A refusal means the socket is
+ * healthy, the server is up, and it has decided it will not serve THIS address:
+ * ElectrumX and Fulcrum both cap how much history they will return and reply
+ * `{"code":1,"message":"history too large"}` for big addresses (seen live on
+ * real Evrmore and Ravencoin addresses). That is permanent for this address on
+ * this server — retrying forever changes nothing — whereas being offline clears
+ * itself. Collapsing both into "offline" (what this provider used to do) left
+ * the wallet reporting itself online with a frozen, empty Activity list and no
+ * way for the user to learn why.
+ *
+ * `name` is part of the contract: txCache matches it structurally so the cache
+ * stays decoupled from this module (see txCache's REFUSED_ERROR_NAME).
+ */
+export class AddressHistoryRefusedError extends Error {
+  /** True for the "history too large" family of refusals — the one a user can
+   *  act on ("this address is too big for this server, try another"). */
+  readonly tooLarge: boolean;
+  /** The server's own words, kept verbatim for diagnostics. */
+  readonly serverMessage: string;
+
+  constructor(serverMessage: string, tooLarge: boolean) {
+    super(`The server refused this address's transaction history: ${serverMessage}`);
+    this.name = 'AddressHistoryRefusedError';
+    this.serverMessage = serverMessage;
+    this.tooLarge = tooLarge;
+  }
+}
+
+/** Prefix electrumClient.dispatch() puts on a JSON-RPC ERROR REPLY, i.e. on the
+ *  server answering rather than the transport failing. Matching the message is
+ *  the same technique liveWallet's isCleanBroadcastRejection() already uses to
+ *  tell a daemon rejection from a crashed call. */
+const ELECTRUM_ERROR_PREFIX = 'Electrum error:';
+
+/** The refusals that mean "this address has more history than I will serve".
+ *  Verified wording: ElectrumX answers `history too large` (code 1). The other
+ *  spellings are defensive: a server whose phrasing is not matched here still
+ *  surfaces through the generic refusal branch, just with generic copy. */
+const HISTORY_TOO_LARGE_RE = /history (is )?too (large|long|big)|too many (history|transactions)|excessive history/i;
 
 /** A live, dynamically-detected balance for one asset held at an address.
  *  `amount` is in WHOLE units (raw sats / 1e8; the on-chain base unit is always
@@ -102,12 +153,54 @@ export interface LiveTransaction {
   direction: 'in' | 'out';
   /** Net moved amount in WHOLE units of `asset`. */
   amount: number;
-  /** EVR fee when we are the sender, else 0. */
+  /** EVR fee when we are the sender, else 0.
+   *  PER ADDRESS, and clamped at 0, so it CANNOT be summed across a wallet's
+   *  addresses. Wallet-level aggregation uses the two raw fields below. */
   feeEvr: number;
+  /** Native-coin inputs THIS address contributed, in whole coins. Raw and
+   *  unclamped precisely so mergeTransactions can add it up.
+   *  OPTIONAL because an entry cached by an older build predates it; the merge
+   *  falls back to the per-address fee when it is missing, which is exactly the
+   *  behaviour those entries already had. */
+  spentNative?: number;
+  /** Total native output value of the WHOLE transaction, in whole coins. Equal
+   *  on every entry for the same txid, so a merge can take it from any of them. */
+  totalOutNative?: number;
   status: 'confirmed' | 'pending';
   blockHeight?: number;
   timestamp: number;
   counterparty: string;
+}
+
+/**
+ * Block time (unix ms) out of a raw block header, or null when it cannot be
+ * trusted.
+ *
+ * Every chain here uses the Bitcoin header layout, whose `time` is a
+ * little-endian uint32 at byte offset 68 (version 4, prev 32, merkle root 32).
+ * Chains with LONGER headers (Ravencoin/Evrmore KAWPOW append fields) keep that
+ * offset, so reading a fixed prefix is safe for all of them.
+ *
+ * The sanity window matters: a garbage or unexpected header must read as
+ * "unknown" rather than as a wildly stale or future chain, because this value
+ * decides whether the wallet accuses a chain of having stalled.
+ */
+export function parseHeaderTime(headerHex: string | undefined): number | null {
+  if (!headerHex || headerHex.length < 160) return null;
+  const le = headerHex.slice(136, 144);
+  if (!/^[0-9a-fA-F]{8}$/.test(le)) return null;
+  const seconds =
+    parseInt(le.slice(0, 2), 16) |
+    (parseInt(le.slice(2, 4), 16) << 8) |
+    (parseInt(le.slice(4, 6), 16) << 16) |
+    (parseInt(le.slice(6, 8), 16) << 24);
+  const ms = seconds * 1000;
+  // Bitcoin's genesis (2009) as the floor; a little slack ahead of now for the
+  // two hours of drift a block timestamp is allowed.
+  const FLOOR = 1_231_000_000_000;
+  const CEILING = Date.now() + 3 * 60 * 60 * 1000;
+  if (!Number.isFinite(ms) || ms < FLOOR || ms > CEILING) return null;
+  return ms;
 }
 
 /** Raw reply of blockchain.asset.get_meta (real asset) — {} when nonexistent. */
@@ -251,10 +344,32 @@ export class ElectrumWalletDataProvider implements WalletDataProvider {
     return this.net.ticker;
   }
 
-  /** True on an Evrmore chain, false on Ravencoin. Gates Evrmore-only behavior
-   *  (the built-in SATORI row/queries, the SATORI tx special-case). */
+  /** True on an Evrmore chain, false on every other chain. Gates Evrmore-only
+   *  behavior (the built-in SATORI row/queries, the SATORI tx special-case). */
   private get isEvrmore(): boolean {
     return this.net.ticker === 'EVR';
+  }
+
+  /** True when the ACTIVE chain implements the Ravencoin-style asset protocol,
+   *  i.e. its ElectrumX understands the asset dialect. The single gate for every
+   *  asset-dialect request: on a plain chain the extra asset argument is what
+   *  makes a server error, and blockchain.asset.* does not exist at all. */
+  private get hasAssets(): boolean {
+    return supportsAssets(this.net);
+  }
+
+  /** Whether an already-normalized asset NAME denotes the native coin. '' means
+   *  native for historical callers; 'EVR'/'RVN' stay accepted on every chain so
+   *  existing behavior is byte-identical, and the ACTIVE chain's own ticker is
+   *  accepted too — otherwise a plain chain's native name (e.g. 'BTGS') would be
+   *  mistaken for an asset and send the asset argument. */
+  private isNativeName(normalized: string): boolean {
+    return (
+      normalized === '' ||
+      normalized === 'EVR' ||
+      normalized === 'RVN' ||
+      normalized === this.nativeName.toUpperCase()
+    );
   }
 
   /** Retarget the active chain (Evrmore vs Ravencoin) for a shared provider. */
@@ -294,7 +409,7 @@ export class ElectrumWalletDataProvider implements WalletDataProvider {
     const evrPrice = this.prices['EVR'] ?? { priceUsd: 0, change24hPct: 0 };
 
     const native: Asset = {
-      // Native id/symbol/name follow the active chain (EVR / RVN). The domain
+      // Native id/symbol/name follow the active chain (net.ticker). The domain
       // AssetId union predates multichain, so a non-'EVR' native id is cast.
       id: this.nativeName as AssetId,
       symbol: this.nativeName,
@@ -303,10 +418,14 @@ export class ElectrumWalletDataProvider implements WalletDataProvider {
       decimals: 8,
       priceUsd: evrPrice.priceUsd,
       change24hPct: evrPrice.change24hPct,
-      description: `Native coin of the ${this.net.displayName} chain. Pays transaction fees for every transfer, including assets.`,
+      // Only promise asset transfers on a chain that HAS an asset protocol.
+      description: this.hasAssets
+        ? `Native coin of the ${this.net.displayName} chain. Pays transaction fees for every transfer, including assets.`
+        : `Native coin of the ${this.net.displayName} chain. Pays transaction fees for every transfer.`,
     };
 
-    // Ravencoin has no SATORI row: return ONLY the native coin.
+    // Only Evrmore carries the built-in SATORI row; every other chain (asset or
+    // plain) returns ONLY the native coin.
     if (!this.isEvrmore) return [native];
 
     const satPrice = this.prices['SATORI'] ?? { priceUsd: 0, change24hPct: 0 };
@@ -343,12 +462,15 @@ export class ElectrumWalletDataProvider implements WalletDataProvider {
       }
 
       const before = Date.now();
-      const headerResult = await this.client.request<{ height: number }>(
+      const headerResult = await this.client.request<{ height: number; hex?: string }>(
         ELECTRUM_METHODS.headersSubscribe,
       );
       const latencyMs = Date.now() - before;
 
       const height = headerResult?.height ?? 0;
+      // The subscribed header already carries the tip's block time, so this
+      // costs no extra round trip.
+      const tipTime = parseHeaderTime(headerResult?.hex);
 
       // Try to retrieve a server version string; tolerate failure.
       try {
@@ -369,6 +491,7 @@ export class ElectrumWalletDataProvider implements WalletDataProvider {
         blockHeight: height,
         serverVersion: this.cachedServerVersion,
         updatedAt: Date.now(),
+        tipTime,
       };
     } catch {
       return {
@@ -378,6 +501,7 @@ export class ElectrumWalletDataProvider implements WalletDataProvider {
         blockHeight: 0,
         serverVersion: 'n/a',
         updatedAt: Date.now(),
+        tipTime: null,
       };
     }
   }
@@ -393,7 +517,9 @@ export class ElectrumWalletDataProvider implements WalletDataProvider {
 
       const sh = addressToElectrumScripthash(address);
 
-      // Ravencoin: native only. Never query 'SATORI' (an Evrmore-only asset).
+      // Every non-Evrmore chain: native only. Never query 'SATORI' (an
+      // Evrmore-only asset), and note the single-argument get_balance below is
+      // also the ONLY form a plain (non-asset) server accepts.
       if (!this.isEvrmore) {
         const bal = await this.client.request<ElectrumBalance>(ELECTRUM_METHODS.getBalance, [sh]);
         const amount = ((bal.confirmed ?? 0) + (bal.unconfirmed ?? 0)) / 1e8;
@@ -430,17 +556,21 @@ export class ElectrumWalletDataProvider implements WalletDataProvider {
       }
 
       const sh = addressToElectrumScripthash(address);
-      const utxos = await this.client.request<ElectrumUtxo[]>(ELECTRUM_METHODS.listUnspent, [
-        sh,
-        true,
-      ]);
+      // `true` = "include asset UTXOs" and exists ONLY in the asset dialect. A
+      // plain server must get the single-argument form.
+      const utxos = await this.client.request<ElectrumUtxo[]>(
+        ELECTRUM_METHODS.listUnspent,
+        this.hasAssets ? [sh, true] : [sh],
+      );
 
-      // Group UTXO sats by asset: native EVR (asset null) vs each asset name.
+      // Group UTXO sats by asset: native coin (asset null) vs each asset name.
+      // On a chain with no asset protocol every UTXO is native by definition, so
+      // an `asset` field can only be noise — never let it synthesize an entry.
       let evrSats = 0;
       const satsByAsset = new Map<string, number>();
       for (const u of utxos ?? []) {
         const val = typeof u?.value === 'number' ? u.value : 0;
-        if (isNativeAssetField(u?.asset)) {
+        if (!this.hasAssets || isNativeAssetField(u?.asset)) {
           evrSats += val;
         } else {
           const name = normalizeAssetName(String(u.asset));
@@ -449,7 +579,8 @@ export class ElectrumWalletDataProvider implements WalletDataProvider {
       }
 
       // The native coin is always present (even at 0) and listed first. Its NAME
-      // follows the active chain (EVR / RVN).
+      // follows the active chain (net.ticker), and on a chain without assets it
+      // is the ONLY row we can ever report.
       const results: LiveAssetBalance[] = [
         {
           name: this.nativeName,
@@ -486,6 +617,11 @@ export class ElectrumWalletDataProvider implements WalletDataProvider {
     const normalized = normalizeAssetName(name);
     if (!normalized) return null;
 
+    // blockchain.asset.get_meta does not exist on a chain without an asset
+    // protocol (a plain server answers with an ERROR, not `{}`), so no asset can
+    // exist there: answer "unknown" locally instead of burning a failing call.
+    if (!this.hasAssets) return null;
+
     const cached = this.metaCache.get(normalized);
     if (cached !== undefined) return cached;
 
@@ -510,6 +646,12 @@ export class ElectrumWalletDataProvider implements WalletDataProvider {
 
   async getAssetBalance(address: string, name: string): Promise<number> {
     const normalized = normalizeAssetName(name);
+    const isNative = this.isNativeName(normalized);
+
+    // A chain with no asset protocol holds nothing but its native coin, so any
+    // other name is definitionally a zero balance — and asking for it would send
+    // the asset argument that a plain server rejects. Answer without any call.
+    if (!this.hasAssets && !isNative) return 0;
 
     try {
       if (!this.client.isConnected()) {
@@ -517,10 +659,9 @@ export class ElectrumWalletDataProvider implements WalletDataProvider {
       }
       const sh = addressToElectrumScripthash(address);
 
-      // Native EVR uses no asset arg; assets pass the name. Either way the raw
-      // balance is in 1e8 base units (divisions is display-only), so both divide
-      // by ASSET_BASE_UNIT.
-      const isNative = normalized === '' || normalized === 'EVR' || normalized === 'RVN';
+      // The native coin uses no asset arg (the only form a plain server knows);
+      // assets pass the name. Either way the raw balance is in 1e8 base units
+      // (divisions is display-only), so both divide by ASSET_BASE_UNIT.
       const params = isNative ? [sh] : [sh, normalized];
       const bal = await this.client.request<ElectrumBalance>(ELECTRUM_METHODS.getBalance, params);
       return ((bal.confirmed ?? 0) + (bal.unconfirmed ?? 0)) / ASSET_BASE_UNIT;
@@ -627,6 +768,15 @@ export class ElectrumWalletDataProvider implements WalletDataProvider {
       return history ?? [];
     } catch (err) {
       if (err instanceof NetworkOfflineError) throw err;
+      // A JSON-RPC ERROR REPLY is the server ANSWERING: it is reachable and has
+      // declined this address (typically "history too large"). Reporting that as
+      // "offline" is what made a permanently unreadable address look identical
+      // to a network blip, so it gets its own error — see the class comment.
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.startsWith(ELECTRUM_ERROR_PREFIX)) {
+        const serverMessage = message.slice(ELECTRUM_ERROR_PREFIX.length).trim();
+        throw new AddressHistoryRefusedError(serverMessage, HISTORY_TOO_LARGE_RE.test(serverMessage));
+      }
       throw new NetworkOfflineError();
     }
   }
@@ -823,7 +973,9 @@ export class ElectrumWalletDataProvider implements WalletDataProvider {
     let totalEvrOut = 0;
 
     for (const vout of tx.vout) {
-      const asset = vout.scriptPubKey.asset;
+      // A chain with no asset protocol has no asset outputs, so any `asset`
+      // field is noise — ignoring it keeps every tx classified as native.
+      const asset = this.hasAssets ? vout.scriptPubKey.asset : undefined;
       if (!asset) totalEvrOut += vout.value;
       if (!voutPaysTo(vout.scriptPubKey, address)) continue;
       if (asset) {
@@ -845,7 +997,7 @@ export class ElectrumWalletDataProvider implements WalletDataProvider {
         const prevVout = prevTx.vout[vin.vout];
         if (!prevVout) continue;
         if (!voutPaysTo(prevVout.scriptPubKey, address)) continue;
-        const asset = prevVout.scriptPubKey.asset;
+        const asset = this.hasAssets ? prevVout.scriptPubKey.asset : undefined;
         if (asset) {
           spentByAsset.set(asset.name, (spentByAsset.get(asset.name) ?? 0) + asset.amount);
         } else {
@@ -905,6 +1057,8 @@ export class ElectrumWalletDataProvider implements WalletDataProvider {
       direction,
       amount,
       feeEvr,
+      spentNative: spentEvr,
+      totalOutNative: totalEvrOut,
       status,
       blockHeight,
       timestamp,

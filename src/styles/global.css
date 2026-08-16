@@ -157,6 +157,18 @@ body {
 }
 #root { width: 100%; height: 100%; min-height: 600px; position: relative; overflow: hidden; }
 
+/* Detached window (services/detachWindow.ts): a real, user-resizable browser
+   window instead of the toolbar popup. main.tsx stamps data-detached on <html>
+   there, and ONLY under that marker the fixed 400x600 canvas above follows the
+   window instead — the base rules never change (the Firefox popup sizing note
+   above depends on them). The layout itself stays the popup's 400px column,
+   centred and grounded on the themed background rather than pinned top-left
+   over dead bands. */
+:root[data-detached] { width: 100%; height: 100%; }
+:root[data-detached] body { width: 100%; height: 100%; min-height: 100vh; }
+:root[data-detached] #root { min-height: 100vh; }
+:root[data-detached] .app-frame { max-width: 400px; margin: 0 auto; }
+
 /* Ambient glow, copied from the neuron's own `body::before` / `body::after`:
    an INDIGO ellipse top-left and a VIOLET one top-right, heavily blurred, bleeding
    in from above the viewport. Values are the neuron's (rgba(90,90,255,.28) and
@@ -208,7 +220,13 @@ body {
   opacity: 0.85;
 }
 /* Screen content must sit above the ambience. */
-.app-header, .app-content, .app-nav { position: relative; z-index: 1; }
+.app-content, .app-nav { position: relative; z-index: 1; }
+/* The header sits ABOVE the content on purpose. Both are positioned siblings, so
+   with an equal z-index the later one in the DOM (the content) wins and any menu
+   opened from the header is painted underneath it: visible but see-through and
+   impossible to click, because a z-index inside the header cannot escape the
+   header's own stacking context. */
+.app-header { position: relative; z-index: 3; }
 
 .app-content {
   flex: 1;
@@ -243,8 +261,123 @@ body {
   scrollbar-width: thin;
   scrollbar-color: var(--border-strong) transparent;
 }
+/* A chain with no asset protocol has nothing to list here, so the only child is
+   the footer. Left alone it would sit at the top of the leftover space with a
+   large empty gap beneath it; anchoring it to the bottom keeps the screen tidy. */
+.app-content.home-pinned .home-scroll.no-assets {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}
 .app-content.home-pinned .home-scroll::-webkit-scrollbar { width: 6px; }
 .app-content.home-pinned .home-scroll::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 3px; }
+
+/* Send form only: the primary CTA must never slide under the bottom nav. The
+   nav is an IN-FLOW flex sibling of .app-content (not an overlay), so padding
+   at the bottom of the scroll container cannot help: padding sits BELOW the
+   button and moving the button up means removing height ABOVE it. Instead the
+   same split the home screen already uses (.home-pinned/.home-scroll): the
+   container stops scrolling, the FIELDS scroll in a flex child, and the CTA
+   row is pinned after them, always fully visible above the nav.
+   .send-scroll is `flex: 0 1 auto`, not `flex: 1`: a short form (e.g. a chain
+   whose form has fewer rows) keeps the CTA right below its last field exactly
+   as before, with no dead band pushed in between — the region only starts
+   scrolling once the fields genuinely outgrow the leftover height. Any future
+   screen with a primary action under a scrolling form can reuse this pair. */
+.app-content.send-pinned {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.send-pinned form {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.send-scroll {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+.send-scroll::-webkit-scrollbar { width: 6px; }
+.send-scroll::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 3px; }
+.send-cta { flex-shrink: 0; padding-top: 10px; }
+
+/* Scroll-edge affordance for the pinned splits (.send-scroll + .home-scroll):
+   where the region meets the pinned block below it, content used to stop on a
+   hard slice through a row, which read as "cut off" rather than "scrolls".
+   The last 24px of the region now fade out via an alpha mask — the content
+   dissolves into whatever is behind it, so both themes are correct with no
+   painted color to keep in sync — and a scroll-driven animation retracts the
+   fade to 0 as the region approaches its own bottom, so the last row is
+   never dimmed once fully scrolled. With nothing to scroll the scroll(self)
+   timeline is inactive, the animation contributes nothing, and the base
+   0px fade leaves short content looking exactly as before. Masks do not
+   hit-test (pointer behavior untouched) and apply only to the scroll region,
+   never to the pinned CTA below it. Browsers without scroll-driven
+   animations (and reduced-motion sessions, whose global animation override
+   collapses this one) simply keep the hard edge — a safe fallback. */
+@property --scroll-fade {
+  syntax: '<length>';
+  initial-value: 0px;
+  inherits: false;
+}
+.send-scroll,
+.app-content.home-pinned .home-scroll {
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - var(--scroll-fade)), transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - var(--scroll-fade)), transparent 100%);
+  /* No explicit duration: it must stay `auto` so the animation spans the
+     whole scroll timeline (a time value here would break the mapping). */
+  animation-name: scroll-edge-unfade;
+  animation-timing-function: linear;
+  animation-fill-mode: both;
+  animation-timeline: scroll(self block);
+}
+@keyframes scroll-edge-unfade {
+  0% { --scroll-fade: 24px; }
+  100% { --scroll-fade: 0px; }
+}
+
+/* The lock screen's wallet list fades at BOTH edges, unlike the one-sided
+   splits above. It is capped short enough that a long list can show as few as
+   two rows, and it is opened scrolled to the selected wallet rather than to the
+   top, so the rows out of view can be in either direction. A bottom-only hint
+   would leave a user whose selection sits at the end seeing a flat list with no
+   sign that more wallets exist above it. Same inactive-timeline fallback: a
+   list short enough not to scroll gets no mask at all. */
+@property --scroll-fade-top {
+  syntax: '<length>';
+  initial-value: 0px;
+  inherits: false;
+}
+.live-scope .lock-wallets {
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 var(--scroll-fade-top),
+    #000 calc(100% - var(--scroll-fade)),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 var(--scroll-fade-top),
+    #000 calc(100% - var(--scroll-fade)),
+    transparent 100%
+  );
+  animation-name: lock-list-edges;
+  animation-timing-function: linear;
+  animation-fill-mode: both;
+  animation-timeline: scroll(self block);
+}
+@keyframes lock-list-edges {
+  0% { --scroll-fade-top: 0px; --scroll-fade: 20px; }
+  100% { --scroll-fade-top: 20px; --scroll-fade: 0px; }
+}
 
 .screen-enter { animation: screenIn var(--dur) var(--ease); }
 @keyframes screenIn {
@@ -347,6 +480,14 @@ body {
 .pill.state-connected .dot { background: var(--success); box-shadow: 0 0 6px var(--success); }
 .pill.state-connecting .dot { background: var(--warning); animation: pulse 1.1s ease-in-out infinite; }
 .pill.state-degraded .dot { background: var(--warning); box-shadow: 0 0 6px var(--warning); }
+/* Stale chain tip (see deriveSyncStatus in LiveHome): the wallet is synced but
+   the CHAIN has stopped producing blocks. The pill text turns warning too —
+   the dot alone is easy to miss, and this state means "your payment will not
+   confirm", which must not look like a healthy green "Block N". Steady, not
+   pulsing: pulsing means "working on it" (connecting/syncing); a stalled
+   chain is a standing condition, not progress. */
+.pill.state-stale .dot { background: var(--warning); box-shadow: 0 0 6px var(--warning); }
+.pill.state-stale { color: var(--warning); }
 .pill.state-offline .dot { background: var(--danger); }
 @keyframes pulse { 50% { opacity: 0.35; } }
 
@@ -399,7 +540,22 @@ button.list-row:hover, a.list-row:hover { background: var(--card-hover); border-
    instead of the text overlapping the control. */
 .list-row .row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .list-row .row-title { font-size: 13.5px; font-weight: 600; display: flex; align-items: center; gap: 7px; min-width: 0; max-width: 100%; }
-.list-row .row-desc { font-size: 11.5px; color: var(--text-dim); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; max-width: 100%; }
+/* Descriptions clamp at TWO lines (not a one-line ellipsis): most settings
+   descriptions are full sentences and a mid-sentence "broadc…" cut lost the
+   meaning; two lines fit every current description without unbounding rows. */
+.list-row .row-desc {
+  font-size: 11.5px;
+  color: var(--text-dim);
+  margin-top: 1px;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  white-space: normal;
+  overflow: hidden;
+  min-width: 0;
+  max-width: 100%;
+}
 .list-row .row-end { text-align: right; flex-shrink: 0; }
 
 .row-icon {
@@ -462,6 +618,9 @@ button.list-row:hover, a.list-row:hover { background: var(--card-hover); border-
 .btn-ghost:hover:not(:disabled) { background: var(--card); color: var(--text); }
 .btn-danger { background: var(--danger-bg); color: var(--danger); border-color: color-mix(in srgb, var(--danger) 30%, transparent); }
 .btn-danger:hover:not(:disabled) { filter: brightness(1.1); }
+/* Destructive ghost buttons (the small trash "Remove" rows in Settings). */
+.btn-ghost.danger { color: var(--danger); }
+.btn-ghost.danger:hover:not(:disabled) { background: var(--danger-bg); color: var(--danger); }
 .btn-block { width: 100%; }
 .btn-sm { padding: 7px 12px; font-size: 12.5px; border-radius: var(--r-sm); }
 
@@ -478,6 +637,20 @@ button.list-row:hover, a.list-row:hover { background: var(--card-hover); border-
 }
 .icon-btn:hover { background: var(--card-hover); color: var(--text); }
 
+/* Shared keyboard focus ring. The stylesheet previously had NO visible
+   focus-visible treatment anywhere (the only rule set outline:none), so
+   keyboard users tabbed blind. One ring for every interactive pattern. */
+.btn:focus-visible,
+.icon-btn:focus-visible,
+.chip:focus-visible,
+.nav-item:focus-visible,
+.token-row:focus-visible,
+.list-row:focus-visible,
+.opt-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .spinner {
   width: 16px;
   height: 16px;
@@ -489,13 +662,24 @@ button.list-row:hover, a.list-row:hover { background: var(--card-hover); border-
 }
 .spinner.lg { width: 34px; height: 34px; border-width: 3px; }
 @keyframes spin { to { transform: rotate(360deg); } }
+/* Applied to refresh icons while a refresh is in flight (LiveHome/LiveNetwork). */
+.spin { animation: spin 0.9s linear infinite; }
 
 /* ----- Hero balance ---------------------------------------------------------- */
 .hero {
   text-align: center;
   padding: 14px 0 16px;
 }
-.hero .hero-label { font-size: 11.5px; color: var(--text-dim); font-weight: 600; letter-spacing: 0.02em; }
+/* Micro-label treatment (uppercase via text-transform so innerText keeps its
+   authored casing) — matches .section-label so "EVR Balance" and the
+   "Total balance" line under it read as one label system. */
+.hero .hero-label {
+  font-size: 10.5px;
+  color: var(--text-dim);
+  font-weight: 650;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
 .hero .hero-value {
   font-size: var(--font-hero);
   font-weight: 750;
@@ -630,6 +814,18 @@ button.list-row:hover, a.list-row:hover { background: var(--card-hover); border-
   font-size: 13.5px;
 }
 .field textarea { resize: none; font-family: inherit; }
+/* Number inputs (send amount, custom fee rate) live inside fully custom
+   controls; the native webkit spinners floating inside them read as a glitch,
+   and the quick-amount chips / typed values replace what they did. */
+.field input[type='number'] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+.field input[type='number']::-webkit-outer-spin-button,
+.field input[type='number']::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
 .field .error { font-size: 11.5px; color: var(--danger); }
 .field .hint { font-size: 11.5px; color: var(--text-faint); }
 
@@ -657,6 +853,11 @@ button.list-row:hover, a.list-row:hover { background: var(--card-hover); border-
 }
 .toggle[aria-checked='true'] { background: var(--accent-gradient); }
 .toggle[aria-checked='true']::after { transform: translateX(18px); }
+/* A locked switch must not look like one the user simply has not flipped: the
+   networks list disables the home network's toggle, and rendering it identically
+   to the others reads as "you could turn this off" when you cannot. Dimmed and
+   not-allowed, with the row's own text giving the reason. */
+.toggle:disabled { opacity: 0.45; cursor: not-allowed; }
 
 /* ----- Segmented control --------------------------------------------------------------- */
 .seg {
@@ -679,6 +880,27 @@ button.list-row:hover, a.list-row:hover { background: var(--card-hover); border-
   justify-content: center;
   gap: 6px;
   transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+/* Wrapping variant for controls whose option count grows (the chain picker).
+   A single equal-width row silently overflows once the labels stop fitting; a
+   two-column grid keeps every option readable at 400px and simply grows taller. */
+.seg-wrap {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.seg-wrap button {
+  min-width: 0;
+  justify-content: flex-start;
+  padding: 8px 8px;
+  font-size: 12px;
+}
+/* The label itself must be allowed to shrink, otherwise a long name pushes the
+   cell wider than its grid track instead of truncating inside it. */
+.seg-wrap button > :last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .seg button[aria-pressed='true'] {
   background: var(--accent-gradient);
@@ -928,16 +1150,27 @@ button.list-row:hover, a.list-row:hover { background: var(--card-hover); border-
 .welcome .welcome-footer { font-size: 10.5px; color: var(--text-faint); margin-top: 22px; }
 
 /* ----- Lock ----------------------------------------------------------------------------------------------- */
+/* Centered column that must never clip. A plain `justify-content: center` on a
+   fixed-height flex column pushes overflow out BOTH ends at once, so with a
+   long wallet list the Satori mark was cut off the top while the create/import
+   actions fell off the bottom, both unreachable because nothing scrolled.
+   `safe center` degrades to start-alignment exactly when the content stops
+   fitting, and the overflow rule makes what is left reachable. The plain
+   `center` above it is the fallback for engines without `safe`. */
 .lock-screen {
   height: 100%;
   display: flex;
   flex-direction: column;
   justify-content: center;
+  justify-content: safe center;
+  overflow-y: auto;
   padding: 30px;
   text-align: center;
 }
-.lock-screen .lock-logo { display: flex; justify-content: center; margin-bottom: 14px; }
-.lock-screen h2 { font-size: 18px; }
+/* .lock-logo is gone with the lock badge it centred; the heading carries the
+   message on its own and the reclaimed height goes to the wallet list. The
+   margin is what that badge used to contribute as spacing under the brand. */
+.lock-screen h2 { font-size: 18px; margin-top: 14px; }
 .lock-screen .lock-account { color: var(--text-dim); font-size: 12.5px; margin-top: 3px; }
 .lock-form { margin-top: 20px; text-align: left; }
 .shake { animation: shake 0.4s var(--ease); }
@@ -1035,7 +1268,10 @@ button.list-row:hover, a.list-row:hover { background: var(--card-hover); border-
   z-index: 50;
   animation: popIn 0.15s var(--ease);
 }
-.menu-pop button {
+/* Menu ROWS only — :not() keeps this off embedded controls (the eye toggle in
+   a PasswordField, Button components), whose .icon-btn/.btn sizing this rule
+   used to out-specify and stretch, crushing the flex input next to them. */
+.menu-pop button:not(.icon-btn):not(.btn) {
   width: 100%;
   display: flex;
   align-items: center;
@@ -1049,6 +1285,15 @@ button.list-row:hover, a.list-row:hover { background: var(--card-hover); border-
 }
 .menu-pop button:hover { background: var(--card-hover); }
 .menu-pop button.danger { color: var(--danger); }
+/* Coin marks in header menus and chips sit on the darkest surfaces, and several
+   official marks are themselves dark (WojakCoin, Litecoin). Lift the existing
+   .logo-frame backing to an opaque, lighter tone there so every mark stays
+   visible in the dark theme (the light theme just gets a subtle grey disc). */
+.menu-pop .logo-frame,
+.chip .logo-frame {
+  background: color-mix(in srgb, var(--text) 16%, var(--card-solid));
+  border-color: var(--border-strong);
+}
 
 /* Radio row used by option sheets */
 .opt-row {
@@ -1071,6 +1316,38 @@ button.list-row:hover, a.list-row:hover { background: var(--card-hover); border-
    rules are scoped to `.live-scope` (the wrapper LiveApp puts around every
    screen) — only additions here, never edits to the base rules above. */
 .live-scope .hero-value { font-size: 27px; }
+/* Roomy home: a chain with no asset protocol has no token rows, so instead of
+   leaving the screen half-empty the balance grows a little and the whole
+   balance + actions block is centred in the space the list would have used.
+   The action buttons keep their normal size on purpose. Presentational only,
+   the markup is identical on every chain. */
+.live-scope .home-roomy .hero-value { font-size: 32px; }
+/* Takes the leftover height and centres the block inside it. `min-height: 0`
+   lets it shrink, and a centred flex column that has been shrunk below its
+   content spills out of BOTH ends and paints over whatever follows: with two
+   banners stacked (first-sync plus the young-network notice) the Send/Receive
+   labels landed on top of the footer. `safe center` falls back to start
+   alignment exactly when the content stops fitting, and the overflow rule makes
+   the remainder reachable instead of overlapping. Plain `center` above it is the
+   fallback for engines without `safe`. Same fix as .lock-screen, same reason. */
+.live-scope .home-roomy .home-hero-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  justify-content: safe center;
+  overflow-y: auto;
+}
+/* With the wrapper owning the free space, the footer keeps its natural height
+   and simply sits at the bottom. It may SHRINK though: when the screen is tight
+   (a banner or two above), the branding footer is the decorative part and must
+   give way before the Send/Receive actions do. */
+.live-scope .home-roomy .home-scroll.no-assets {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
 .live-scope .brand-title { font-size: 12.5px; }
 .live-scope .sub-header h2 { font-size: 13.5px; }
 .live-scope .banner { font-size: 10.5px; }
@@ -1114,7 +1391,28 @@ button.list-row:hover, a.list-row:hover { background: var(--card-hover); border-
 
 /* Lock-screen wallet picker (live-only): choose which wallet the password below
    unlocks. The last-used wallet arrives preselected (aria-pressed='true'). */
-.live-scope .lock-wallets { margin-top: 16px; text-align: left; }
+/* The wallet list is the only part of the lock screen that grows without bound,
+   so it is the part that gives way. `flex: 0 1 auto` + an explicit min-height
+   (any value cancels the flex default of min-height:auto, which is what pins a
+   flex item to its content size) means a short list renders whole and unchanged,
+   while a long one shrinks and scrolls in place instead of pushing the brand off
+   the top and the create/import actions off the bottom. The floor keeps roughly
+   two rows visible so the list can never collapse to a sliver. */
+.live-scope .lock-wallets {
+  margin-top: 16px;
+  text-align: left;
+  flex: 0 1 auto;
+  min-height: 86px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+.live-scope .lock-wallets::-webkit-scrollbar { width: 6px; }
+.live-scope .lock-wallets::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 3px;
+}
 .live-scope .lock-wallet {
   width: 100%;
   display: flex;

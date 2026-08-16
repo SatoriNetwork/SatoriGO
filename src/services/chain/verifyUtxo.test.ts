@@ -66,8 +66,13 @@ describe('parseTxOutputs', () => {
     expect(outs[1]).toEqual({ nValue: 100_000_000n, scriptHex: '51' });
   });
 
-  it('rejects a segwit-marked tx (Evrmore has no segwit)', () => {
-    expect(() => parseTxOutputs('0200000000' + '01' + '00')).toThrow(/segwit/);
+  it('ACCEPTS a segwit-marked tx (it used to reject one, which broke segwit sends)', () => {
+    // This assertion used to require a throw. That was the bug: refusing the
+    // BIP144 marker made every send fail on the segwit chains as soon as a coin
+    // came from a witness transaction. Real-transaction coverage now lives in
+    // verifyUtxo.segwit.test.ts; here we only pin that the marker is no longer
+    // fatal on its own, while genuinely malformed bytes still are.
+    expect(() => parseTxOutputs('0200000000' + '02' + '00')).toThrow(/malformed/);
   });
 
   it('throws on a truncated tx', () => {

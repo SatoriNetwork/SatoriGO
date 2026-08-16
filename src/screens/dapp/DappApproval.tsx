@@ -15,9 +15,11 @@ import { Button } from '../../components/Button';
 import { PasswordField } from '../../components/TextField';
 import { getStorage } from '../../services/storage';
 import { LiveWalletService, type LiveSendPlan, type LiveNetworkId } from '../../services/chain/liveWallet';
-import { createElectrumClient } from '../../services/chain/electrumClient';
-import { isP2pkhAddress } from '../../services/chain/keys';
+import { createElectrumClient, ELECTRUM_CLOSED, ELECTRUM_NOT_CONNECTED } from '../../services/chain/electrumClient';
+import { applyAllStoredElectrumServers } from '../../services/chain/network';
+import { isSpendableAddress } from '../../services/chain/keys';
 import { networkFor } from '../../services/chain/chainParams';
+import type { NativeTicker } from '../../services/chain/chainParams';
 
 /** Format sats (bigint) as a decimal EVR/asset amount. */
 function fmtSats(sats: bigint): string {
@@ -55,39 +57,34 @@ function shortAddress(addr: string): string {
 }
 
 /** Map raw build/broadcast error codes to human messages (mirrors LiveSend).
- *  `native` is the connected wallet's chain ticker: every message keeps its
- *  exact historical EVR wording (the dApp smoke asserts on it) and only
- *  branches for a Ravencoin wallet. */
-function friendlyError(msg: string, assetName: string, native: 'EVR' | 'RVN'): string {
-  const isRvn = native === 'RVN';
+ *  `native` is the connected wallet's chain ticker and `chainName` its display
+ *  name, both from the chain params, so a message never names the wrong chain. */
+function friendlyError(msg: string, assetName: string, native: NativeTicker, chainName: string): string {
   switch (msg) {
     case 'insufficient-funds':
-      return isRvn
-        ? 'Insufficient RVN balance for this transaction (amount + network fee).'
-        : 'Insufficient EVR balance for this transaction (amount + network fee).';
+      return `Insufficient ${native} balance for this transaction (amount + network fee).`;
     case 'insufficient-asset':
       return `Insufficient ${assetName} balance for this transfer.`;
     case 'insufficient-evr-for-fee':
-      return isRvn
-        ? 'Not enough RVN to cover the network fee for this asset transfer.'
-        : 'Not enough EVR to cover the network fee for this asset transfer.';
+      return `Not enough ${native} to cover the network fee for this asset transfer.`;
     case 'invalid-amount-precision':
       return `That amount is finer than ${assetName} allows. Reduce the number of decimals.`;
     case 'unknown-asset':
-      return isRvn
-        ? `Asset "${assetName}" was not found on the Ravencoin network.`
-        : `Asset "${assetName}" was not found on the EVRmore network.`;
+      return `Asset "${assetName}" was not found on the ${chainName} network.`;
     case 'invalid-amount':
       return 'Enter a valid amount greater than 0.';
     case 'unsupported-address-type':
-      return isRvn
-        ? 'That recipient is not a standard Ravencoin address (only addresses starting with R are supported; P2SH / wrong-network addresses are rejected).'
-        : 'That recipient is not a standard EVRmore address (only addresses starting with E are supported; P2SH / wrong-network addresses are rejected).';
+      return `That recipient is not a standard ${chainName} address. Script and wrong-network addresses are rejected.`;
     case 'input-verify-failed':
     case 'input-value-mismatch':
       return 'Could not verify your coins against the network (the server may be faulty or malicious). Nothing was sent. Try another Electrum server in Settings.';
     case 'broadcast-unconfirmed':
       return 'The server had a problem and the transaction could not be confirmed as sent. Nothing appears on the network. It is safe to try again.';
+    case ELECTRUM_NOT_CONNECTED:
+    case ELECTRUM_CLOSED:
+      // The approval window opens its own client, so an approval arriving before
+      // that socket is up hits this. Nothing was built and nothing was sent.
+      return `Still connecting to the ${chainName} network. Wait a moment and try again.`;
     default:
       return msg;
   }
@@ -118,6 +115,16 @@ export function DappApproval({ requestId }: { requestId: string }) {
     let cancelled = false;
     (async () => {
       try {
+        // This window boots WITHOUT the main app's store init (App.tsx routes
+        // here before LiveApp), so nothing has loaded the user's configured
+        // Electrum pools into this page yet. Without this, build/verify/
+        // broadcast below would silently use the built-in default servers even
+        // when the user pinned their own trusted server in Settings. Awaited
+        // inside the loader (which gates the buttons), so it always completes
+        // before any client.connect() can happen. Never throws (best-effort
+        // internally), and applies every chain so it matches whatever chain
+        // the active wallet turns out to be on.
+        await applyAllStoredElectrumServers();
         const key = PENDING_PREFIX + requestId;
         const found = await chrome.storage.session.get(key);
         const req = found[key] as PendingDappRequest | undefined;
@@ -236,13 +243,13 @@ export function DappApproval({ requestId }: { requestId: string }) {
       }
       unlocked = true;
       // Reject a malformed / wrong-network / wrong-type (e.g. P2SH) recipient
-      // before building a P2PKH output that the recipient couldn't spend.
+      // before building an output the recipient could not spend. Accepts what
+      // the builder can actually pay to on this chain: P2PKH everywhere, plus
+      // native segwit where the chain supports it.
       const net = networkFor(service.network());
-      if (!isP2pkhAddress(to, net)) {
+      if (!isSpendableAddress(to, net)) {
         setActionError(
-          net.ticker === 'RVN'
-            ? 'The site sent an unsupported Ravencoin address (only standard P2PKH addresses starting with R are accepted).'
-            : 'The site sent an unsupported EVRmore address (only standard P2PKH addresses starting with E are accepted).',
+          `The site sent an unsupported ${net.displayName} address. Only standard addresses this wallet can pay to are accepted.`,
         );
         return;
       }
@@ -257,7 +264,7 @@ export function DappApproval({ requestId }: { requestId: string }) {
       unlocked = false; // ownership transferred to `review`
     } catch (err) {
       const raw = err instanceof Error ? err.message : String(err);
-      setActionError(friendlyError(raw, assetName || walletNativeTicker, networkFor(service.network()).ticker));
+      setActionError(friendlyError(raw, assetName || walletNativeTicker, networkFor(service.network()).ticker, networkFor(service.network()).displayName));
     } finally {
       if (unlocked) {
         service.lock();
@@ -274,11 +281,11 @@ export function DappApproval({ requestId }: { requestId: string }) {
     setWorking(true);
     try {
       review.service.allowBroadcast = true;
-      const txid = await review.service.broadcast(review.plan.built.rawHex);
+      const txid = await review.service.broadcast(review.plan.built.rawHex, review.plan.built.txid);
       await settle({ result: { txid } });
     } catch (err) {
       const raw = err instanceof Error ? err.message : String(err);
-      setActionError(friendlyError(raw, review.plan.assetName || walletNativeTicker, walletNativeTicker));
+      setActionError(friendlyError(raw, review.plan.assetName || walletNativeTicker, walletNativeTicker, walletChainName));
     } finally {
       review.service.lock();
       review.client.close();
@@ -346,7 +353,11 @@ export function DappApproval({ requestId }: { requestId: string }) {
 
   // The connected wallet's chain ticker: drives every chain-aware label below
   // (fee unit, "sending X" wording, default asset name for a native send).
-  const walletNativeTicker = networkFor((wallet?.network as LiveNetworkId | undefined) ?? 'mainnet').ticker;
+  const walletNet = networkFor((wallet?.network as LiveNetworkId | undefined) ?? 'mainnet');
+  const walletNativeTicker = walletNet.ticker;
+  // Chain NAME from params, never a two-chain ternary: those mislabelled every
+  // chain added after Ravencoin (a Bitcoin send announced the EVRmore network).
+  const walletChainName = walletNet.displayName;
 
   const isSend = pending.method === 'sendEvr' || pending.method === 'sendAsset';
   const isSign = pending.method === 'signMessage';
@@ -447,7 +458,7 @@ export function DappApproval({ requestId }: { requestId: string }) {
             <p className="text-dim" style={{ fontSize: 12.5, lineHeight: 1.55, margin: '0 2px 14px' }}>
               This site wants to connect to your wallet. It will be able to see your
               address and balances, and to <strong>request</strong> transactions.
-              every send still needs your explicit approval.
+              Every send still needs your explicit approval.
             </p>
             <div className="section-label">Wallet to connect</div>
             <div className="card solid" style={{ marginBottom: 14 }}>
@@ -491,8 +502,8 @@ export function DappApproval({ requestId }: { requestId: string }) {
             <div className="banner warning" style={{ marginBottom: 14, display: 'flex', alignItems: 'center', gap: 8 }}>
               <SendHorizonal size={15} style={{ flexShrink: 0 }} />
               <span>
-                Sending <strong>{Number.isFinite(sendAmount) ? sendAmount : '?'} {sendAssetName}</strong> on the REAL
-                {walletNativeTicker === 'RVN' ? ' Ravencoin' : ' EVRmore'} network. This cannot be undone.
+                Sending <strong>{Number.isFinite(sendAmount) ? sendAmount : '?'} {sendAssetName}</strong> on the{' '}
+                <strong>real</strong>{` ${walletChainName}`} network. This cannot be undone.
               </span>
             </div>
             <div className="card solid" style={{ marginBottom: 14 }}>

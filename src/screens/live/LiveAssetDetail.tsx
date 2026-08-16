@@ -5,10 +5,11 @@
 import { ArrowDownLeft, ArrowUpRight, ChevronLeft, Info, Landmark, Trash2 } from 'lucide-react';
 import { TokenIcon } from '../../components/BrandLogo';
 import { EmptyState } from '../../components/EmptyState';
-import { useLiveStore, isRemovableAsset, nativeTickerFor } from '../../store/liveStore';
+import { useLiveStore, isRemovableAsset, nativeTickerFor, chainDisplayName } from '../../store/liveStore';
 import { isLegacyAsset, getAssetNote } from '../../services/assetNotes';
 import type { LiveAssetBalance, LiveTransaction } from '../../services/chain/electrumProvider';
 import { LiveNav } from './LiveNav';
+import type { NativeTicker } from '../../services/chain/chainParams';
 
 interface LiveAssetDetailProps {
   asset: LiveAssetBalance;
@@ -24,14 +25,13 @@ interface LiveAssetDetailProps {
 /** SATORIEVR is the only asset eligible for Satori pool staking. */
 const STAKING_ASSET = 'SATORIEVR';
 
-/** Human sub-label for an asset (mirrors LiveHome). `nativeTicker` is the active
- *  chain's native coin ('EVR' or 'RVN') so a Ravencoin wallet reads correctly
- *  instead of always assuming Evrmore. */
-function assetSubLabel(asset: LiveAssetBalance, nativeTicker: 'EVR' | 'RVN'): string {
-  if (asset.name === 'EVR') return 'EVRmore';
-  if (asset.name === 'RVN') return 'Ravencoin';
+/** Human sub-label for an asset row. The chain's own displayName is used rather
+ *  than a per-chain ternary, which used to fall through to "EVRmore asset" on
+ *  every chain added after Ravencoin. */
+function assetSubLabel(asset: LiveAssetBalance, nativeTicker: NativeTicker, chainName: string): string {
+  if (asset.name === nativeTicker) return chainName;
   if (asset.name.includes('SATORI')) return 'Satori Network';
-  return nativeTicker === 'RVN' ? 'Ravencoin asset' : 'EVRmore asset';
+  return `${chainName} asset`;
 }
 
 /** Format a whole-unit amount using the asset's declared decimal precision. */
@@ -191,7 +191,7 @@ export function LiveAssetDetail({ asset, onBack, onReceive, onSend, onSelectTx, 
               </span>
             )}
           </div>
-          <div className="text-dim" style={{ fontSize: 12 }}>{assetSubLabel(asset, nativeTicker)}</div>
+          <div className="text-dim" style={{ fontSize: 12 }}>{assetSubLabel(asset, nativeTicker, chainDisplayName())}</div>
           <div
             className="hero-value"
             data-testid={`live-asset-detail-balance-${asset.name}`}
@@ -205,18 +205,8 @@ export function LiveAssetDetail({ asset, onBack, onReceive, onSend, onSelectTx, 
         </div>
 
         {/* Primary actions */}
+        {/* Send before Receive — the same order the Home screen uses. */}
         <div className="actions-row" style={{ marginBottom: 12 }}>
-          <button
-            type="button"
-            className="action-round"
-            onClick={onReceive}
-            data-testid="live-asset-detail-receive"
-          >
-            <div className="action-circle">
-              <ArrowDownLeft size={20} />
-            </div>
-            Receive
-          </button>
           <button
             type="button"
             className="action-round"
@@ -227,6 +217,17 @@ export function LiveAssetDetail({ asset, onBack, onReceive, onSend, onSelectTx, 
               <ArrowUpRight size={20} />
             </div>
             Send
+          </button>
+          <button
+            type="button"
+            className="action-round"
+            onClick={onReceive}
+            data-testid="live-asset-detail-receive"
+          >
+            <div className="action-circle">
+              <ArrowDownLeft size={20} />
+            </div>
+            Receive
           </button>
           {canStake && (
             <button

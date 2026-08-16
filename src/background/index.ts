@@ -19,7 +19,7 @@
 import { getStorage } from '../services/storage';
 import { createElectrumClient } from '../services/chain/electrumClient';
 import { ElectrumWalletDataProvider } from '../services/chain/electrumProvider';
-import { applyStoredElectrumServers } from '../services/chain/network';
+import { applyAllStoredElectrumServers } from '../services/chain/network';
 import { networkFor } from '../services/chain/chainParams';
 import { diffDeposits, type BalanceMap } from './deposits';
 import {
@@ -31,12 +31,13 @@ import {
 
 // Best-effort: adopt the user's configured Electrum server pools so the dApp
 // worker's watch-only reads (getBalances) and the deposit poll use the SAME
-// servers as the wallet UI. Applied PER CHAIN (each chain's pool is keyed
-// separately) so an RVN wallet polls RVN servers and an EVR wallet polls EVR
-// servers. The provider resolves the pool lazily at connect time, so this just
-// needs to run before the first read — awaiting is unnecessary.
-void applyStoredElectrumServers('evrmore-mainnet');
-void applyStoredElectrumServers('ravencoin-mainnet');
+// servers as the wallet UI. Applied for EVERY chain via the params-derived
+// helper, NOT a per-chain call list: the two hardcoded calls that used to sit
+// here went stale when four chains were added, so those chains silently polled
+// their built-in defaults and ignored the user's configured server. The
+// provider resolves the pool lazily at connect time, so this just needs to run
+// before the first read — awaiting is unnecessary.
+void applyAllStoredElectrumServers();
 
 /** storage (local, namespaced): list of {origin, walletId} approvals the user granted
  *  via Connect. An origin is "connected" only while an entry matches the request
@@ -440,15 +441,48 @@ async function handleDappRequest(
   }
 }
 
+/**
+ * True when the tab may still receive `origin`'s deferred result. The page that
+ * made the request can navigate away while its approval window is open; whatever
+ * page then occupies the tab must NOT receive the result (an address, txid or
+ * signature meant for the approved origin).
+ *
+ * BEST-EFFORT ONLY: without the "tabs" permission (deliberately not requested —
+ * it adds a "read your browsing history" install warning) `tab.url` is readable
+ * only for hosts in host_permissions, so an unreadable URL cannot fail closed
+ * here without breaking delivery to every ordinary dApp. The AUTHORITATIVE check
+ * is in content.js, which relays a result only when this document deferred that
+ * exact id AND `location.origin` matches the origin echoed in the message; this
+ * layer just drops what it can already prove wrong (tab closed, or a readable
+ * URL on a different origin).
+ */
+async function tabMayReceive(tabId: number, origin: string): Promise<boolean> {
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    if (typeof tab.url === 'string' && tab.url) {
+      return new URL(tab.url).origin === origin;
+    }
+    return true; // URL unreadable — defer to the content script's own check
+  } catch {
+    return false; // tab is gone — nothing to deliver to
+  }
+}
+
 /** Outcome from the approval page -> persist the approval, route to the tab. */
 async function handleApproveResult(msg: DappApproveResultMessage): Promise<void> {
   if (msg.approveOrigin && !msg.error) await addApprovedOrigin(msg.approveOrigin);
   const pending = await takePending(msg.id);
   if (!pending) return; // already settled (double-send guard) or unknown id
+  if (!(await tabMayReceive(pending.tabId, pending.origin))) return;
   try {
     await chrome.tabs.sendMessage(pending.tabId, {
       type: 'evr-dapp-result',
       id: msg.id,
+      // Echo the requesting origin so the content script can refuse to relay
+      // the result into a document with a different location.origin (the tab
+      // may have navigated; see tabMayReceive above for why the check cannot
+      // live solely on this side).
+      origin: pending.origin,
       result: msg.result,
       error: msg.error,
     });

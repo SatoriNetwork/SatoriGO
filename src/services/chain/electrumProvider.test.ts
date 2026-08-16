@@ -2,10 +2,12 @@
 // Uses a fake ElectrumClient so no real WebSocket is opened.
 
 import { describe, it, expect } from 'vitest';
-import { ElectrumWalletDataProvider } from './electrumProvider';
+import { AddressHistoryRefusedError, ElectrumWalletDataProvider } from './electrumProvider';
+import { NetworkOfflineError } from '../provider';
 import type { ElectrumClient } from './electrumTypes';
 import { ELECTRUM_METHODS } from './network';
-import { RAVENCOIN_MAINNET } from './chainParams';
+import { BITCOINGOLD_MAINNET, EVRMORE_MAINNET, RAVENCOIN_MAINNET } from './chainParams';
+import { addressToElectrumScripthash, pubkeyToP2wpkhAddress } from './keys';
 
 // ---------------------------------------------------------------------------
 // Fake ElectrumClient
@@ -34,6 +36,22 @@ function makeFakeClient(handler: RequestHandler, opts?: { connectShouldFail?: bo
       return connected ? 'wss://fake-electrum:50004' : null;
     },
   };
+}
+
+/** A fake client that RECORDS every request. The Evrmore/Ravencoin asset dialect
+ *  is defined by the ARGUMENTS sent (get_balance(sh,asset), listunspent(sh,true))
+ *  and by the blockchain.asset.* methods, so "what went on the wire" is the only
+ *  thing worth asserting when proving a plain server is never asked for assets. */
+function makeRecordingClient(handler: RequestHandler): {
+  client: ElectrumClient;
+  calls: Array<{ method: string; params: unknown[] }>;
+} {
+  const calls: Array<{ method: string; params: unknown[] }> = [];
+  const client = makeFakeClient((method, params) => {
+    calls.push({ method, params: params ?? [] });
+    return handler(method, params);
+  });
+  return { client, calls };
 }
 
 // ---------------------------------------------------------------------------
@@ -68,6 +86,23 @@ function makeTestAddress(seed: number): string {
 
 const OUR_ADDRESS = makeTestAddress(0xab);
 const OTHER_ADDRESS = makeTestAddress(0xcd);
+
+/** A legacy ('G…') Bitcoin Gold address: same construction, that chain's version
+ *  byte. Used for the plain-chain tests so nothing about them relies on Evrmore. */
+function makeBtgsAddress(seed: number): string {
+  const payload = new Uint8Array(21);
+  payload[0] = BITCOINGOLD_MAINNET.pubKeyHash; // 38 -> 'G'
+  payload.set(new Uint8Array(20).fill(seed & 0xff), 1);
+  return b58c.encode(payload);
+}
+
+const BTGS_ADDRESS = makeBtgsAddress(0x3c);
+/** A native-segwit ('bcg1…') Bitcoin Gold address. Any 33 bytes work: the
+ *  encoder only hash160s them, and we never sign in these tests. */
+const BTGS_SEGWIT_ADDRESS = pubkeyToP2wpkhAddress(
+  new Uint8Array(33).fill(0x02),
+  BITCOINGOLD_MAINNET,
+);
 
 // ---------------------------------------------------------------------------
 // Shared verbose TX builders
@@ -948,6 +983,291 @@ describe('ElectrumWalletDataProvider', () => {
   });
 
   // -------------------------------------------------------------------------
+  // PLAIN (non-asset) chain — BITCOINGOLD_MAINNET.
+  //
+  // Its servers (Fulcrum 2.1.0, verified live) implement STOCK ElectrumX only:
+  // blockchain.asset.get_meta ERRORS there, and the extra asset argument to
+  // get_balance/listunspent is exactly what makes such a server error or
+  // misbehave. So these tests assert on what is NOT put on the wire, via the
+  // recording client. Every gate is supportsAssets() — a CAPABILITY, never a
+  // chain name — so a future plain chain is covered by the same code.
+  // -------------------------------------------------------------------------
+  describe('plain chain with no asset protocol (network: BITCOINGOLD_MAINNET)', () => {
+    /** get_balance / listunspent calls recorded so far. */
+    const callsTo = (
+      calls: Array<{ method: string; params: unknown[] }>,
+      method: string,
+    ) => calls.filter((c) => c.method === method);
+
+    it('getAssets returns ONLY the native BTGS row and promises no asset transfers', async () => {
+      const client = makeFakeClient(() => {
+        throw new Error('not called');
+      });
+      const provider = new ElectrumWalletDataProvider(client, { network: BITCOINGOLD_MAINNET });
+      const assets = await provider.getAssets();
+
+      expect(assets).toHaveLength(1);
+      expect(assets[0]).toMatchObject({ id: 'BTGS', symbol: 'BTGS', kind: 'native', decimals: 8 });
+      expect(assets[0].name).toBe(BITCOINGOLD_MAINNET.displayName);
+      // The copy must not offer assets on a chain that has none.
+      expect(assets[0].description).not.toMatch(/asset/i);
+    });
+
+    it('getBalances sends the PLAIN single-argument get_balance and reports only the native coin', async () => {
+      const { client, calls } = makeRecordingClient((method) => {
+        if (method === ELECTRUM_METHODS.getBalance) {
+          return { confirmed: 200000000, unconfirmed: 50000000 };
+        }
+        throw new Error(`unexpected method: ${method}`);
+      });
+      await client.connect();
+      const provider = new ElectrumWalletDataProvider(client, { network: BITCOINGOLD_MAINNET });
+      const balances = await provider.getBalances(BTGS_ADDRESS);
+
+      expect(balances).toHaveLength(1);
+      expect(balances[0]).toMatchObject({ assetId: 'BTGS' });
+      expect(balances[0].amount).toBeCloseTo(2.5, 8);
+
+      const balanceCalls = callsTo(calls, ELECTRUM_METHODS.getBalance);
+      expect(balanceCalls).toHaveLength(1);
+      // EXACTLY one argument — the asset flag is what breaks a plain server.
+      expect(balanceCalls[0].params).toEqual([addressToElectrumScripthash(BTGS_ADDRESS)]);
+      expect(calls.some((c) => c.method.startsWith('blockchain.asset.'))).toBe(false);
+    });
+
+    it('getAllAssetBalances sends the PLAIN listunspent(sh) and never fetches asset meta', async () => {
+      // A plain server's UTXOs carry no `asset` field at all.
+      const utxos = [
+        { tx_hash: 'a', tx_pos: 0, height: 100, value: 100000000 }, // 1.0 BTGS
+        { tx_hash: 'b', tx_pos: 1, height: 101, value: 50000000 }, // 0.5 BTGS
+      ];
+      const { client, calls } = makeRecordingClient((method) => {
+        if (method === ELECTRUM_METHODS.listUnspent) return utxos;
+        throw new Error(`unexpected method: ${method}`);
+      });
+      await client.connect();
+      const provider = new ElectrumWalletDataProvider(client, { network: BITCOINGOLD_MAINNET });
+      const balances = await provider.getAllAssetBalances(BTGS_ADDRESS);
+
+      expect(balances).toHaveLength(1);
+      expect(balances[0]).toMatchObject({ name: 'BTGS', decimals: 8, isNative: true });
+      expect(balances[0].amount).toBeCloseTo(1.5, 8);
+
+      const utxoCalls = callsTo(calls, ELECTRUM_METHODS.listUnspent);
+      expect(utxoCalls).toHaveLength(1);
+      // No `true` second argument: that flag only exists in the asset dialect.
+      expect(utxoCalls[0].params).toEqual([addressToElectrumScripthash(BTGS_ADDRESS)]);
+      expect(callsTo(calls, ELECTRUM_METHODS.assetGetMeta)).toHaveLength(0);
+    });
+
+    it('never synthesizes an asset row (nor a get_meta call) if a server echoes an asset field', async () => {
+      // Defensive: on a chain with no asset protocol an `asset` field can only be
+      // noise, so its sats must land on the native coin, not create a row.
+      const utxos = [
+        { tx_hash: 'c', tx_pos: 0, height: 102, asset: 'SATORI', value: 20000000 },
+      ];
+      const { client, calls } = makeRecordingClient((method) => {
+        if (method === ELECTRUM_METHODS.listUnspent) return utxos;
+        throw new Error(`unexpected method: ${method}`);
+      });
+      await client.connect();
+      const provider = new ElectrumWalletDataProvider(client, { network: BITCOINGOLD_MAINNET });
+      const balances = await provider.getAllAssetBalances(BTGS_ADDRESS);
+
+      expect(balances).toHaveLength(1);
+      expect(balances[0].name).toBe('BTGS');
+      expect(balances[0].amount).toBeCloseTo(0.2, 8);
+      expect(callsTo(calls, ELECTRUM_METHODS.assetGetMeta)).toHaveLength(0);
+    });
+
+    it('getAssetMeta short-circuits to null WITHOUT touching the network', async () => {
+      const { client, calls } = makeRecordingClient((method) => {
+        throw new Error(`unexpected method: ${method}`);
+      });
+      await client.connect();
+      const provider = new ElectrumWalletDataProvider(client, { network: BITCOINGOLD_MAINNET });
+
+      expect(await provider.getAssetMeta('SATORI')).toBeNull();
+      expect(await provider.getAssetMeta('anything')).toBeNull();
+      expect(calls).toHaveLength(0); // blockchain.asset.get_meta would ERROR here
+    });
+
+    it('getAssetBalance uses the plain form for the native coin and returns 0 for any asset name', async () => {
+      const { client, calls } = makeRecordingClient((method) => {
+        if (method === ELECTRUM_METHODS.getBalance) {
+          return { confirmed: 250000000, unconfirmed: 0 };
+        }
+        throw new Error(`unexpected method: ${method}`);
+      });
+      await client.connect();
+      const provider = new ElectrumWalletDataProvider(client, { network: BITCOINGOLD_MAINNET });
+
+      // The chain's OWN ticker must be recognised as native (it is not EVR/RVN).
+      const native = await provider.getAssetBalance(BTGS_ADDRESS, 'btgs');
+      expect(native).toBeCloseTo(2.5, 8);
+      expect(callsTo(calls, ELECTRUM_METHODS.getBalance)).toHaveLength(1);
+      expect(callsTo(calls, ELECTRUM_METHODS.getBalance)[0].params).toHaveLength(1);
+
+      // An asset cannot exist here: answer 0 without a (rejected) asset query.
+      expect(await provider.getAssetBalance(BTGS_ADDRESS, 'SATORI')).toBe(0);
+      expect(callsTo(calls, ELECTRUM_METHODS.getBalance)).toHaveLength(1);
+    });
+
+    it('works with a native-segwit (bcg1…) address, hashing its P2WPKH script', async () => {
+      const { client, calls } = makeRecordingClient((method) => {
+        if (method === ELECTRUM_METHODS.getBalance) return { confirmed: 100000000, unconfirmed: 0 };
+        throw new Error(`unexpected method: ${method}`);
+      });
+      await client.connect();
+      const provider = new ElectrumWalletDataProvider(client, { network: BITCOINGOLD_MAINNET });
+      const balances = await provider.getBalances(BTGS_SEGWIT_ADDRESS);
+
+      expect(BTGS_SEGWIT_ADDRESS.startsWith('bcg1')).toBe(true);
+      expect(balances).toHaveLength(1);
+      expect(balances[0].amount).toBeCloseTo(1.0, 8);
+      // The scripthash is the bech32 address's REAL script (keys.ts), and still
+      // only one argument goes with it.
+      expect(calls[0].params).toEqual([addressToElectrumScripthash(BTGS_SEGWIT_ADDRESS)]);
+    });
+
+    it('classifies transactions as the native coin, ignoring any asset field', async () => {
+      const TXID = 'b7c50001' + '0'.repeat(56);
+      // An output that (impossibly, here) carries an asset field: its VALUE must
+      // still be read as the native coin, never as an asset movement.
+      const tx = makeVerboseTx(TXID, {
+        vin: [{}],
+        vout: [
+          { value: 2.5, address: BTGS_ADDRESS, assetName: 'SATORI', assetAmount: 99 },
+          { value: 0.01, address: OTHER_ADDRESS },
+        ],
+      });
+      const { client, calls } = makeRecordingClient((method, params) => {
+        if (method === ELECTRUM_METHODS.getHistory) return [{ tx_hash: TXID, height: 900_000 }];
+        if (method === ELECTRUM_METHODS.txGet && params?.[0] === TXID) return tx;
+        throw new Error(`unexpected method: ${method}`);
+      });
+      await client.connect();
+      const provider = new ElectrumWalletDataProvider(client, { network: BITCOINGOLD_MAINNET });
+      const txs = await provider.getLiveTransactions(BTGS_ADDRESS);
+
+      expect(txs).toHaveLength(1);
+      expect(txs[0].asset).toBe('BTGS');
+      expect(txs[0].direction).toBe('in');
+      expect(txs[0].amount).toBeCloseTo(2.5, 8);
+      expect(calls.some((c) => c.method.startsWith('blockchain.asset.'))).toBe(false);
+    });
+
+    it('setNetwork onto a plain chain drops the asset dialect, and back onto Evrmore restores it', async () => {
+      const { client, calls } = makeRecordingClient((method) => {
+        if (method === ELECTRUM_METHODS.listUnspent) return [];
+        throw new Error(`unexpected method: ${method}`);
+      });
+      await client.connect();
+      const provider = new ElectrumWalletDataProvider(client); // defaults to Evrmore
+
+      await provider.getAllAssetBalances(OUR_ADDRESS);
+      expect(calls[0].params[1]).toBe(true); // asset dialect
+
+      provider.setNetwork(BITCOINGOLD_MAINNET);
+      await provider.getAllAssetBalances(BTGS_ADDRESS);
+      expect(calls[1].params).toHaveLength(1); // plain form
+
+      provider.setNetwork(EVRMORE_MAINNET);
+      await provider.getAllAssetBalances(OUR_ADDRESS);
+      expect(calls[2].params[1]).toBe(true); // asset dialect again
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Regression guard: chains that DO have an asset protocol must keep sending
+  // the asset dialect byte-for-byte. Capability gating must subtract nothing
+  // from Evrmore/Ravencoin.
+  // -------------------------------------------------------------------------
+  describe('asset chains still speak the asset dialect (regression guard)', () => {
+    it('Evrmore getBalances still sends get_balance(sh) AND get_balance(sh,"SATORI")', async () => {
+      const { client, calls } = makeRecordingClient((method) => {
+        if (method === ELECTRUM_METHODS.getBalance) return { confirmed: 100000000, unconfirmed: 0 };
+        throw new Error(`unexpected method: ${method}`);
+      });
+      await client.connect();
+      const provider = new ElectrumWalletDataProvider(client);
+      await provider.getBalances(OUR_ADDRESS);
+
+      const sh = addressToElectrumScripthash(OUR_ADDRESS);
+      const params = calls
+        .filter((c) => c.method === ELECTRUM_METHODS.getBalance)
+        .map((c) => c.params);
+      expect(params).toHaveLength(2);
+      expect(params).toContainEqual([sh]);
+      expect(params).toContainEqual([sh, 'SATORI']);
+    });
+
+    it('Evrmore getAllAssetBalances still sends listunspent(sh, true)', async () => {
+      const { client, calls } = makeRecordingClient((method) => {
+        if (method === ELECTRUM_METHODS.listUnspent) return [];
+        throw new Error(`unexpected method: ${method}`);
+      });
+      await client.connect();
+      const provider = new ElectrumWalletDataProvider(client);
+      await provider.getAllAssetBalances(OUR_ADDRESS);
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0].params).toEqual([addressToElectrumScripthash(OUR_ADDRESS), true]);
+    });
+
+    it('Ravencoin getAllAssetBalances still sends listunspent(sh, true) and resolves asset meta', async () => {
+      const utxos = [{ tx_hash: 'c', tx_pos: 0, height: 102, asset: 'RVNASSET', value: 100000000 }];
+      const { client, calls } = makeRecordingClient((method) => {
+        if (method === ELECTRUM_METHODS.listUnspent) return utxos;
+        if (method === ELECTRUM_METHODS.assetGetMeta) {
+          return { sats_in_circulation: 100000000, divisions: 4, reissuable: false, has_ipfs: false };
+        }
+        throw new Error(`unexpected method: ${method}`);
+      });
+      await client.connect();
+      const provider = new ElectrumWalletDataProvider(client, { network: RAVENCOIN_MAINNET });
+      const balances = await provider.getAllAssetBalances(OUR_ADDRESS);
+
+      expect(calls[0].method).toBe(ELECTRUM_METHODS.listUnspent);
+      expect(calls[0].params[1]).toBe(true);
+      // The asset row is still detected AND its meta still fetched.
+      expect(calls.some((c) => c.method === ELECTRUM_METHODS.assetGetMeta)).toBe(true);
+      expect(balances.map((b) => b.name)).toEqual(['RVN', 'RVNASSET']);
+      expect(balances[1].decimals).toBe(4);
+    });
+
+    it('Evrmore/Ravencoin getAssetMeta still calls blockchain.asset.get_meta', async () => {
+      for (const net of [EVRMORE_MAINNET, RAVENCOIN_MAINNET]) {
+        const { client, calls } = makeRecordingClient((method) => {
+          if (method === ELECTRUM_METHODS.assetGetMeta) {
+            return { sats_in_circulation: 100000000, divisions: 0, reissuable: false, has_ipfs: false };
+          }
+          throw new Error(`unexpected method: ${method}`);
+        });
+        await client.connect();
+        const provider = new ElectrumWalletDataProvider(client, { network: net });
+
+        const meta = await provider.getAssetMeta('SATORI');
+        expect(meta?.exists).toBe(true);
+        expect(calls).toEqual([{ method: ELECTRUM_METHODS.assetGetMeta, params: ['SATORI'] }]);
+      }
+    });
+
+    it('Evrmore getAssetBalance still sends the asset argument for a non-native name', async () => {
+      const { client, calls } = makeRecordingClient((method) => {
+        if (method === ELECTRUM_METHODS.getBalance) return { confirmed: 20547945205, unconfirmed: 0 };
+        throw new Error(`unexpected method: ${method}`);
+      });
+      await client.connect();
+      const provider = new ElectrumWalletDataProvider(client);
+
+      const amount = await provider.getAssetBalance(OUR_ADDRESS, 'satori');
+      expect(amount).toBeCloseTo(205.47945205, 8);
+      expect(calls[0].params).toEqual([addressToElectrumScripthash(OUR_ADDRESS), 'SATORI']);
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // Verbose-tx memo cache: prevout lookups (immutable) are memoized so a big
   // first sync roughly halves round-trips; a mempool MAIN tx (height<=0) is
   // always refetched; the memo is bounded (cap 500, oldest evicted).
@@ -1053,6 +1373,79 @@ describe('ElectrumWalletDataProvider', () => {
       // T1 was evicted, so classifying it again misses the memo and refetches.
       await provider.classifyTxHash(OUR_ADDRESS, T1, 100);
       expect(counts[T1]).toBe(2);
+    });
+  });
+  // -------------------------------------------------------------------------
+  // getAddressHistory — a server that ANSWERS and refuses is not "offline".
+  //
+  // Real behaviour on live Evrmore and Ravencoin servers: get_history for a big
+  // address replies {"code":1,"message":"history too large"}, which the client
+  // surfaces as Error("Electrum error: history too large (code 1)"). Collapsing
+  // that into NetworkOfflineError (what this used to do) made a permanently
+  // unreadable address look exactly like a network blip, so the wallet reported
+  // itself online with an empty Activity list and no explanation, forever.
+  // -------------------------------------------------------------------------
+
+  describe('getAddressHistory (server refusal vs transport failure)', () => {
+    /** A client whose get_history rejects the way electrumClient.dispatch does
+     *  for a JSON-RPC error REPLY. */
+    function refusingClient(serverError: string): ElectrumClient {
+      return makeFakeClient((method) => {
+        if (method === ELECTRUM_METHODS.getHistory) {
+          throw new Error(`Electrum error: ${serverError}`);
+        }
+        throw new Error(`unexpected: ${method}`);
+      });
+    }
+
+    it('throws AddressHistoryRefusedError with tooLarge for "history too large"', async () => {
+      const client = refusingClient('history too large (code 1)');
+      await client.connect();
+      const provider = new ElectrumWalletDataProvider(client);
+
+      const err = await provider.getAddressHistory(OUR_ADDRESS).catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(AddressHistoryRefusedError);
+      expect(err).not.toBeInstanceOf(NetworkOfflineError);
+      const refused = err as AddressHistoryRefusedError;
+      expect(refused.tooLarge).toBe(true);
+      expect(refused.serverMessage).toBe('history too large (code 1)');
+      // The name is contract, not decoration: txCache matches it structurally.
+      expect(refused.name).toBe('AddressHistoryRefusedError');
+    });
+
+    it('throws AddressHistoryRefusedError WITHOUT tooLarge for any other server error', async () => {
+      const client = refusingClient('unknown method "blockchain.scripthash.get_history" (code 1)');
+      await client.connect();
+      const provider = new ElectrumWalletDataProvider(client);
+
+      const err = await provider.getAddressHistory(OUR_ADDRESS).catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(AddressHistoryRefusedError);
+      expect((err as AddressHistoryRefusedError).tooLarge).toBe(false);
+    });
+
+    it('still throws NetworkOfflineError when the transport fails (nothing answered)', async () => {
+      const client = makeFakeClient(() => {
+        throw new Error('WebSocket closed with request pending');
+      }, { connectShouldFail: true });
+      const provider = new ElectrumWalletDataProvider(client);
+
+      const err = await provider.getAddressHistory(OUR_ADDRESS).catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(NetworkOfflineError);
+      expect(err).not.toBeInstanceOf(AddressHistoryRefusedError);
+    });
+
+    it('returns the history unchanged when the server answers normally', async () => {
+      const client = makeFakeClient((method) => {
+        if (method === ELECTRUM_METHODS.getHistory) return [{ tx_hash: 'aa', height: 7 }];
+        throw new Error(`unexpected: ${method}`);
+      });
+      await client.connect();
+      const provider = new ElectrumWalletDataProvider(client);
+
+      expect(await provider.getAddressHistory(OUR_ADDRESS)).toEqual([{ tx_hash: 'aa', height: 7 }]);
     });
   });
 });

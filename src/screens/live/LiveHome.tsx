@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ArrowDownLeft, ArrowUpRight, Check, ChevronDown, ExternalLink, Landmark, LogOut, Plus, RefreshCw, Search, Trash2, Wifi, WifiOff, X } from 'lucide-react';
-import { StatusPill } from '../../components/StatusPill';
+import { AlertTriangle, ArrowDownLeft, ArrowUpRight, Check, ChevronDown, ExternalLink, Landmark, LogOut, Plus, RefreshCw, Search, Trash2, Wifi, WifiOff, X } from 'lucide-react';
 import { CopyButton } from '../../components/CopyButton';
 import { TokenIcon, BrandLogo } from '../../components/BrandLogo';
 import { Skeleton, TokenRowSkeleton } from '../../components/Skeleton';
@@ -10,6 +9,7 @@ import { TextField } from '../../components/TextField';
 import { LiveAddAsset } from './LiveAddAsset';
 import { LiveNetwork } from './LiveNetwork';
 import { LiveNav, useNav } from './LiveNav';
+import { ChainSwitcher } from './ChainSwitcher';
 import { isDetachedWindow, openDetachedWindow } from '../../services/detachWindow';
 import {
   useLiveStore,
@@ -18,8 +18,12 @@ import {
   usdValue,
   nativeTickerFor,
   stakingSupported,
+  assetsSupported,
+  activeChainId,
+  walletsOnChain,
   type LiveSyncing,
 } from '../../store/liveStore';
+import { networkFor, isYoungChain } from '../../services/chain/chainParams';
 import { getAppVersion } from '../../services/constants';
 import { isLegacyAsset, getAssetNote } from '../../services/assetNotes';
 import type { LiveAssetBalance, LiveTransaction } from '../../services/chain/electrumProvider';
@@ -32,6 +36,7 @@ import {
   type ActivityItem,
   type StakingEvent,
 } from '../../services/activityFeed';
+import type { NativeTicker } from '../../services/chain/chainParams';
 
 interface LiveHomeProps {
   onReceive(): void;
@@ -59,14 +64,17 @@ function fmtUsd(value: number): string {
   return `$${value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-/** USD price for a given asset name (only EVR, SATORIEVR and RVN are ever priced). */
+/** USD price for a given asset name (only EVR, SATORIEVR, RVN and LTC are ever
+ *  priced). */
 function priceForAsset(
   name: string,
-  prices: { EVR?: number; SATORIEVR?: number; RVN?: number },
+  prices: { EVR?: number; SATORIEVR?: number; RVN?: number; LTC?: number; BTC?: number },
 ): number | undefined {
   if (name === 'EVR') return prices.EVR;
   if (name === 'SATORIEVR') return prices.SATORIEVR;
   if (name === 'RVN') return prices.RVN;
+  if (name === 'LTC') return prices.LTC;
+  if (name === 'BTC') return prices.BTC;
   return undefined;
 }
 
@@ -82,7 +90,27 @@ function fmtTxTime(ts: number): string {
   return `${date}, ${time}`;
 }
 
-type LedState = 'connected' | 'syncing' | 'offline';
+type LedState = 'connected' | 'syncing' | 'offline' | 'stale';
+
+/** How old the chain tip may get before the header says so.
+ *
+ *  Deliberately ONE conservative number rather than a per-chain target we have
+ *  not verified: no chain shipped here aims slower than ten minutes, so this is
+ *  at least nine missed blocks on the slowest of them, while a genuinely quiet
+ *  stretch on a fast chain never trips it. The label states the AGE, which is a
+ *  fact, instead of declaring the chain dead, which would be a guess. */
+const TIP_STALE_AFTER_MS = 90 * 60 * 1000;
+
+/** "6h 12m" / "48m" — coarse on purpose; the point is the order of magnitude. */
+function formatAge(ms: number): string {
+  const minutes = Math.floor(ms / 60000);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const rem = minutes % 60;
+  if (hours < 24) return rem > 0 ? `${hours}h ${rem}m` : `${hours}h`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ${hours % 24}h`;
+}
 
 /** Inputs the header sync status (and the LED next to it) is derived from.
  *  Kept as a plain struct rather than reading the store directly so the
@@ -94,6 +122,9 @@ export interface SyncStatusInput {
   network: NetworkStatus | null;
   syncProgress: { done: number; total: number } | null;
   lastSyncAt: number | null;
+  /** Age of the CHAIN TIP in ms, or null when unknown. Passed in rather than
+   *  computed here so this stays a pure function of its arguments. */
+  tipAgeMs?: number | null;
 }
 
 /** The compact header label + LED color it drives, plus a fuller tooltip
@@ -143,6 +174,18 @@ export function deriveSyncStatus(input: SyncStatusInput): SyncStatus {
   }
 
   if (lastSyncAt != null) {
+    // Synced to a chain that has stopped producing blocks. The WALLET is fine,
+    // which is exactly why this needs saying: a green "Synced" on a stalled
+    // chain tells the user their payment is about to confirm when nothing is
+    // going to confirm at all.
+    if (input.tipAgeMs != null && input.tipAgeMs > TIP_STALE_AFTER_MS) {
+      const age = formatAge(input.tipAgeMs);
+      return {
+        ledState: 'stale',
+        label: `No block ${age}`,
+        tooltip: `Synced, but this chain has not produced a block in ${age}. Transactions cannot confirm until it does.`,
+      };
+    }
     return { ledState: 'connected', label: 'Synced', tooltip: 'Fully synced' };
   }
 
@@ -164,32 +207,6 @@ export function formatSyncBannerText(syncProgress: { done: number; total: number
   const done = syncProgress.done.toLocaleString('en-US');
   const total = syncProgress.total.toLocaleString('en-US');
   return `Syncing wallet data from the blockchain… ${done} of ${total} transactions.`;
-}
-
-/** Small connection LED in the header: green = connected, yellow = downloading
- *  wallet data (refresh / initial or switching sync), red = offline. */
-function ConnectionLed({ state, label }: { state: LedState; label: string }) {
-  const color =
-    state === 'offline' ? 'var(--danger)' : state === 'syncing' ? 'var(--warning)' : 'var(--success)';
-  return (
-    <span
-      role="status"
-      aria-label={label}
-      title={label}
-      data-testid="live-led"
-      data-state={state}
-      style={{
-        width: 8,
-        height: 8,
-        borderRadius: '50%',
-        background: color,
-        boxShadow: `0 0 6px ${color}`,
-        display: 'inline-block',
-        flexShrink: 0,
-        animation: state === 'syncing' ? 'pulse 1.1s ease-in-out infinite' : undefined,
-      }}
-    />
-  );
 }
 
 function TxRow({ tx, onOpen }: { tx: LiveTransaction; onOpen?: (txid: string) => void }) {
@@ -329,7 +346,7 @@ function BalanceRow({
   /** Present only for SATORIEVR when the wallet is registered with a pool. */
   staked?: { poolAlias: string | null; poolAddress: string };
   /** Active chain's native ticker; gates the Evrmore-only "legacy SATORI" pill. */
-  nativeTicker: 'EVR' | 'RVN';
+  nativeTicker: NativeTicker;
 }) {
   // Secondary USD value for this row — only when a price exists for the asset.
   const usd = usdValue(asset.amount, price);
@@ -523,8 +540,34 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx }: LiveH
   // Native ticker of the ACTIVE chain (follows svc.network(), independent of
   // whether `activeWallet` was found in the list) — drives the hero label/unit.
   const nativeTicker = nativeTickerFor();
-  const activeWalletName =
-    activeWallet?.name ?? (nativeTicker === 'RVN' ? 'Real Ravencoin mainnet' : 'Real EVRmore mainnet');
+  // Whether the active chain has an asset/token protocol at all — gates every
+  // token affordance below (Add token, the Assets list chrome). Capability-
+  // driven (never a hardcoded ticker check), so a future plain chain needs no
+  // edits here.
+  const canHoldAssets = assetsSupported();
+  // Human name of the chain in use (banners, wallet-name fallback). Comes from
+  // the chain params so a new chain names itself with no edit here.
+  const activeChainName = networkFor(activeChainId()).displayName;
+  // Bare host (no scheme) reads better in a 400px popup than a full URL.
+  const activeChainHomepage = networkFor(activeChainId()).homepage;
+  const activeChainHomepageHost = activeChainHomepage.replace(/^https?:\/\//i, '').replace(/\/$/, '');
+  const openChainHomepage = () => {
+    // Only ever open an https origin, and never hand the new tab a window opener.
+    if (!/^https:\/\//i.test(activeChainHomepage)) return;
+    if (typeof window !== 'undefined' && typeof window.open === 'function') {
+      window.open(activeChainHomepage, '_blank', 'noopener,noreferrer');
+    }
+  };
+  // Caution notice for a young/thin network. Dismissal is deliberately NOT
+  // persisted: it resets whenever the chain changes (and on every popup open),
+  // so entering such a chain always says so once. The permanent record is the
+  // "New" chip in the chain list, which never goes away.
+  const activeChainIsYoung = isYoungChain(networkFor(activeChainId()));
+  const [youngNoticeDismissed, setYoungNoticeDismissed] = useState(false);
+  useEffect(() => {
+    setYoungNoticeDismissed(false);
+  }, [activeChainName]);
+  const activeWalletName = activeWallet?.name ?? `Real ${activeChainName} mainnet`;
   const activeIsPk = activeWallet?.kind === 'pk';
   const deleteTarget = wallets.find((w) => w.id === deleteWalletId) ?? null;
 
@@ -532,6 +575,18 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx }: LiveH
     setShowWalletMenu(false);
     if (id !== activeWalletId) void switchWallet(id);
   };
+
+  // Escape closes the wallet menu — parity with the chain switcher's popover,
+  // which already does this. Without it Escape was a dead key on this menu
+  // while working one control to the right, which reads as a bug.
+  useEffect(() => {
+    if (!showWalletMenu) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setShowWalletMenu(false);
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [showWalletMenu]);
 
   // Dynamic (MetaMask-style) list: held ∪ pinned − hidden, the native coin always
   // first (EVR on Evrmore, RVN on Ravencoin — computeDisplayedAssets always flags
@@ -549,22 +604,37 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx }: LiveH
     return v != null ? sum + v : sum;
   }, 0);
 
-  // Connection LED + header sync-status label share one derivation: red =
-  // unreachable, yellow = downloading wallet data (manual refresh, first sync
-  // of an unseen wallet, a background classification still in progress, or no
-  // status yet), green = fully synced. See deriveSyncStatus for the priority
-  // order between these signals.
-  const syncStatus = deriveSyncStatus({ offline, loadingRefresh, syncing, network, syncProgress, lastSyncAt });
+  // ONE status surface: the block pill's dot + the sync-status text beside it,
+  // both driven by deriveSyncStatus. The separate brand-row LED was removed
+  // (owner request): it repeated the exact state this dot already shows. That
+  // makes driving the pill from the DERIVED ledState — not from the raw
+  // network.state as before — load-bearing: 'stale' (chain stopped producing
+  // blocks) used to ride only on that LED, and it must stay visible here.
+  // Red = unreachable, pulsing yellow = downloading wallet data, steady
+  // yellow = stale chain tip, green = fully synced. See deriveSyncStatus for
+  // the priority order between these signals.
+  // Tip age is computed HERE, not inside the derivation, so that stays pure.
+  const tipAgeMs = network?.tipTime != null ? Date.now() - network.tipTime : null;
+  const syncStatus = deriveSyncStatus({
+    offline,
+    loadingRefresh,
+    syncing,
+    network,
+    syncProgress,
+    lastSyncAt,
+    tipAgeMs,
+  });
   const ledState = syncStatus.ledState;
-  // The LED's own aria-label stays exactly as before (block height when
-  // connected) — the new, separate sync-status text next to it is what
-  // surfaces "Synced" / progress numbers.
-  const ledLabel =
-    ledState === 'offline'
-      ? 'Offline'
-      : ledState === 'syncing'
-      ? 'Syncing…'
-      : `Connected, block ${network ? network.blockHeight.toLocaleString('en-US') : 'n/a'}`;
+  // Map the derived state onto the pill's visual classes. 'syncing' reuses the
+  // pulsing 'connecting' dot (same "in progress" meaning); 'stale' has its own
+  // warning style (global.css). A provider-reported 'degraded' is preserved
+  // when the derivation itself sees a healthy connection.
+  const pillState =
+    ledState === 'syncing'
+      ? 'connecting'
+      : ledState === 'connected' && network?.state === 'degraded'
+      ? 'degraded'
+      : ledState;
 
   // Version + Satori Network identity footer. Shared by every tab. On the assets
   // tab it lives INSIDE the scrollable asset list (so it scrolls with the rows and
@@ -584,62 +654,55 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx }: LiveH
 
   return (
     <div className="app-frame screen-enter" data-testid="live-home">
-      {/* Header: brand logo + wallet name, LED, wallet switcher. */}
+      {/* Header: brand logo + wordmark, wallet switcher, chain switcher,
+          actions. NO status LED here (owner request): it duplicated the state
+          dot the block pill below already shows, and the sync-status text sits
+          on that same pill row — one status surface instead of two. */}
       <div className="app-header">
         <div className="brand">
           <BrandLogo slot="satori" size={34} alt="Satori Network" />
           <div style={{ minWidth: 0, display: 'flex', flexDirection: 'column' }}>
-            <div className="brand-title" style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+            <div className="brand-title" style={{ minWidth: 0 }}>
               Satori GO
-              <ConnectionLed state={ledState} label={ledLabel} />
-              {/* Subtle sync-status text: tells the user "Synced" vs "Syncing"
-                  (with live progress numbers) without needing to hover the LED.
-                  It — not the brand name — is the element that shrinks/ellipses
-                  if the popup is too narrow to fit everything. */}
-              <span
-                data-testid="sync-status"
-                title={syncStatus.tooltip}
+            </div>
+            {/* Second line: the wallet switcher, alone. The name still
+                ellipsizes against the widest chain chip: its budget is set by
+                the chip and the header action buttons, which both have
+                stronger claims (the chain name is a safety surface, so it
+                must not be traded away for wallet-name characters). */}
+            <div style={{ display: 'flex', alignItems: 'center', minWidth: 0 }}>
+              <button
+                type="button"
+                className="brand-sub"
+                onClick={() => setShowWalletMenu((v) => !v)}
+                data-testid="live-wallet-switcher"
+                aria-label="Switch wallet"
+                aria-expanded={showWalletMenu}
                 style={{
-                  fontSize: 9.5,
-                  fontWeight: 400,
-                  color: 'var(--text-faint)',
-                  whiteSpace: 'nowrap',
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 3,
+                  background: 'none',
+                  border: 'none',
+                  padding: 0,
+                  cursor: 'pointer',
+                  color: 'var(--text-dim)',
+                  maxWidth: 140,
                   minWidth: 0,
-                  flexShrink: 1,
                 }}
               >
-                {syncStatus.label}
-              </span>
+                {activeIsPk && <BrandLogo slot="satori" size={12} alt="Satori" />}
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {activeWalletName}
+                </span>
+                <ChevronDown size={11} style={{ flexShrink: 0 }} />
+              </button>
             </div>
-            <button
-              type="button"
-              className="brand-sub"
-              onClick={() => setShowWalletMenu((v) => !v)}
-              data-testid="live-wallet-switcher"
-              aria-label="Switch wallet"
-              aria-expanded={showWalletMenu}
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 3,
-                background: 'none',
-                border: 'none',
-                padding: 0,
-                cursor: 'pointer',
-                color: 'var(--text-dim)',
-                maxWidth: 140,
-              }}
-            >
-              {activeIsPk && <BrandLogo slot="satori" size={12} alt="Satori" />}
-              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {activeWalletName}
-              </span>
-              <ChevronDown size={11} style={{ flexShrink: 0 }} />
-            </button>
           </div>
         </div>
+        {/* Network switcher: mounted here only, next to the wallet switcher
+            above. Self-contained (own trigger + popover) — see ChainSwitcher.tsx. */}
+        <ChainSwitcher />
         <div className="header-actions">
           <button
             type="button"
@@ -681,54 +744,67 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx }: LiveH
         </div>
       </div>
 
-      {/* Wallet switcher dropdown */}
+      {/* Wallet switcher dropdown. SCOPED TO THE ACTIVE CHAIN: the chain you are
+          on decides which wallets exist here, so this lists siblings you can
+          switch between without leaving the chain. Crossing chains is the chain
+          switcher's job, and it already lands on that chain's wallet, so an
+          unscoped list here offered a second, silent way to change chain from a
+          control that does not say it changes chain. */}
       {showWalletMenu && (
         <div className="menu-pop" style={{ left: 14, right: 'auto', top: 52 }}>
-          {wallets.map((w, i) => (
-            <div key={w.id} style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-              <button
-                type="button"
-                onClick={() => selectWallet(w.id)}
-                data-testid={`live-wallet-item-${i}`}
-                style={{ gap: 7, flex: 1, minWidth: 0 }}
-              >
-                {w.kind === 'pk' && <BrandLogo slot="satori" size={16} alt="Satori" />}
-                {w.network === 'ravencoin-mainnet' && <BrandLogo slot="rvn" size={16} alt="RVN" />}
-                <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {w.name}
-                </span>
-                <span className="chip neutral" style={{ fontSize: 8.5, padding: '1px 4px', flexShrink: 0 }}>
-                  {w.kind === 'pk' ? 'Satori' : 'Seed'}
-                </span>
-                {w.network === 'ravencoin-mainnet' && (
-                  <span
-                    className="chip neutral"
-                    data-testid={`live-wallet-item-chain-${i}`}
-                    style={{ fontSize: 8.5, padding: '1px 4px', flexShrink: 0 }}
-                  >
-                    RVN
-                  </span>
-                )}
-                {w.passwordless && (
-                  <span className="chip warning" style={{ fontSize: 8.5, padding: '1px 4px', flexShrink: 0 }}>No pw</span>
-                )}
-                {w.active && <Check size={14} style={{ color: 'var(--success)', flexShrink: 0 }} />}
-              </button>
-              {!w.active && (
+          {walletsOnChain(wallets).map((w, i) => {
+            // Each row's OWN chain (not the active chain) drives its badge: any
+            // wallet whose native ticker isn't the default (Evrmore) gets an
+            // icon + ticker chip, so a Ravencoin, Bitcoin Gold, or future
+            // non-Evrmore wallet is distinguishable in the switcher.
+            const walletTicker = nativeTickerFor(w.network);
+            const isOtherChain = walletTicker !== 'EVR';
+            return (
+              <div key={w.id} style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                 <button
                   type="button"
-                  className="danger"
-                  onClick={() => { setShowWalletMenu(false); setDeleteWalletId(w.id); }}
-                  aria-label={`Remove ${w.name}`}
-                  title={`Remove ${w.name}`}
-                  data-testid={`live-wallet-delete-${i}`}
-                  style={{ width: 30, flexShrink: 0, justifyContent: 'center', padding: '9px 6px' }}
+                  onClick={() => selectWallet(w.id)}
+                  data-testid={`live-wallet-item-${i}`}
+                  style={{ gap: 7, flex: 1, minWidth: 0 }}
                 >
-                  <Trash2 size={13} />
+                  {w.kind === 'pk' && <BrandLogo slot="satori" size={16} alt="Satori" />}
+                  {isOtherChain && <TokenIcon assetId={walletTicker} size={16} />}
+                  <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {w.name}
+                  </span>
+                  <span className="chip neutral" style={{ fontSize: 8.5, padding: '1px 4px', flexShrink: 0 }}>
+                    {w.kind === 'pk' ? 'Satori' : 'Seed'}
+                  </span>
+                  {isOtherChain && (
+                    <span
+                      className="chip neutral"
+                      data-testid={`live-wallet-item-chain-${i}`}
+                      style={{ fontSize: 8.5, padding: '1px 4px', flexShrink: 0 }}
+                    >
+                      {walletTicker}
+                    </span>
+                  )}
+                  {w.passwordless && (
+                    <span className="chip warning" style={{ fontSize: 8.5, padding: '1px 4px', flexShrink: 0 }}>No pw</span>
+                  )}
+                  {w.active && <Check size={14} style={{ color: 'var(--success)', flexShrink: 0 }} />}
                 </button>
-              )}
-            </div>
-          ))}
+                {!w.active && (
+                  <button
+                    type="button"
+                    className="danger"
+                    onClick={() => { setShowWalletMenu(false); setDeleteWalletId(w.id); }}
+                    aria-label={`Remove ${w.name}`}
+                    title={`Remove ${w.name}`}
+                    data-testid={`live-wallet-delete-${i}`}
+                    style={{ width: 30, flexShrink: 0, justifyContent: 'center', padding: '9px 6px' }}
+                  >
+                    <Trash2 size={13} />
+                  </button>
+                )}
+              </div>
+            );
+          })}
           <div style={{ height: 1, background: 'var(--border)', margin: '4px 0' }} />
           <button
             type="button"
@@ -741,14 +817,27 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx }: LiveH
       )}
 
       {showWalletMenu && (
+        /* Outside-click closer. FIXED (not absolute) for the same reason as
+           the chain switcher's overlay: absolute anchors to whichever ancestor
+           happens to be positioned and did not cover the whole popup, leaving
+           dead zones where a click neither closed the menu nor did anything
+           else. z-index below the menu-pop (50) so the menu itself stays
+           clickable. */
         <div
-          style={{ position: 'absolute', inset: 0, zIndex: 39 }}
+          style={{ position: 'fixed', inset: 0, zIndex: 49 }}
           onClick={() => setShowWalletMenu(false)}
         />
       )}
 
       <div
-        className={tab === 'assets' ? 'app-content home-pinned' : 'app-content'}
+        /* `home-roomy` on a chain with no token list: the balance and the two
+           primary actions grow into the space the list would have occupied,
+           instead of leaving the screen looking half-empty. */
+        className={
+          tab === 'assets'
+            ? `app-content home-pinned${canHoldAssets ? '' : ' home-roomy'}`
+            : 'app-content'
+        }
         data-testid={`live-tab-panel-${tab}`}
       >
         {/* First-sync banner: non-blocking — data streams in while it shows. */}
@@ -767,49 +856,189 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx }: LiveH
           </div>
         )}
 
+        {/* Young-network caution. Stated in terms of what can actually happen to
+            the user's coins, not as a vague "be careful": a thin chain can stop
+            producing blocks, and then a transaction simply never confirms. */}
+        {activeChainIsYoung && !youngNoticeDismissed && (
+          <div
+            className="banner warning"
+            style={{ marginBottom: 10, alignItems: 'flex-start' }}
+            data-testid="live-young-chain-notice"
+          >
+            <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+            <span style={{ flex: 1, minWidth: 0 }}>
+              {activeChainName} is a young network with little mining power. It can
+              stop producing blocks, and a payment then stays unconfirmed until it
+              recovers. Keep only what you can afford to lose here.
+            </span>
+            <button
+              type="button"
+              className="icon-btn"
+              onClick={() => setYoungNoticeDismissed(true)}
+              aria-label="Dismiss"
+              data-testid="live-young-chain-dismiss"
+              style={{ flexShrink: 0 }}
+            >
+              <X size={13} />
+            </button>
+          </div>
+        )}
+
         {tab === 'assets' ? (
           <>
-            {/* Network status + address */}
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
-              {loadingRefresh && !network ? (
-                <Skeleton width={110} height={26} radius={999} />
-              ) : (
-                <StatusPill
-                  state={offline ? 'offline' : (network?.state ?? 'connecting')}
-                  label={
-                    offline
-                      ? 'Offline'
-                      : network
-                      ? `Block ${network.blockHeight.toLocaleString()}`
-                      : 'Connecting…'
-                  }
-                  testId="live-network-pill"
-                />
-              )}
+            {/* Network status + address. The chain-name line that used to sit
+                under the pill is GONE (owner request): the chain is already
+                named — with its coin mark — in the header's chain-switcher
+                chip, so stating it twice bought nothing. */}
+            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 6 }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+                {/* Sync text beside the block pill (owner's placement): the
+                    pill says where the chain tip is, the label says whether
+                    THIS wallet is caught up to it, so one glance answers
+                    both. minWidth:0 + ellipsis is a last-resort guard against
+                    implausible digit widths, not an expected state. When
+                    offline the pill itself already reads "Offline", so the
+                    label (whose derivation would also say "Offline") is
+                    skipped instead of echoed beside it. */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                  {loadingRefresh && !network ? (
+                    <Skeleton width={110} height={26} radius={999} />
+                  ) : (
+                    /* Inline .pill markup rather than <StatusPill>: the pill's
+                       dot IS the app's one connection LED now (the brand-row
+                       LED is gone), so it needs the live-led testid, a
+                       data-state, and the derived 'stale' state — none of
+                       which StatusPill's NetworkState contract carries. */
+                    <span
+                      className={`pill state-${pillState}`}
+                      data-testid="live-network-pill"
+                      title={syncStatus.tooltip}
+                    >
+                      <span
+                        className="dot"
+                        data-testid="live-led"
+                        data-state={ledState}
+                        aria-hidden
+                      />
+                      {offline
+                        ? 'Offline'
+                        : network
+                        ? `Block ${network.blockHeight.toLocaleString()}`
+                        : 'Connecting…'}
+                    </span>
+                  )}
+                  {!offline && (
+                    <>
+                      <span aria-hidden="true" style={{ fontSize: 9.5, color: 'var(--text-faint)', flexShrink: 0 }}>
+                        ·
+                      </span>
+                      <span
+                        data-testid="sync-status"
+                        title={syncStatus.tooltip}
+                        style={{
+                          fontSize: 9.5,
+                          // A stalled chain must not read like routine faint
+                          // metadata: "No block 6h 12m" gets the warning color
+                          // to match the pill dot beside it.
+                          fontWeight: ledState === 'stale' ? 600 : 400,
+                          color: ledState === 'stale' ? 'var(--warning)' : 'var(--text-faint)',
+                          whiteSpace: 'nowrap',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          minWidth: 0,
+                        }}
+                      >
+                        {syncStatus.label}
+                      </span>
+                    </>
+                  )}
+                </div>
+              </div>
 
-              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                <span
-                  className="mono text-dim"
-                  style={{ fontSize: 11 }}
-                  data-testid="live-address"
+              {/* Address block, with the project's own site under it (owner's
+                  placement — it identifies THIS wallet's chain project the
+                  same way the address identifies the wallet). Several chain
+                  names sit close to better-known coins ("Bitcoin Gold S" is
+                  NOT the 2017 BTG), so the domain is what actually tells the
+                  user which project they are on, and where to go read about
+                  it. */}
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 1, flexShrink: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <span
+                    className="mono text-dim"
+                    style={{ fontSize: 11 }}
+                    data-testid="live-address"
+                  >
+                    {shortenAddr(address)}
+                  </span>
+                  <CopyButton value={address} label="Copy address" size={12} />
+                </div>
+                <button
+                  type="button"
+                  className="text-faint"
+                  onClick={openChainHomepage}
+                  title={`Open ${activeChainHomepageHost} in a new tab`}
+                  data-testid="live-chain-homepage"
+                  style={{
+                    fontSize: 9.5,
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 3,
+                    whiteSpace: 'nowrap',
+                    background: 'none',
+                    border: 0,
+                    cursor: 'pointer',
+                    textAlign: 'right',
+                  }}
                 >
-                  {shortenAddr(address)}
-                </span>
-                <CopyButton value={address} label="Copy address" size={12} />
+                  {activeChainHomepageHost}
+                  <ExternalLink size={9} />
+                </button>
               </div>
             </div>
 
-            {/* Hero balance — the .hero pattern. The testid is parametrised by the
-                native ticker: on an Evrmore wallet it still evaluates to the exact
-                historical 'live-balance-EVR' the live smoke asserts on. */}
+            {/* Wrapper exists so a chain with no token list can centre the whole
+                balance + actions block in the leftover height (see .home-roomy).
+                On a chain WITH assets it is an inert div and changes nothing. */}
+            <div className="home-hero-wrap">
+            {/* Hero balance — the .hero pattern. Its testid is the fixed
+                'live-balance-hero', NOT live-balance-<ticker>: the asset row
+                below also emits live-balance-<ticker> for the native coin, so
+                the parametrised id here made every strict-mode locator on the
+                native balance throw on a duplicate. Two things about the name
+                are deliberate: it never collides with an asset row (asset
+                names are uppercase on-chain tickers, never 'hero'), and it
+                KEEPS the 'live-balance-' prefix because the .live-scope
+                [data-testid^='live-balance-'] rule in global.css is part of
+                what sizes this value — renaming it out of the prefix would
+                silently change the hero's rendered size. */}
             <div className="hero">
+              {/* On a chain with no token list the coin's own mark leads the hero:
+                  it fills space the list would have used and names the chain at a
+                  glance. Chains WITH a list already show the coin in its row, so
+                  repeating it there would just be noise. */}
+              {!canHoldAssets && (
+                <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 10 }}>
+                  <TokenIcon assetId={nativeTicker} size={64} />
+                </div>
+              )}
               <div className="hero-label">{nativeTicker} Balance</div>
               {firstLoad ? (
                 <Skeleton width={160} height={36} style={{ margin: '4px auto' }} />
               ) : (
-                <div className="hero-value" data-testid={`live-balance-${nativeTicker}`}>
+                <div className="hero-value" data-testid="live-balance-hero">
                   {fmtAmount(evrBalance)}
-                  <span style={{ fontSize: 16, fontWeight: 500, marginLeft: 8, color: 'var(--text-dim)' }}>{nativeTicker}</span>
+                  {/* Ticker scales with the roomy hero so it stays proportional. */}
+                  <span
+                    style={{
+                      fontSize: canHoldAssets ? 16 : 18,
+                      fontWeight: 500,
+                      marginLeft: 8,
+                      color: 'var(--text-dim)',
+                    }}
+                  >
+                    {nativeTicker}
+                  </span>
                 </div>
               )}
               {!firstLoad && hasPrice && (
@@ -823,9 +1052,10 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx }: LiveH
                     justifyContent: 'center',
                   }}
                 >
-                  <span className="text-dim" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.4 }}>
-                    Total balance
-                  </span>
+                  {/* Same micro-label treatment as the hero label above it
+                      (uppercase comes from CSS text-transform, so innerText
+                      keeps the authored casing). */}
+                  <span className="hero-label">Total balance</span>
                   <span
                     data-testid="total-balance"
                     style={{ fontSize: 15, fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}
@@ -861,26 +1091,35 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx }: LiveH
                 Receive
               </button>
             </div>
+            </div>{/* /home-hero-wrap */}
 
-            {/* Token rows */}
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <div className="section-label">Assets</div>
-              <button
-                type="button"
-                className="btn btn-ghost btn-sm"
-                onClick={() => setShowAddAsset(true)}
-                data-testid="live-add-asset"
-                style={{ padding: '4px 8px' }}
-              >
-                <Plus size={13} /> Add token
-              </button>
-            </div>
+            {/* Token rows — only on a chain with an asset protocol. On a plain
+                chain (e.g. Bitcoin Gold) there is no "Add token" action and no
+                asset-list chrome to imply tokens exist: the hero above already
+                shows the whole balance, so this section is skipped entirely. */}
+            {canHoldAssets && (
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <div className="section-label">Assets</div>
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  onClick={() => setShowAddAsset(true)}
+                  data-testid="live-add-asset"
+                  style={{ padding: '4px 8px' }}
+                >
+                  <Plus size={13} /> Add token
+                </button>
+              </div>
+            )}
             {/* ONLY this region scrolls when the asset list grows. The footer
                 rides at its end so it scrolls with the rows and never hides the
                 last row. Everything above (hero, Send/Receive, Assets + Add
                 token) stays pinned in place. */}
-            <div className="home-scroll">
-              {firstLoad ? (
+            {/* With no asset list the scroll area would be empty and the footer
+                would float at its top, leaving a large dead gap above the nav.
+                `no-assets` pushes the footer to the bottom instead. */}
+            <div className={canHoldAssets ? 'home-scroll' : 'home-scroll no-assets'}>
+              {!canHoldAssets ? null : firstLoad ? (
                 <>
                   <TokenRowSkeleton />
                   <div style={{ marginTop: 9 }}>

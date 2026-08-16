@@ -52,6 +52,11 @@ export interface NetworkStatus {
   blockHeight: number;
   serverVersion: string;
   updatedAt: number;
+  /** Unix ms of the CHAIN TIP's own block time, when it could be read from the
+   *  subscribed header. Null when unknown. This is what tells a healthy chain
+   *  from a stalled one: the wallet can be perfectly synced to a chain that
+   *  stopped producing blocks hours ago, and nothing else in this struct says so. */
+  tipTime?: number | null;
 }
 
 export interface TransactionRequest {

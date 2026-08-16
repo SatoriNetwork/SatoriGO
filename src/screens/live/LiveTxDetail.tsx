@@ -7,7 +7,7 @@ import { ArrowDownLeft, ArrowUpRight, ChevronLeft, Clock, ExternalLink, XCircle 
 import { Button } from '../../components/Button';
 import { CopyButton } from '../../components/CopyButton';
 import { EmptyState } from '../../components/EmptyState';
-import { useLiveStore, DEFAULT_EXPLORER_URL, nativeTickerFor } from '../../store/liveStore';
+import { useLiveStore, nativeTickerFor } from '../../store/liveStore';
 import { LiveNav } from './LiveNav';
 
 interface LiveTxDetailProps {
@@ -21,14 +21,23 @@ function fmtAmount(amount: number): string {
   return amount.toLocaleString('en-US', { maximumFractionDigits: 8 });
 }
 
-/** Resolve the explorer URL for a txid from a `{txid}`-templated setting.
- *  SECURITY: only http/https templates are honoured — a `javascript:`/`data:`
- *  template (however it got set) must never reach window.open. Falls back to the
- *  default explorer if the template is missing `{txid}` or has a bad scheme. */
+/**
+ * Resolve a usable explorer URL for `txid`, or '' when this chain has none.
+ *
+ * SECURITY: only http/https templates are honoured, so a `javascript:`/`data:`
+ * template (however it got set) can never reach window.open.
+ *
+ * The empty return matters: a chain with no known explorer (its default template
+ * is '') must NOT fall back to the Evrmore one, which would open a foreign
+ * chain's txid on Evrmore's explorer and show "not found" at best. Callers MUST
+ * treat '' as "hide the explorer affordance".
+ */
 export function resolveExplorerUrl(template: string, txid: string): string {
-  const tpl = template && template.includes('{txid}') ? template : DEFAULT_EXPLORER_URL;
-  const safeTpl = /^https?:\/\//i.test(tpl.trim()) ? tpl : DEFAULT_EXPLORER_URL;
-  return safeTpl.replace('{txid}', encodeURIComponent(txid));
+  const usable = !!template && template.includes('{txid}') && /^https?:\/\//i.test(template.trim());
+  // No usable template means NO explorer for this chain. It must never fall back
+  // to another chain's URL (it used to fall back to Evrmore's), because that
+  // resolves a foreign txid on the wrong explorer and reads as "not found".
+  return usable ? template.replace('{txid}', encodeURIComponent(txid)) : '';
 }
 
 export function LiveTxDetail({ txid, onBack }: LiveTxDetailProps) {
@@ -76,10 +85,13 @@ export function LiveTxDetail({ txid, onBack }: LiveTxDetailProps) {
       <ArrowUpRight size={26} />
     );
 
+  // '' when this chain ships no explorer; drives BOTH the click and whether the
+  // button renders at all.
+  const explorerUrl = resolveExplorerUrl(explorerUrlTemplate, tx.txid);
   const openExplorer = () => {
-    const url = resolveExplorerUrl(explorerUrlTemplate, tx.txid);
+    if (explorerUrl === '') return;
     if (typeof window !== 'undefined' && typeof window.open === 'function') {
-      window.open(url, '_blank', 'noopener');
+      window.open(explorerUrl, '_blank', 'noopener');
     }
   };
 
@@ -163,17 +175,21 @@ export function LiveTxDetail({ txid, onBack }: LiveTxDetailProps) {
           </span>
         </div>
 
-        <div style={{ marginTop: 12 }}>
-          <Button
-            variant="secondary"
-            block
-            icon={<ExternalLink size={15} />}
-            onClick={openExplorer}
-            data-testid="live-tx-explorer"
-          >
-            View in explorer
-          </Button>
-        </div>
+        {/* Hidden entirely on a chain with no known explorer: an inert or
+            wrong-chain link is worse than no link at all. */}
+        {explorerUrl !== '' && (
+          <div style={{ marginTop: 12 }}>
+            <Button
+              variant="secondary"
+              block
+              icon={<ExternalLink size={15} />}
+              onClick={openExplorer}
+              data-testid="live-tx-explorer"
+            >
+              View in explorer
+            </Button>
+          </div>
+        )}
       </div>
       <LiveNav />
     </div>

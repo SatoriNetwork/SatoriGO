@@ -94,12 +94,15 @@ try {
   }
   check(/block\s*[\d,]/i.test(pill), `live network reached real chain: "${pill.replace(/\s+/g, ' ').trim()}"`);
 
-  // 1.9.0: the shouting red LIVE banner is GONE from home; a small connection
-  // LED (green/yellow/red) in the header carries the status instead.
-  check((await byId('live-led').count()) === 1, 'connection LED present in the header');
+  // 1.9.0 replaced the shouting red LIVE banner with a connection LED; the
+  // header cleanup then folded that LED into the block pill's own dot (the
+  // brand-row copy duplicated it), so live-led now lives ON the pill. Same
+  // testid + data-state contract; 'stale' joined the valid states when the
+  // wallet learned to say a chain has stopped producing blocks.
+  check((await byId('live-led').count()) === 1, 'connection LED present (on the block pill)');
   const ledState = (await byId('live-led').getAttribute('data-state')) || '';
   check(
-    ['connected', 'syncing', 'offline'].includes(ledState),
+    ['connected', 'syncing', 'offline', 'stale'].includes(ledState),
     `LED exposes a connection state (${ledState})`,
   );
   check(
@@ -122,8 +125,13 @@ try {
   // you "Add token" for the Satori asset). There must still be NO row for the LEGACY
   // 'SATORI' asset — that phantom row was the bug dynamic detection fixed, and the
   // default pin must not bring it back.
-  await page.locator('[data-testid="live-balance-EVR"]').first().waitFor({ timeout: 20_000 });
-  check((await page.locator('[data-testid="live-balance-EVR"]').count()) >= 1, 'EVR balance row renders (real read)');
+  // live-balance-EVR is the ASSET ROW and must be UNIQUE now (the hero above it
+  // used to duplicate this testid and forced .first() workarounds everywhere;
+  // the hero is live-balance-hero). The bare waitFor is strict-mode: it throws
+  // if the duplicate ever comes back.
+  await page.locator('[data-testid="live-balance-EVR"]').waitFor({ timeout: 20_000 });
+  check((await page.locator('[data-testid="live-balance-EVR"]').count()) === 1, 'EVR balance row renders exactly once (real read)');
+  check((await page.locator('[data-testid="live-balance-hero"]').count()) === 1, 'hero balance has its own testid (no duplicate with the EVR row)');
   check((await page.locator('[data-testid="live-balance-SATORI"]').count()) === 0, 'no phantom LEGACY SATORI row');
   await page.locator('[data-testid="live-balance-SATORIEVR"]').first().waitFor({ timeout: 20_000 });
   check(
@@ -217,7 +225,7 @@ try {
   check((await page.locator('[data-testid="live-asset-row-EVR"]').count()) === 0, 'Activity tab hides the asset rows');
   check(/no transactions/i.test(await byId('live-activity-list').innerText()), 'Activity tab shows the empty state (empty seed)');
   await byId('live-tab-assets').click({ timeout: 10_000 });
-  await page.locator('[data-testid="live-balance-EVR"]').first().waitFor({ timeout: 10_000 });
+  await page.locator('[data-testid="live-balance-EVR"]').waitFor({ timeout: 10_000 });
   check((await page.locator('[data-testid="live-asset-row-EVR"]').count()) >= 1, 'Assets tab restores the EVR row');
 
   // Add-asset happy path. SATORIEVR is pinned by default now, so adding it would
@@ -406,11 +414,22 @@ try {
   // for a tx detail and coming back should not dump you on Wallet. So the tab has to
   // be put back deliberately rather than relying on a remount to reset it.)
   await byId('live-tab-assets').click({ timeout: 10_000 });
-  await page.locator('[data-testid="live-balance-EVR"]').first().waitFor({ timeout: 15_000 });
+  await page.locator('[data-testid="live-balance-EVR"]').waitFor({ timeout: 15_000 });
   await byId('live-settings-btn').click({ timeout: 10_000 });
   await byId('live-settings').waitFor({ timeout: 10_000 });
-  for (const row of ['appearance', 'wallets', 'addresses', 'security', 'network', 'transactions', 'about']) {
-    check((await byId(`live-settings-row-${row}`).count()) === 1, `settings root: ${row} row present`);
+
+  // Settings opens in BASIC mode, which deliberately hides the expert sections
+  // (servers, addresses, connected sites, export, diagnostics). Assert that, then
+  // switch to EXPERT for the rest of the walk, which exercises those screens.
+  for (const row of ['appearance', 'wallets', 'security', 'about']) {
+    check((await byId(`live-settings-row-${row}`).count()) === 1, `settings basic: ${row} row present`);
+  }
+  for (const row of ['addresses', 'network', 'sites', 'transactions', 'diagnostics']) {
+    check((await byId(`live-settings-row-${row}`).count()) === 0, `settings basic: ${row} row hidden`);
+  }
+  await byId('live-settings-mode-expert').click({ timeout: 10_000 });
+  for (const row of ['appearance', 'wallets', 'addresses', 'security', 'network', 'transactions', 'diagnostics', 'about']) {
+    check((await byId(`live-settings-row-${row}`).count()) === 1, `settings expert: ${row} row present`);
   }
   check((await byId('live-address-book-btn').count()) === 1, 'settings root: Address Book row present');
 
@@ -627,6 +646,13 @@ try {
   await byId('live-wallet-switcher').click({ timeout: 10_000 });
   await byId('live-wallet-item-0').waitFor({ timeout: 10_000 });
   check((await page.locator('[data-testid^="live-wallet-item-"]').count()) === 1, 'switcher lists one wallet before adding');
+  // Escape must close this menu (parity with the chain switcher, which always
+  // had it); it used to be a dead key here.
+  await page.keyboard.press('Escape');
+  await byId('live-wallet-item-0').waitFor({ state: 'detached', timeout: 5_000 });
+  check((await page.locator('[data-testid^="live-wallet-item-"]').count()) === 0, 'wallet menu: Escape closes it');
+  await byId('live-wallet-switcher').click({ timeout: 10_000 });
+  await byId('live-wallet-item-0').waitFor({ timeout: 10_000 });
   await byId('live-add-wallet').click({ timeout: 10_000 });
   await byId('live-onboarding').waitFor({ timeout: 10_000 });
   await page.getByRole('button', { name: /Create new wallet/i }).click({ timeout: 10_000 });

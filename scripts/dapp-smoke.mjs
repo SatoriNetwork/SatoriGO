@@ -319,6 +319,8 @@ try {
     await popup2.getByTestId('live-home').waitFor({ timeout: 25_000 });
   }
   await popup2.getByTestId('live-settings-btn').click();
+  // Connected sites is an EXPERT-mode section; Settings opens in basic.
+  await popup2.getByTestId('live-settings-mode-expert').click({ timeout: 10_000 });
   await popup2.getByTestId('live-settings-row-sites').click();
   await popup2.getByTestId('live-connected-sites').waitFor({ timeout: 10_000 });
   await popup2.getByTestId('live-site-0').waitFor({ timeout: 10_000 });

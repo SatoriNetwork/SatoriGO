@@ -1,176 +1,177 @@
 # Known limitations
 
-Current, honest limitations of the **real** wallet (v1.1.1).
+Current, honest limitations of the wallet (v1.3.0).
+
+Satori GO is a non-custodial multi-chain wallet. Seven chains ship in this
+version. Only two of them have had a funded send confirmed by a human on
+mainnet, and item 7 says exactly which. Nothing below is marketing.
 
 ## Security / trust
 
-1. **No formal external audit.** The code has had an internal adversarial review —
-   not a professional third-party audit. It moves real mainnet funds. **Do a small
+1. **No formal external audit.** The code has had repeated internal adversarial
+   review, including a multi-agent security pass over the 1.3.0 changes, but not
+   a professional third-party audit. It moves real mainnet funds. **Do a small
    test send before a large one.**
-2. **Message signing is not origin-bound.** A malicious site can ask you to sign a
-   message worded for a *different* site and reuse the signature there. The approval
-   window shows the exact message — read it. (Inherent to the Evrmore signmessage
-   format, which must stay byte-compatible with Satori.)
-3. **Passwordless wallets** are a deliberate convenience trade-off: they auto-unlock,
-   and sends/signatures require only click-throughs. Opt-in, behind an explicit
-   "I understand the risk" acknowledgement (v0.0.18).
-   Their vault is AES-GCM under an **empty** passphrase — anyone with access to
-   the Chrome profile on disk can decrypt it without any password.
-4. **Clipboard clearing is best-effort.** Copying a secret force-schedules a
-   clear (≤ 30 s), but the timer runs in the popup — close the popup first and
-   the clipboard is never cleared. OS clipboard history (Win+V) or cloud
-   clipboard sync may capture the value before the clear fires.
-5. **Public metadata is stored unencrypted** in `chrome.storage.local`: wallet
-   addresses, the address book, cached tx history, approved dApp origins and the
-   deposit-notification snapshot. No secrets — but someone with disk access
-   learns your addresses, balances and contacts without a password (partly
-   unavoidable: the background worker needs addresses without an unlock).
+2. **Message signing is not origin-bound.** A malicious site can ask you to sign
+   a message worded for a *different* site and reuse the signature there. The
+   approval window shows the exact message, so read it. This is inherent to the
+   signmessage format, which must stay byte-compatible with Satori.
+3. **The Satori pool challenge is validated by shape, not by origin.** Staking
+   signs a nonce the pool server supplies. The wallet refuses anything that is
+   not a bare UUID, which excludes every human-readable or structured message,
+   but another service whose challenges are also bare UUIDs under the same
+   signing scheme could not be told apart. Only server-side domain binding can
+   close that, and it is outside the wallet.
+4. **Passwordless wallets** are a deliberate convenience trade-off: they
+   auto-unlock, and sends and signatures require only click-throughs. Opt-in,
+   behind an explicit acknowledgement. Their vault is AES-GCM under an **empty**
+   passphrase, so anyone with access to the browser profile on disk can decrypt
+   it without a password.
+5. **Clipboard clearing is best-effort.** Copying a secret schedules a clear
+   within 30 seconds, but the timer runs in the popup: close the popup first and
+   the clipboard is never cleared. OS clipboard history or cloud sync may capture
+   the value before the clear fires.
+6. **Public metadata is stored unencrypted** in extension storage: wallet
+   addresses, the address book, cached transaction history, approved dApp
+   origins and the deposit snapshot. No secrets, but someone with disk access
+   learns your addresses, balances and contacts without a password. Partly
+   unavoidable, since the background worker needs addresses without an unlock.
 
-## Chain / protocol
+## Chains
 
-6. **P2PKH only.** You can only send to standard `E…` addresses. P2SH (`e…`) and
-   other-network addresses are **rejected on purpose**, and this rejection is a
-   safety feature, not a missing one. Re-verified against the code on 2026-07-14:
+7. **Only Evrmore and Ravencoin have owner-verified funded sends.** The other
+   five chains (Bitcoin, Litecoin, Dogecoin, Bitcoin Gold S, WojakCoin) are
+   verified for parameters, address derivation, address validation, balance
+   reading, fee estimation and transaction building, each against live servers
+   and independent sources, and the segwit signing path is proven against a real
+   on-chain transaction. **A funded send on those five has not been confirmed by
+   a human.** Treat them accordingly and test small first.
+8. **Sending is P2PKH and native segwit only.** P2SH addresses are refused on
+   every chain, on purpose: the builder cannot construct a P2SH output, so
+   accepting one would strand the coins. Taproot recipients are accepted only on
+   chains where taproot is actually active. The wallet derives no taproot keys of
+   its own, so it cannot hold a taproot output.
+9. **Two chains have no segwit at all** (Dogecoin and WojakCoin, by their own
+   consensus rules), so a bech32 recipient is refused there. That refusal is a
+   safety feature: such an output would be anyone-can-spend.
+10. **Some chains share address prefixes, and one check cannot see through it.**
+    Bitcoin, Evrmore and Ravencoin all use WIF version byte 128, and Bitcoin Gold
+    S and Litecoin both use 176. When you import a private key the wallet checks
+    that byte, but it cannot distinguish chains that share it. The check catches
+    a key from another family, never one from inside the same family.
+11. **Mainnet only in practice.** Testnet parameters exist in the source, but
+    wallet creation and import are mainnet and no UI exposes a testnet toggle.
+12. **Amounts above about 90,071,992 coins** lose precision in the decimal to
+    base-unit conversion (a float 2^53 limit). Not reachable with realistic
+    balances.
+13. **Bitcoin Gold S and WojakCoin are young, thin networks** and the wallet
+    marks them as such. Bitcoin Gold S stopped producing blocks for hours at a
+    time during development, which leaves a payment unconfirmed through no fault
+    of the wallet. The header now reports the age of the chain tip when it goes
+    stale, so a stalled chain no longer looks healthy.
+14. **No inscription or token-meta-protocol support** (BGC-20 on Bitcoin Gold S,
+    or anything ordinals-based). Those balances live in an off-chain indexer, not
+    in the UTXO set, so the wallet cannot see them. **Consequence you should
+    know: coin selection treats every UTXO as ordinary money**, so an inscription
+    held on a wallet address could be spent as an input. Do not hold inscriptions
+    on a Satori GO address.
 
-   - `txBuilder.ts` builds every output as
-     `p2pkhScript(addressToHash160(address).hash)` — it takes the 20-byte hash out of
-     whatever address you give it and **always** wraps it in a P2PKH script
-     (`76 a9 14 <hash> 88 ac` = `OP_DUP OP_HASH160 … OP_EQUALVERIFY OP_CHECKSIG`).
-   - An Evrmore P2SH address (version byte **92**, `e…`) carries a *script* hash, not a
-     *public-key* hash. Encoding it into a P2PKH output produces a script that demands
-     a signature from a private key whose public key hashes to a **script** hash. No
-     such key exists. **The coins would be permanently unspendable.**
-   - Demonstrated with two real addresses built from the same 20-byte hash:
-     `EYochGYSdC8eFjeZ2Q1C1aL6rLbNZrWGta` (v33) and
-     `eHkCng8SWqULWJsfU9ezcyPWz6o2aG34zW` (v92) both produce the byte-identical script
-     `76a914abab…ab88ac`. The P2SH-ness is silently lost.
-   - **`isValidAddress()` accepts a P2SH address** — it only checks the checksum and
-     the network. The real guard is `isP2pkhAddress()` (version must equal
-     `net.pubKeyHash` = 33), enforced inside **both** `buildEvrSend` and
-     `buildAssetSend` before anything is signed, plus in the Send form and the dApp
-     approval window for an early, readable error.
+## Derivation and history
 
-   So: not a bug, and not a risk to you. It only means the wallet refuses to send to
-   multisig / script addresses at all, rather than burning the funds. Emitting genuine
-   P2SH outputs is simply not implemented.
-7. **Two chains are live-verified: EVRmore and Ravencoin.** The chain layer is
-   multichain (both share coin type 175, so one seed/key is valid on each; only the
-   address version byte differs) and the create/import flow lets you pick either
-   chain. Ravencoin passed this project's verification bar on 2026-07-22 — see
-   Platform item 22 for exactly what was verified and by whom.
-8. **Mainnet only in practice.** `chainParams.ts` defines testnet, but wallet
-   creation/import hardcodes mainnet and no UI exposes a testnet toggle.
-9. **Amounts above ~90,071,992 EVR** lose precision in the decimal→sats conversion
-   (`BigInt(Math.round(amount * 1e8))`, float 2⁵³ limit). Not reachable with realistic
-   balances.
+15. **One account, one derivation path, no gap limit.** Each wallet derives from
+    a single account and purpose (BIP44 on legacy chains, BIP84 on segwit ones)
+    and only the addresses it has created. Funds sent to a different derivation
+    path of the same seed are **not discovered and not shown**. This is the most
+    likely reason an imported wallet shows a smaller balance than you expect.
+16. **BIP39 passphrases are supported on import only, not on wallet creation.**
+    A passphrase-protected seed imports correctly, and the passphrase is stored
+    encrypted alongside the mnemonic under your wallet password, which means it
+    does not give you the deniability a passphrase kept out of the wallet would.
+17. **Transaction history is capped at the newest 2000 entries per address.**
+    Extension storage is a shared 10 MB budget, and an address with tens of
+    thousands of transactions would exhaust it and freeze the cache. Balances are
+    unaffected: they come from the server, not the cache. The Diagnostics screen
+    in expert Settings shows current storage use.
+18. **Some servers refuse very large addresses** with "history too large". The
+    wallet now says so instead of showing an empty list, but it cannot work
+    around it: that address's history is unavailable from that server.
+19. **Fee estimation is server-reported, then clamped per chain.** It is not a
+    mempool-aware fee market. Several chains return the same figure for every
+    target, so no fast/normal/slow choice is offered there, and at least three
+    chains report estimates *below* their own relay floor, which is why the floor
+    comes from the chain parameters instead.
 
 ## Satori Network features
 
-10. **Pool staking is an off-chain registration, not a transaction.** Joining or
-    leaving a Satori pool signs a challenge and registers your address as a lender on
-    `network.satorinet.io`. **No funds move and your SATORIEVR never leaves your
-    wallet**, so nothing is at risk on-chain — but it also means the wallet cannot
-    verify the pool's behaviour or your rewards. It shows what that server reports. If
-    the service is down or changes its API, staking stops working.
-11. **The Satori Network tab reports, it does not verify.** The six figures come from
-    `satorinet.io` (predictions, connected neurons, wallet holders, price, and the 24 h
-    average from a plain-text distribution report; the stake cost is derived as
-    250 × price, the way satorinet.io itself computes it). They are cached for a
-    minute, and a failing endpoint leaves its own tile showing `n/a` rather than
-    blanking the screen. Nothing here is cross-checked against the chain.
+20. **Pool staking is an off-chain registration, not a transaction.** Joining or
+    leaving signs a challenge and registers your address as a lender on
+    network.satorinet.io. **No funds move and your SATORIEVR never leaves your
+    wallet.** Nothing is at risk on-chain, but the wallet cannot verify the
+    pool's behaviour or your rewards; it shows what that server reports. If the
+    service changes or goes down, staking stops working.
+21. **The Satori Network tab reports, it does not verify.** Its figures come from
+    satorinet.io, are cached briefly, and a failing endpoint leaves its own tile
+    showing "n/a" rather than blanking the screen. Nothing there is cross-checked
+    against the chain.
+22. **Staking and assets are Evrmore-only.** Five of the seven chains have no
+    asset layer at all, and the wallet says so rather than showing an empty asset
+    list.
 
 ## Wallet behaviour
 
-12. **Deposit notifications only watch each wallet's primary (index-0) address**, and
-    the poll is **skipped while any wallet window is open** (it would otherwise fight
-    the foreground for the Electrum connection). Funds arriving at a secondary derived
-    address won't raise a notification, though the balance still shows in the UI.
-13. **Notification latency** is up to ~1 minute (`chrome.alarms` minimum period), and
-    only while Chrome is running.
-14. **Fee estimation** relies on the server's `estimatefee`, clamped to a sane ceiling.
-    It is not a mempool-aware fee market.
-15. **EVR and SATORIEVR cannot be removed** from the asset list. Deliberate: EVR pays
-    every fee and SATORIEVR is the asset this wallet exists for.
-16. **The toolbar popup cannot be dragged.** Chrome pins it under the extension icon
-    and offers no API to move it, which is why there is an "open in a separate window"
-    button: that window is a real OS window you can drag anywhere. **A
-    password-protected wallet must be unlocked again in it** — each browsing context
-    decrypts its own copy of the key in memory, and keys are deliberately never shared
-    through the background worker.
-17. **Popup height** — Chrome caps extension popups at 600 px; the layout targets
-    400 × 620 and clamps to the available height.
+23. **Deposit notifications watch only each wallet's primary address**, and the
+    poll is skipped while a wallet window is open, to avoid competing with the
+    foreground for the server connection. Funds arriving at a secondary address
+    raise no notification, though the balance still shows.
+24. **Notification latency** is up to about a minute, and only while the browser
+    is running.
+25. **USD prices are third-party and incomplete.** They come from CoinEx and
+    satorinet.io. Three chains have no price source at all, and **EVR currently
+    shows no USD value because its CoinEx market was delisted**. Balances are
+    unaffected; only the fiat figure is missing.
+26. **WojakCoin's explorer link is verified by a human, not by this project's
+    tooling.** Its host answers 403 to automated requests, including a real
+    headless browser, so the URL format was confirmed by the owner opening a
+    transaction page. Every other chain's explorer was verified here against a
+    live transaction.
+27. **The native coin and SATORIEVR cannot be removed** from the Evrmore asset
+    list. The native coin pays every fee, and SATORIEVR is the asset this wallet
+    exists for.
+28. **The toolbar popup cannot be dragged.** The browser pins it under the
+    extension icon, which is why there is an "open in a separate window" button.
+    **A password-protected wallet must be unlocked again in that window**: each
+    browsing context decrypts its own copy of the key in memory, and keys are
+    deliberately never shared through the background worker.
+29. **Popup height** is capped at 600 px by the browser; the layout targets
+    400 x 620 and clamps to the available height.
 
 ## Platform
 
-18. **Firefox MV3 works but has no automated smoke.** `npm run build:firefox`
-    produces `dist/firefox` with a real Gecko manifest: id `satori-go@satorinet.io`,
-    `strict_min_version` **128.0**, an event-page background (`background.scripts` +
-    `"type": "module"`, since Firefox has no MV3 service worker) rather than a service
-    worker. 128.0 was chosen from verified compat data, not guessed: `storage.session`
-    (used by the dApp broker) lands in Firefox 115, module background scripts in 112,
-    and from Firefox 127 host permissions are actually granted at install (so the price
-    and pool fetches work without a permission-request flow we do not ship a UI for);
-    128 is the ESR baseline that clears all three. The manifest also declares
-    `data_collection_permissions: { required: ["none"] }` (the wallet collects no
-    data) because AMO submission validation requires the key; Firefox older than
-    140 simply ignores it. What is **verified**: `addons-linter` passes with
-    **0 errors** (4 warnings, all benign: two say the data-collection key is
-    unknown below Firefox 140/142, which is exactly the ignored-when-older case
-    above; two `innerHTML` notices come from React's bundled DOM runtime, not our
-    code, and cannot execute under the pages' `script-src 'self'` CSP). The build also **installs as a temporary add-on** on real Firefox
-    152.0.6 (headless, via `web-ext run`) with no manifest rejection. On 2026-07-15
-    the owner ran a **full manual click-through on real Firefox** and everything
-    passed: wallet create/import/unlock, live balances and prices, a real send,
-    dApp connect and signMessage, staking read, deposit notification, detached
-    window, and persistence across a browser restart. What is still missing: an
-    **automated** Firefox smoke; the Chrome live/dApp smokes remain the only
-    automated end-to-end gate, so Firefox regressions rely on manual re-testing.
-19. **Firefox host permissions can be revoked per site.** On Firefox 127+ the four
-    `host_permissions` (api.coinex.com, satorinet.io, network.satorinet.io, safe.trade)
-    are granted at install, but the user can revoke any of them from the extensions
-    button. A revoked host makes only that host's `fetch` fail: the EVR/SATORIEVR USD
-    prices and the Satori Network tab render `n/a`, and a pool join/leave surfaces an
-    error, none of which crash or retry-loop (the price poll is a bounded 60 s cadence
-    that swallows failures). Balance reads and the deposit poller use Electrum over
-    `wss:`, which is gated by CSP `connect-src`, not `host_permissions`, so they keep
-    working regardless. We do not build a permissions.request() flow for this.
-20. **The Firefox deposit-poll gate uses a different mechanism than Chrome.** The
-    worker skips the deposit poll while a wallet window is open to avoid fighting the
-    foreground for the Electrum connection. Chrome does this with
-    `chrome.runtime.getContexts`, which Firefox lacks; the Firefox path feature-detects
-    and falls back to `chrome.extension.getViews` on the event page. It is a
-    connection-contention optimization, not a security control; the owner's 2026-07-15
-    manual run-through saw a deposit notification arrive on Firefox. Worst case if it
-    misbehaves: a notification is delayed, or a second Electrum connection briefly
-    contends. No funds are affected.
-21. **Price sources are third-party** (CoinEx for EVR; satorinet.io with a SafeTrade
-    fallback for SATORIEVR) and reached via `host_permissions`. If they are down or
-    block the request, the USD figures simply don't render — balances are unaffected.
-22. **Ravencoin (RVN) is verified and supported (2026-07-22).** Chain parameters
-    were verified against `RavenProject/Ravencoin` `chainparams.cpp`/`assets.cpp`
-    source (see `docs/CHAIN_PARAMS.md`), including the asset-transfer marker bytes
-    and the `Raven Signed Message:\n` signing magic, cross-checked against a real
-    on-chain Ravencoin fixture (the wallet-built transfer script is byte-identical
-    to a live on-chain SATORI transfer). The three remaining gates all closed on
-    2026-07-22, each with its evidence:
-    - **Server:** `wss://rvnx.satorinet.io` is live and speaks the full asset
-      dialect — verified by replaying the wallet's exact call sequence against it
-      (`asset.get_meta`, `listunspent(sh, asset)`, `estimatefee`,
-      `transaction.get`, broadcast error paths), synced to the network tip.
-    - **Live smoke:** exercises a Ravencoin wallet end to end (creation with the
-      chain picker, chain-scoped recipient pickers, and a native-send review that
-      must reach the native path, not the asset path).
-    - **Funded sends:** a funded RVN **asset** send and a funded **native RVN**
-      send were both confirmed working on mainnet **by the owner's own testing**
-      (2026-07-22), through the owner's server. Recorded here as owner-verified:
-      these were not agent-run.
-    Residual honesty note: RVN has fewer miles on it than Evrmore. The first
-    native-send attempt surfaced a dispatch bug (fixed + regression-tested the
-    same day), and one transient server-side `-32603` was observed once during an
-    asset broadcast (the transaction succeeded; a broadcast-outcome check is
-    planned so such errors report the true result).
+30. **Firefox MV3 works but has no automated smoke.** The Firefox build has a
+    real Gecko manifest with an event-page background rather than a service
+    worker, `strict_min_version` 128.0 chosen from verified compatibility data,
+    and it declares that the wallet collects no data. `addons-linter` passes with
+    zero errors, and the build installs as a temporary add-on on real Firefox.
+    The owner has manually clicked through a full release on Firefox. What is
+    missing is an **automated** Firefox end-to-end gate: the Chrome live and dApp
+    smokes remain the only automated ones, so Firefox regressions rely on manual
+    re-testing.
+31. **Firefox host permissions can be revoked per site.** A revoked host makes
+    only that host's requests fail: prices and the Satori tab render "n/a" and a
+    pool join surfaces an error, none of which crash or retry-loop. Balance reads
+    use the Electrum protocol over `wss:`, gated by CSP rather than host
+    permissions, so they keep working regardless. There is no permission-request
+    UI.
+32. **The Firefox deposit-poll gate uses a different mechanism than Chrome**,
+    because Firefox lacks the API Chrome uses to detect an open wallet window.
+    It is a connection-contention optimization, not a security control. Worst
+    case: a notification is delayed. No funds are affected.
+33. **Sync status is shown only on the wallet tab.** The Activity and Settings
+    tabs have no connection indicator.
 
 ## Not implemented (ideas, not promises)
 
-Real P2SH output support, QR-code scanning, 24 h price change %, an in-wallet asset
-explorer, hardware-wallet support, additional chains beyond Evrmore and Ravencoin.
+Real P2SH output support, taproot key ownership, inscription and BGC-20
+awareness, gap-limit address discovery, BIP39 passphrases at wallet creation,
+QR-code scanning, 24 h price change, an in-wallet asset explorer,
+hardware-wallet support, and an automated Firefox end-to-end suite.

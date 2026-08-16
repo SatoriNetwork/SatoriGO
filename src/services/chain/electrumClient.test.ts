@@ -131,13 +131,42 @@ describe('WssElectrumClient.connect', () => {
 
     const handshake = ws.lastSent();
     expect(handshake.method).toBe(ELECTRUM_METHODS.version);
-    expect(handshake.params).toEqual(['Satori-GO-Wallet', '1.10']);
+    // A RANGE, never a fixed version: a fixed "1.10" is rejected outright by
+    // servers that cap lower (Fulcrum maxes at 1.6), which took a whole chain
+    // offline. The server picks the best version it supports within the range.
+    // The max is pinned to 1.6 because this client only speaks the
+    // blockchain.scripthash.* family: negotiating 1.7 (offered by ElectrumX
+    // 2.0.0) yields a connected socket whose every read is an unknown method.
+    expect(handshake.params).toEqual(['Satori-GO-Wallet', ['1.4', '1.6']]);
 
     ws.emitMessage(versionReply(handshake.id));
     await connecting;
 
     expect(client.isConnected()).toBe(true);
     expect(client.endpoint()).toBe(electrumWssUrl(PUBLIC_ELECTRUM_SERVERS[0]));
+    client.close();
+  });
+
+  it('1b. connects to a server that caps BELOW our max (Fulcrum answers 1.6)', async () => {
+    // REGRESSION: the handshake used to demand a fixed "1.10". Fulcrum supports
+    // at most 1.6 and answered "Unsupported protocol version", so the connection
+    // never established and every chain served by Fulcrum reported offline.
+    const client = new WssElectrumClient(PUBLIC_ELECTRUM_SERVERS, {
+      WebSocketImpl: MockWSImpl,
+    });
+    const connecting = client.connect();
+    await flush();
+    const ws = MockWebSocket.instances[0];
+    ws.emitOpen();
+    await flush();
+
+    const handshake = ws.lastSent();
+    ws.emitMessage(
+      JSON.stringify({ jsonrpc: '2.0', id: handshake.id, result: ['Fulcrum 2.1.0', '1.6'] }),
+    );
+    await connecting;
+
+    expect(client.isConnected()).toBe(true);
     client.close();
   });
 

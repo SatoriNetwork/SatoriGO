@@ -27,7 +27,31 @@ import {
 
 // Identifiers advertised in the server.version handshake.
 const CLIENT_NAME = 'Satori-GO-Wallet';
-const PROTOCOL_VERSION = '1.10';
+
+// Protocol negotiation is a RANGE [min, max], not a fixed version, because the
+// server picks the highest version it supports within it. A fixed value is a
+// hard requirement: sending "1.10" made every Fulcrum server reject the
+// handshake with "Unsupported protocol version" (Fulcrum caps at 1.6), so the
+// client never connected and the whole chain showed as offline.
+//
+// The MAX is deliberately 1.6, not the newest protocol in existence. The range
+// must not exceed the protocol this client's METHOD SET targets: every read
+// here is `blockchain.scripthash.*`, which belongs to the 1.4-1.6 family.
+// ElectrumX 2.0.0 offers 1.7.0, and negotiating it made the server answer
+// `unknown method "blockchain.scripthash.get_balance"` on EVERY read, i.e. a
+// connected socket that can do nothing. Raise this ONLY together with the
+// method names. Verified live against all three chains: EVR, BTGS and LTC all
+// negotiate 1.6 and serve get_balance + listunspent correctly.
+/** Rejection messages for a call made before/after the socket is usable. These
+ *  reach the SEND screen, whose friendlyError() falls through to showing the
+ *  raw string, so a user tapping Review right after a chain switch used to read
+ *  "Electrum client is not connected". Exported so the UI matches the constant
+ *  instead of a copied literal that can drift out of sync. */
+export const ELECTRUM_CLOSED = 'electrum-closed';
+export const ELECTRUM_NOT_CONNECTED = 'electrum-not-connected';
+
+const PROTOCOL_MIN = '1.4';
+const PROTOCOL_MAX = '1.6';
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
@@ -211,9 +235,10 @@ export class WssElectrumClient implements ElectrumClient {
   private async handshake(): Promise<ElectrumServerVersion> {
     const reply = await this.request<[string, string]>(ELECTRUM_METHODS.version, [
       CLIENT_NAME,
-      PROTOCOL_VERSION,
+      [PROTOCOL_MIN, PROTOCOL_MAX],
     ]);
-    // A valid reply looks like ["ElectrumX Evrmore 1.12","1.10"].
+    // A valid reply looks like ["ElectrumX Evrmore 1.12","1.10"] or, on a server
+    // that caps lower, ["Fulcrum 2.1.0","1.6"].
     if (!Array.isArray(reply) || reply.length < 2) {
       throw new Error(`unexpected server.version reply: ${JSON.stringify(reply)}`);
     }
@@ -224,12 +249,12 @@ export class WssElectrumClient implements ElectrumClient {
   request<T = unknown>(method: string, params: unknown[] = []): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       if (this.closed) {
-        reject(new Error('Electrum client is closed'));
+        reject(new Error(ELECTRUM_CLOSED));
         return;
       }
       const ws = this.ws;
       if (!ws || ws.readyState !== this.WebSocketImpl.OPEN) {
-        reject(new Error('Electrum client is not connected'));
+        reject(new Error(ELECTRUM_NOT_CONNECTED));
         return;
       }
 

@@ -1,14 +1,26 @@
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { LiveWalletService, BroadcastGatedError } from './liveWallet';
+import {
+  LiveWalletService,
+  BroadcastGatedError,
+  encodeSeedSecret,
+  decodeSeedSecret,
+} from './liveWallet';
 import { MemoryStorageAdapter, setStorageForTests, getStorage } from '../storage';
 import { ELECTRUM_METHODS } from './network';
-import { deriveAddress, mnemonicToSeed, decodeWif, addressToHash160, p2pkhScript } from './keys';
-import { EVRMORE_MAINNET, RAVENCOIN_MAINNET } from './chainParams';
+import { deriveAddress, mnemonicToSeed, decodeWif, addressToHash160, p2pkhScript, addressToScript } from './keys';
+import {
+  EVRMORE_MAINNET,
+  RAVENCOIN_MAINNET,
+  BITCOINGOLD_MAINNET,
+  BITCOIN_MAINNET,
+  CHAIN_FEE_POLICIES,
+} from './chainParams';
+import { FEE_OPTION_TARGET_BLOCKS } from './feePolicy';
 import { createVault } from './vault';
 import { buildTransferAssetScriptFromHash160 } from './assetScript';
 import { verifyMessage } from './message';
 import type { ElectrumClient } from './electrumTypes';
-import { txid as computeTxid } from './txBuilder';
+import { txid as computeTxid, estimateTxBytes, estimateSpendVBytes } from './txBuilder';
 import { base58check } from '@scure/base';
 import { sha256 } from '@noble/hashes/sha256';
 import { bytesToHex } from '@noble/hashes/utils';
@@ -163,6 +175,9 @@ function coherentAssetUtxos(
 function fakeClient(
   utxos: Utxo[],
   p2pkhHex = ANY_P2PKH,
+  // coin/kB the server's estimatefee answers with (0.001 = the historical 100
+  // sat/byte fixture). Pass a function to script per-call answers or throws.
+  feeCoinPerKb: number | (() => number) = 0.001,
 ): ElectrumClient & { broadcasted: string[] } {
   const broadcasted: string[] = [];
   const raws = new Map<string, string>();
@@ -174,7 +189,9 @@ function fakeClient(
     endpoint: () => 'wss://fake',
     close: () => {},
     request: async (method: string, params: unknown[] = []) => {
-      if (method === ELECTRUM_METHODS.estimateFee) return 0.001 as never; // EVR/kB
+      if (method === ELECTRUM_METHODS.estimateFee) {
+        return (typeof feeCoinPerKb === 'function' ? feeCoinPerKb() : feeCoinPerKb) as never;
+      }
       if (method === ELECTRUM_METHODS.listUnspent) {
         const asset = params[1];
         return (asset ? [] : coherent) as never;
@@ -281,6 +298,53 @@ describe('LiveWalletService', () => {
     expect(svc2.isUnlocked()).toBe(false);
   });
 
+  it('a bitcoingold-mainnet wallet derives bcg1 segwit addresses and builds a WITNESS-signed send', async () => {
+    const seed = await mnemonicToSeed(VECTOR_MNEMONIC);
+    const own = deriveAddress(seed, BITCOINGOLD_MAINNET, 0, 0, 0);
+    // Native segwit: BIP84 purpose and a bech32 receive address, not base58.
+    expect(own.path).toBe("m/84'/18888'/0'/0/0");
+    expect(own.address.startsWith('bcg1')).toBe(true);
+
+    // The wallet's own UTXOs pay to its P2WPKH script, so the builder must take
+    // the BIP143 path for them. Using the P2PKH script here would be the bug.
+    const ownScriptHex = bytesToHex(addressToScript(own.address));
+    const client = fakeClient(
+      [{ tx_hash: 'b'.repeat(64), tx_pos: 0, height: 14000, value: 500_000_000 }],
+      ownScriptHex,
+    );
+    const svc = new LiveWalletService(client);
+    await svc.import(VECTOR_MNEMONIC, 'pw', 'bitcoingold-mainnet', 'BTGS wallet');
+    expect(svc.network()).toBe('bitcoingold-mainnet');
+    expect(svc.getAddress(0)).toBe(own.address);
+
+    // Send to another bech32 address on the same chain.
+    const recipient = deriveAddress(seed, BITCOINGOLD_MAINNET, 0, 0, 1).address;
+    expect(recipient.startsWith('bcg1')).toBe(true);
+    const plan = await svc.buildEvrSend(recipient, 100_000_000n);
+
+    // BIP144 marker+flag (0x00 0x01) sits right after the 4-byte version, so a
+    // segwit-signed tx has '0001' at hex offset 8. Its absence would mean the
+    // witness was dropped and the transaction is unspendable.
+    expect(plan.built.rawHex.slice(8, 12)).toBe('0001');
+    // txid is over the STRIPPED serialization, wtxid over the full one.
+    expect(plan.built.wtxid).toBeDefined();
+    expect(plan.built.txid).not.toBe(plan.built.wtxid);
+    // Segwit discount: vsize must be below the raw byte count.
+    expect(plan.built.virtualSize).toBeLessThan(plan.built.rawHex.length / 2);
+    expect(plan.feeSats).toBeGreaterThan(0n);
+    expect(client.broadcasted).toHaveLength(0);
+
+    // A chain with no asset protocol must refuse to build an asset transfer
+    // rather than emit a script its consensus cannot understand.
+    await expect(svc.buildAssetSend(recipient, 'ANYTHING', 1n)).rejects.toThrow(
+      'assets-not-supported',
+    );
+
+    // Cross-chain recipients stay rejected: an Evrmore address is not spendable here.
+    const evrAddr = deriveAddress(seed, EVRMORE_MAINNET, 0, 0, 0).address;
+    await expect(svc.buildEvrSend(evrAddr, 1_000n)).rejects.toThrow('unsupported-address-type');
+  });
+
   it('builds + signs a real EVR send from synthetic UTXOs (no broadcast)', async () => {
     const client = fakeClient([{ tx_hash: 'a'.repeat(64), tx_pos: 0, height: 1900000, value: 100_000_000 }]);
     const svc = new LiveWalletService(client);
@@ -322,7 +386,7 @@ describe('LiveWalletService', () => {
   it('caps the fee against a hostile Electrum estimatefee (prevents a drain)', async () => {
     // A malicious/MITM'd server returns an absurd estimatefee (EVR/kB) trying to
     // make the fee eat the whole 10 EVR balance. The rate cap must bound the real
-    // fee to a few hundred k sats and return the change to us — not absorb it.
+    // fee to the EVR policy ceiling and return the change to us — not absorb it.
     const raws = new Map<string, string>();
     const utxos = coherentUtxos(
       [{ tx_hash: 'a'.repeat(64), tx_pos: 0, height: 1, value: 1_000_000_000 }], // 10 EVR (honest)
@@ -350,8 +414,12 @@ describe('LiveWalletService', () => {
     const svc = new LiveWalletService(hostile);
     await svc.import(VECTOR_MNEMONIC, 'pw');
     const plan = await svc.buildEvrSend(RECIPIENT, 100_000_000n); // send 1 EVR
-    // Fee is clamped to a few hundred-k sats — NOT ~9 EVR — well under the ceiling.
-    expect(plan.feeSats).toBeLessThan(1_000_000n); // < 0.01 EVR
+    // The fee is EXACTLY the EVR policy ceiling (10_000 sat/byte, measured-data
+    // headroom over the 1000 relay floor) × the 1-in/2-out tx size — ~0.023 EVR,
+    // NOT the ~9 EVR the hostile rate asked for. Change came back to us.
+    const evrCeiling = CHAIN_FEE_POLICIES['evrmore-mainnet'].ceilingSatPerByte;
+    expect(plan.feeSats).toBe(evrCeiling * BigInt(estimateTxBytes(1, 2)));
+    expect(plan.feeSats).toBeLessThan(10_000_000n); // < 0.1 EVR, vs the 10 EVR balance
   });
 
   it('rejects an EVR amount of 0 or less', async () => {
@@ -949,5 +1017,315 @@ describe('LiveWalletService', () => {
     expect(await svc2.unlock('pw')).toBe(true);
     expect(svc2.getAddress(0)).toBe(expectedEvr);
     expect(expectedEvr[0]).toBe('E');
+  });
+
+  /** Invert the wallet's conversion: sat/byte -> the coin/kB a server would send. */
+  const satPerByteToCoinPerKb = (satPerByte: number) => (satPerByte * 1000) / 1e8;
+
+  describe('per-chain fee policy (build path)', () => {
+    const TEN_EVR_UTXO: Utxo = { tx_hash: 'a'.repeat(64), tx_pos: 0, height: 1, value: 1_000_000_000 };
+
+    it('EVR: the measured 1626.74 estimate is no longer clamped to the 1000 relay floor (old global-cap bug)', async () => {
+      const client = fakeClient(
+        [TEN_EVR_UTXO],
+        ANY_P2PKH,
+        satPerByteToCoinPerKb(1626.74), // exactly what the EVR server was measured to answer (2026-08-14)
+      );
+      const svc = new LiveWalletService(client);
+      await svc.import(VECTOR_MNEMONIC, 'pw');
+      const plan = await svc.buildEvrSend(RECIPIENT, 100_000_000n);
+      // ceil(1626.74) = 1627 sat/byte SURVIVES the clamp. Under the old global
+      // 1000 sat/byte ceiling this was pinned to exactly EVR's measured relay
+      // floor — zero headroom: any relay-floor rise would have made every
+      // built tx silently unrelayable.
+      expect(plan.feeSats).toBe(1627n * BigInt(estimateTxBytes(1, 2)));
+    });
+
+    it('falls back to the CHAIN default when estimatefee errors (relayable, unlike the old global 10)', async () => {
+      const client = fakeClient([TEN_EVR_UTXO], ANY_P2PKH, () => {
+        throw new Error('estimatefee down');
+      });
+      const svc = new LiveWalletService(client);
+      await svc.import(VECTOR_MNEMONIC, 'pw');
+      const plan = await svc.buildEvrSend(RECIPIENT, 100_000_000n);
+      const evr = CHAIN_FEE_POLICIES['evrmore-mainnet'];
+      // The old global default (10 sat/byte) sat BELOW Evrmore's measured 1000
+      // relay floor: an offline-server fallback that could never relay. The
+      // per-chain default is pinned at/above the floor by feePolicy.test.ts.
+      expect(plan.feeSats).toBe(evr.defaultSatPerByte * BigInt(estimateTxBytes(1, 2)));
+    });
+
+    it("a -1 'no estimate available' answer also degrades to the chain default", async () => {
+      const client = fakeClient([TEN_EVR_UTXO], ANY_P2PKH, -1);
+      const svc = new LiveWalletService(client);
+      await svc.import(VECTOR_MNEMONIC, 'pw');
+      const plan = await svc.buildEvrSend(RECIPIENT, 100_000_000n);
+      expect(plan.feeSats).toBe(
+        CHAIN_FEE_POLICIES['evrmore-mainnet'].defaultSatPerByte * BigInt(estimateTxBytes(1, 2)),
+      );
+    });
+
+    it('the UI fee override is honoured but ALWAYS re-clamped into the chain band', async () => {
+      const svc = new LiveWalletService(fakeClient([TEN_EVR_UTXO]));
+      await svc.import(VECTOR_MNEMONIC, 'pw');
+      const bytes = BigInt(estimateTxBytes(1, 2));
+      const evr = CHAIN_FEE_POLICIES['evrmore-mainnet'];
+
+      // An in-band pick from estimateFeeOptions() applies as-is.
+      const chosen = await svc.buildEvrSend(RECIPIENT, 100_000_000n, { feeRateSatPerByte: 2000n });
+      expect(chosen.feeSats).toBe(2000n * bytes);
+
+      // An under-floor value is raised to the relay floor — the tx must relay.
+      const low = await svc.buildEvrSend(RECIPIENT, 100_000_000n, { feeRateSatPerByte: 10n });
+      expect(low.feeSats).toBe(evr.floorSatPerByte * bytes);
+
+      // A hostile/poisoned store value is ceiling-clamped — anti-drain holds
+      // even against our own UI layer.
+      const high = await svc.buildEvrSend(RECIPIENT, 100_000_000n, { feeRateSatPerByte: 10n ** 12n });
+      expect(high.feeSats).toBe(evr.ceilingSatPerByte * bytes);
+    });
+
+    it('estimateMaxEvr honours (and clamps) the override too', async () => {
+      const total = 1_000_000_000n;
+      const svc = new LiveWalletService(fakeClient([{ ...TEN_EVR_UTXO, value: Number(total) }]));
+      await svc.import(VECTOR_MNEMONIC, 'pw');
+      const est = await svc.estimateMaxEvr({ feeRateSatPerByte: 3000n });
+      expect(est.feeSats).toBe(3000n * BigInt(estimateTxBytes(1, 1)));
+      expect(est.maxSats).toBe(total - est.feeSats);
+    });
+
+    // On a Max send the fee IS the remainder, so sizing every input as legacy
+    // p2pkh (148 vB) does not leave a safety margin, it burns the difference to
+    // miners. A segwit input really costs about 68 vB, so Max must be sized from
+    // the actual utxos. Regression guard for that overpay.
+    it('estimateMaxEvr sizes a SEGWIT wallet by witness vbytes, not legacy bytes', async () => {
+      const seed = await mnemonicToSeed(VECTOR_MNEMONIC);
+      const own = deriveAddress(seed, BITCOINGOLD_MAINNET, 0, 0, 0);
+      const ownScriptHex = bytesToHex(addressToScript(own.address));
+      const total = 500_000_000n;
+      const utxos = [
+        { tx_hash: 'b'.repeat(64), tx_pos: 0, height: 14000, value: Number(total) / 2 },
+        { tx_hash: 'c'.repeat(64), tx_pos: 0, height: 14001, value: Number(total) / 2 },
+      ];
+      const svc = new LiveWalletService(fakeClient(utxos, ownScriptHex));
+      await svc.import(VECTOR_MNEMONIC, 'pw', 'bitcoingold-mainnet');
+
+      const rate = 5n;
+      const est = await svc.estimateMaxEvr({ feeRateSatPerByte: rate });
+
+      // Sized from the real scripts, which the service already holds.
+      const signable = utxos.map(() => ({ scriptPubKeyHex: ownScriptHex }));
+      const expected = rate * BigInt(estimateSpendVBytes(signable as never, 1));
+      expect(est.feeSats).toBe(expected);
+      // And strictly cheaper than pricing the same inputs as legacy ones.
+      expect(est.feeSats).toBeLessThan(rate * BigInt(estimateTxBytes(utxos.length, 1)));
+      expect(est.maxSats).toBe(total - est.feeSats);
+    });
+  });
+
+  describe('estimateFeeOptions', () => {
+    /** A client that ONLY answers estimatefee, per the scripted handler — the
+     *  method touches nothing else, so any other call is a hard failure. */
+    function feeOnlyClient(handler: (targetBlocks: number) => number): ElectrumClient {
+      return {
+        connect: async () => {},
+        isConnected: () => true,
+        endpoint: () => 'wss://fake',
+        close: () => {},
+        request: async (method: string, params: unknown[] = []) => {
+          if (method === ELECTRUM_METHODS.estimateFee) return handler(params[0] as number) as never;
+          throw new Error(`unexpected method ${method}`);
+        },
+      };
+    }
+
+    it('EVR: flat measured answers -> differentiated=false (no fake fast/normal/slow)', async () => {
+      // Measured 2026-08-14: the EVR server answers 1626.74 for EVERY target.
+      const svc = new LiveWalletService(feeOnlyClient(() => satPerByteToCoinPerKb(1626.74)));
+      await svc.import(VECTOR_MNEMONIC, 'pw');
+      const est = await svc.estimateFeeOptions();
+      expect(est.chainId).toBe('evrmore-mainnet');
+      expect(est.differentiated).toBe(false);
+      expect(est.options.map((o) => o.satPerByte)).toEqual([1627n, 1627n, 1627n]);
+      expect(est.options.map((o) => o.targetBlocks)).toEqual([...FEE_OPTION_TARGET_BLOCKS]);
+      const evr = CHAIN_FEE_POLICIES['evrmore-mainnet'];
+      expect(est.floorSatPerByte).toBe(evr.floorSatPerByte);
+      expect(est.ceilingSatPerByte).toBe(evr.ceilingSatPerByte);
+      expect(est.defaultSatPerByte).toBe(evr.defaultSatPerByte);
+    });
+
+    it('BTC: a real curve is reported as differentiated, fast -> slow', async () => {
+      // Congested-Bitcoin shape (the measured curve × 100, so it survives
+      // integer sat/byte conversion; see the collapse test below for today's
+      // actual sub-1 numbers).
+      const byTarget: Record<number, number> = {
+        2: satPerByteToCoinPerKb(100),
+        6: satPerByteToCoinPerKb(47),
+        25: satPerByteToCoinPerKb(35),
+      };
+      const svc = new LiveWalletService(feeOnlyClient((t) => byTarget[t]));
+      await svc.import(VECTOR_MNEMONIC, 'pw', 'bitcoin-mainnet');
+      const est = await svc.estimateFeeOptions();
+      expect(est.chainId).toBe('bitcoin-mainnet');
+      expect(est.differentiated).toBe(true);
+      expect(est.options.map((o) => o.satPerByte)).toEqual([100n, 47n, 35n]);
+      expect(est.options.every((o) => o.estimated)).toBe(true);
+    });
+
+    it("the sub-1 part of Bitcoin's measured curve collapses to 1 sat/byte — honestly not differentiated", async () => {
+      // Measured 2026-08-14: 0.72 (3blk) / 0.47 (6blk) / 0.35 (25blk). All of
+      // them ceil to the 1 sat/byte integer minimum, so the wallet's EFFECTIVE
+      // rates are identical: offering "fast 1 / normal 1 / slow 1" would be a
+      // fake choice, and differentiated is computed from final rates.
+      const byTarget: Record<number, number> = {
+        2: satPerByteToCoinPerKb(0.72),
+        6: satPerByteToCoinPerKb(0.47),
+        25: satPerByteToCoinPerKb(0.35),
+      };
+      const svc = new LiveWalletService(feeOnlyClient((t) => byTarget[t]));
+      await svc.import(VECTOR_MNEMONIC, 'pw', 'bitcoin-mainnet');
+      const est = await svc.estimateFeeOptions();
+      expect(est.options.map((o) => o.satPerByte)).toEqual([1n, 1n, 1n]);
+      expect(est.differentiated).toBe(false);
+    });
+
+    it('never throws: -1 answers and thrown errors degrade per-target to the chain default', async () => {
+      const svc = new LiveWalletService(
+        feeOnlyClient((t) => {
+          if (t === 2) return satPerByteToCoinPerKb(100);
+          if (t === 6) return -1; // Electrum's "no estimate available"
+          throw new Error('server crashed');
+        }),
+      );
+      await svc.import(VECTOR_MNEMONIC, 'pw', 'bitcoin-mainnet');
+      const est = await svc.estimateFeeOptions();
+      const btc = CHAIN_FEE_POLICIES['bitcoin-mainnet'];
+      expect(est.options.map((o) => o.satPerByte)).toEqual([100n, btc.defaultSatPerByte, btc.defaultSatPerByte]);
+      expect(est.options.map((o) => o.estimated)).toEqual([true, false, false]);
+      // 100 vs the padded defaults DO differ, but the difference is our
+      // fallback, not the server's curve — it must not be sold as a choice.
+      expect(est.differentiated).toBe(false);
+    });
+
+    it('clamps a hostile 10^9 coin/kB to the ACTIVE chain ceiling — per chain, not one global number', async () => {
+      const hostile = () => 1e9; // 10^14 sat/byte before the clamp
+      const svcBtc = new LiveWalletService(feeOnlyClient(hostile));
+      await svcBtc.import(VECTOR_MNEMONIC, 'pw', 'bitcoin-mainnet');
+      const btcEst = await svcBtc.estimateFeeOptions();
+      expect(btcEst.options.map((o) => o.satPerByte)).toEqual([500n, 500n, 500n]);
+      expect(btcEst.differentiated).toBe(false); // flattened by the ceiling — no real choice
+
+      const svcEvr = new LiveWalletService(feeOnlyClient(hostile));
+      await svcEvr.import(VECTOR_MNEMONIC, 'pw', 'mainnet');
+      const evrEst = await svcEvr.estimateFeeOptions();
+      expect(evrEst.options.map((o) => o.satPerByte)).toEqual([10_000n, 10_000n, 10_000n]);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// BIP39 passphrase ("25th word"). The point of these tests is the UPGRADE
+// GUARANTEE: adding this must not touch a single wallet that already exists.
+// ---------------------------------------------------------------------------
+
+describe('BIP39 passphrase', () => {
+  /** Published BIP39 test vector: the abandon-about phrase with passphrase
+   *  "TREZOR" derives a DIFFERENT wallet. Expected value cross-checked against
+   *  the BIP84 vector rather than against our own code. */
+  const TREZOR_PASSPHRASE = 'TREZOR';
+
+  describe('vault payload format', () => {
+    it('stores the BARE mnemonic when there is no passphrase (byte-identical to older builds)', () => {
+      // This is the whole backward-compatibility guarantee: no passphrase means
+      // the payload an older build wrote, and would still write, unchanged.
+      expect(encodeSeedSecret(VECTOR_MNEMONIC, '')).toBe(VECTOR_MNEMONIC);
+    });
+
+    it('reads a legacy bare-mnemonic vault as having no passphrase', () => {
+      expect(decodeSeedSecret(VECTOR_MNEMONIC)).toEqual({
+        mnemonic: VECTOR_MNEMONIC,
+        passphrase: '',
+      });
+    });
+
+    it('round-trips a passphrase without corrupting either half', () => {
+      const encoded = encodeSeedSecret(VECTOR_MNEMONIC, 'p a s s"\phrase');
+      expect(encoded.startsWith('{')).toBe(true);
+      expect(decodeSeedSecret(encoded)).toEqual({
+        mnemonic: VECTOR_MNEMONIC,
+        passphrase: 'p a s s"\phrase',
+      });
+    });
+
+    it('degrades to a bare mnemonic on a malformed payload instead of throwing', () => {
+      // Throwing here would lock a user out of their own wallet at unlock time.
+      expect(decodeSeedSecret('{not json')).toEqual({ mnemonic: '{not json', passphrase: '' });
+      expect(decodeSeedSecret('{"v":99,"mnemonic":"x"}')).toEqual({
+        mnemonic: '{"v":99,"mnemonic":"x"}',
+        passphrase: '',
+      });
+    });
+  });
+
+  it('an EXISTING wallet (no passphrase) derives exactly the address it always did', async () => {
+    setStorageForTests(new MemoryStorageAdapter());
+    const svc = new LiveWalletService(fakeClient([]));
+    await svc.import(VECTOR_MNEMONIC, 'pw');
+    const seed = await mnemonicToSeed(VECTOR_MNEMONIC);
+    expect(svc.getAddress(0)).toBe(deriveAddress(seed, EVRMORE_MAINNET, 0, 0, 0).address);
+  });
+
+  it('a passphrase produces a DIFFERENT wallet, and unlock reproduces it', async () => {
+    setStorageForTests(new MemoryStorageAdapter());
+    const svc = new LiveWalletService(fakeClient([]));
+    await svc.import(VECTOR_MNEMONIC, 'pw', 'mainnet', 'With passphrase', TREZOR_PASSPHRASE);
+
+    const withPass = await mnemonicToSeed(VECTOR_MNEMONIC, TREZOR_PASSPHRASE);
+    const without = await mnemonicToSeed(VECTOR_MNEMONIC);
+    const expected = deriveAddress(withPass, EVRMORE_MAINNET, 0, 0, 0).address;
+    expect(svc.getAddress(0)).toBe(expected);
+    expect(expected).not.toBe(deriveAddress(without, EVRMORE_MAINNET, 0, 0, 0).address);
+
+    // The passphrase survives lock/unlock, otherwise the wallet would silently
+    // become a different (empty) one on the next session.
+    svc.lock();
+    expect(await svc.unlock('pw')).toBe(true);
+    expect(svc.getAddress(0)).toBe(expected);
+  });
+
+  it('revealMnemonic returns the WORDS ONLY, never the stored envelope', async () => {
+    setStorageForTests(new MemoryStorageAdapter());
+    const svc = new LiveWalletService(fakeClient([]));
+    await svc.import(VECTOR_MNEMONIC, 'pw', 'mainnet', undefined, TREZOR_PASSPHRASE);
+    const revealed = await svc.revealMnemonic('pw');
+    expect(revealed).toBe(VECTOR_MNEMONIC);
+    expect(revealed).not.toContain('{');
+  });
+
+  it('revealSeedSecret returns both halves, so a re-import can stay the same wallet', async () => {
+    setStorageForTests(new MemoryStorageAdapter());
+    const svc = new LiveWalletService(fakeClient([]));
+    await svc.import(VECTOR_MNEMONIC, 'pw', 'mainnet', undefined, TREZOR_PASSPHRASE);
+    expect(await svc.revealSeedSecret('pw')).toEqual({
+      mnemonic: VECTOR_MNEMONIC,
+      passphrase: TREZOR_PASSPHRASE,
+    });
+    expect(await svc.revealSeedSecret('wrong-pw')).toBeNull();
+  });
+
+  it('re-importing onto another chain WITH the revealed passphrase keeps the same key', async () => {
+    // This is the enableChain path. Dropping the passphrase here would create a
+    // plausible-looking wallet at an address the user does not control funds on.
+    setStorageForTests(new MemoryStorageAdapter());
+    const svc = new LiveWalletService(fakeClient([]));
+    await svc.import(VECTOR_MNEMONIC, 'pw', 'mainnet', undefined, TREZOR_PASSPHRASE);
+    const revealed = (await svc.revealSeedSecret('pw'))!;
+
+    await svc.import(revealed.mnemonic, 'pw', 'bitcoin-mainnet', undefined, revealed.passphrase);
+    const seed = await mnemonicToSeed(VECTOR_MNEMONIC, TREZOR_PASSPHRASE);
+    expect(svc.getAddress(0)).toBe(deriveAddress(seed, BITCOIN_MAINNET, 0, 0, 0).address);
+    // And it is NOT the passphrase-less Bitcoin wallet.
+    const plain = await mnemonicToSeed(VECTOR_MNEMONIC);
+    expect(svc.getAddress(0)).not.toBe(deriveAddress(plain, BITCOIN_MAINNET, 0, 0, 0).address);
   });
 });

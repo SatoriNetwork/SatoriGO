@@ -53,12 +53,29 @@ export interface TxOutput {
   scriptHex: string;
 }
 
+/** A parsed raw transaction: its outputs, plus the STRIPPED (witness-free)
+ *  serialization the txid is defined over. */
+export interface ParsedTx {
+  outputs: TxOutput[];
+  /** version || inputs || outputs || locktime, with no marker/flag/witness.
+   *  For a legacy tx this is byte-identical to the input. */
+  strippedHex: string;
+  /** True when the source carried a BIP144 marker/flag. */
+  isSegwit: boolean;
+}
+
 /**
- * Parse the outputs (nValue + scriptPubKey) of a raw LEGACY (non-segwit) Evrmore
- * transaction, in order. Throws on truncated input or an unexpected segwit marker
- * (Evrmore has no segwit).
+ * Parse a raw transaction, LEGACY or SEGWIT (BIP144), returning its outputs and
+ * its witness-free serialization.
+ *
+ * WHY THE STRIPPED FORM MATTERS: a transaction's txid is the double-SHA256 of
+ * the serialization WITHOUT marker, flag and witness. Hashing the bytes an
+ * Electrum server returns for a segwit transaction yields the WTXID instead, so
+ * an authenticity check written as `dSHA256(rawHex) === txid` rejects perfectly
+ * honest servers on every segwit chain. That is what this function exists to
+ * prevent: callers compare against `strippedHex`, never the raw input.
  */
-export function parseTxOutputs(rawHex: string): TxOutput[] {
+export function parseTx(rawHex: string): ParsedTx {
   const b = hexToBytes(rawHex);
   let o = 0;
   const need = (n: number) => {
@@ -80,12 +97,24 @@ export function parseTxOutputs(rawHex: string): TxOutput[] {
     return Number(readUintLE(8));
   };
 
-  o += 4; // version (4 bytes)
-  // Evrmore has NO segwit; a legacy tx here always begins its input count with a
-  // non-zero varint. A 0x00 byte would be a segwit marker — reject it outright.
-  need(1);
-  if (b[o] === 0x00) throw new Error('segwit-tx-unsupported');
+  const versionStart = o;
+  o += 4; // version
+  need(0);
+  const versionBytes = b.slice(versionStart, o);
 
+  // BIP144: a segwit serialization puts 0x00 (marker) 0x01 (flag) where a legacy
+  // one starts its input count. Input count is never 0 in a real transaction, so
+  // a leading 0x00 is unambiguous. Anything other than flag 0x01 is malformed.
+  let isSegwit = false;
+  need(1);
+  if (b[o] === 0x00) {
+    need(2);
+    if (b[o + 1] !== 0x01) throw new Error('malformed-tx');
+    isSegwit = true;
+    o += 2;
+  }
+
+  const bodyStart = o; // inputs + outputs, identical in both serializations
   const vinCount = readVarint();
   for (let i = 0; i < vinCount; i++) {
     o += 36; // prevout hash (32) + index (4)
@@ -107,7 +136,39 @@ export function parseTxOutputs(rawHex: string): TxOutput[] {
     need(0);
     outputs.push({ nValue, scriptHex });
   }
-  return outputs;
+  const bodyEnd = o;
+
+  // Witness data sits between the outputs and nLockTime: one stack per input.
+  if (isSegwit) {
+    for (let i = 0; i < vinCount; i++) {
+      const items = readVarint();
+      for (let j = 0; j < items; j++) {
+        const len = readVarint();
+        o += len;
+        need(0);
+      }
+    }
+  }
+
+  need(4); // nLockTime must be present
+  const lockTime = b.slice(o, o + 4);
+  o += 4;
+  // Trailing bytes mean we misparsed; fail closed rather than trust the result.
+  if (o !== b.length) throw new Error('malformed-tx');
+
+  const strippedHex = isSegwit
+    ? bytesToHex(versionBytes) + bytesToHex(b.slice(bodyStart, bodyEnd)) + bytesToHex(lockTime)
+    : rawHex.toLowerCase();
+
+  return { outputs, strippedHex, isSegwit };
+}
+
+/**
+ * Parse the outputs (nValue + scriptPubKey) of a raw transaction, in order.
+ * Accepts both legacy and segwit serializations.
+ */
+export function parseTxOutputs(rawHex: string): TxOutput[] {
+  return parseTx(rawHex).outputs;
 }
 
 /**
@@ -167,8 +228,12 @@ export async function verifyInputAmounts(
       // hash to the claimed txid, we cannot trust the output — abort the send.
       try {
         const rawHex = await electrumGetRawTx(client, inp.txid);
-        if (computeTxid(rawHex) !== inp.txid) throw new Error('txid-mismatch');
-        outputs = parseTxOutputs(rawHex);
+        // Hash the WITNESS-FREE serialization: a txid is defined over that form,
+        // so hashing the server's raw bytes for a segwit prevout would produce
+        // the wtxid and reject an honest server on every segwit chain.
+        const parsed = parseTx(rawHex);
+        if (computeTxid(parsed.strippedHex) !== inp.txid) throw new Error('txid-mismatch');
+        outputs = parsed.outputs;
       } catch {
         throw new Error('input-verify-failed');
       }

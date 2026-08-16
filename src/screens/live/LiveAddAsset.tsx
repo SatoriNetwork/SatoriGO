@@ -4,11 +4,12 @@
 // appears on LiveHome; on failure the error is shown inline.
 
 import { useState, type FormEvent } from 'react';
+import { Coins } from 'lucide-react';
 import { Modal } from '../../components/Modal';
 import { Button } from '../../components/Button';
 import { TextField } from '../../components/TextField';
 import { TokenIcon } from '../../components/BrandLogo';
-import { useLiveStore, nativeTickerFor } from '../../store/liveStore';
+import { useLiveStore, nativeTickerFor, assetsSupported, chainDisplayName } from '../../store/liveStore';
 
 interface LiveAddAssetProps {
   onClose(): void;
@@ -17,6 +18,10 @@ interface LiveAddAssetProps {
 export function LiveAddAsset({ onClose }: LiveAddAssetProps) {
   const addAsset = useLiveStore((s) => s.addAsset);
   const nativeTicker = nativeTickerFor();
+  // Whether the active chain has an asset protocol at all — a plain chain
+  // (e.g. Bitcoin Gold) has nothing to add. Capability-driven, never a
+  // hardcoded ticker check.
+  const canAdd = assetsSupported();
   const [name, setName] = useState('');
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -41,15 +46,38 @@ export function LiveAddAsset({ onClose }: LiveAddAssetProps) {
     }
   };
 
+  // This chain has no asset protocol (e.g. Bitcoin Gold): there is nothing to
+  // add. Reachable only defensively — LiveHome hides the "Add token" action
+  // that opens this modal on such a chain — so this just explains why and
+  // offers a close, instead of showing a form with nowhere useful to go.
+  if (!canAdd) {
+    return (
+      <Modal title="Add a token" onClose={onClose} testId="live-add-asset-modal">
+        <p className="text-dim" style={{ fontSize: 12, margin: '0 0 14px', lineHeight: 1.5 }}>
+          {nativeTicker} has no token or asset support. This wallet only ever holds {nativeTicker}.
+        </p>
+        <Button type="button" block onClick={onClose} data-testid="live-add-asset-close">
+          Close
+        </Button>
+      </Modal>
+    );
+  }
+
   return (
     <Modal title="Add a token" onClose={onClose} testId="live-add-asset-modal">
       <form onSubmit={submit}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
-          <TokenIcon assetId={trimmed || '?'} size={34} />
+          {/* Neutral placeholder until a name is typed — a "?" letter avatar in
+              a random hue read as a real (broken) token. */}
+          {trimmed ? (
+            <TokenIcon assetId={trimmed} size={34} />
+          ) : (
+            <span className="row-icon neutral" aria-hidden="true">
+              <Coins size={16} />
+            </span>
+          )}
           <p className="text-dim" style={{ fontSize: 12, margin: 0, lineHeight: 1.5 }}>
-            {nativeTicker === 'RVN'
-              ? 'Enter a Ravencoin asset name. We verify it exists on-chain before adding it to your list.'
-              : 'Enter an EVRmore asset name. We verify it exists on-chain before adding it to your list.'}
+            {`Enter a ${chainDisplayName()} asset name. We verify it exists on-chain before adding it to your list.`}
           </p>
         </div>
 

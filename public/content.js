@@ -65,6 +65,17 @@
   // --- 3. Deferred results from the background worker ------------------------
   chrome.runtime.onMessage.addListener((message) => {
     if (!message || message.type !== 'evr-dapp-result') return;
+    // Only relay ids THIS document actually deferred. A navigation replaces the
+    // document, and the new document's content script starts with an empty set,
+    // so a result approved for the previous page can never reach whatever page
+    // now occupies the tab. This is the authoritative half of the check: the
+    // background can only read the tab's URL for hosts it has permission for.
+    if (!deferred.has(message.id)) return;
+    // Second, independent gate on the same property: the background echoes the
+    // origin the request came from; refuse to relay into a document whose
+    // origin differs (location.origin is immutable for a document's lifetime,
+    // so a mismatch means this is not the requesting document).
+    if (message.origin !== location.origin) return;
     deferred.delete(message.id);
     replyToPage(message.id, message.result, message.error);
   });

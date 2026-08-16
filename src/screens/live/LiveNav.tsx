@@ -8,7 +8,7 @@
 // It is deliberately NOT rendered on the lock or onboarding screens: there is no
 // wallet to navigate yet.
 import { createContext, useContext } from 'react';
-import { History, Settings, Wallet } from 'lucide-react';
+import { AlertTriangle, History, Settings, Wallet } from 'lucide-react';
 
 import { BrandLogo } from '../../components/BrandLogo';
 import { useLiveStore } from '../../store/liveStore';
@@ -40,88 +40,118 @@ export function useNav(): NavContextValue {
 export function LiveNav() {
   const { tab, section, openTab, openSettings } = useNav();
   const unreadActivity = useLiveStore((s) => s.unreadActivity);
+  // A server that ANSWERED and refused one of this wallet's addresses ("history
+  // too large"). It has to be said out loud somewhere: the wallet is online, the
+  // balance is right, and Activity is silently and permanently incomplete —
+  // which reads as a broken wallet unless we explain it. The strip rides above
+  // the tab bar, so it reaches the user from every screen the bar appears on
+  // rather than only from the one tab that happens to show the list.
+  const historyIssue = useLiveStore((s) => s.historyIssue);
 
   // A tab is only "current" while we are actually on the home screen; from Settings,
   // no home tab is selected.
   const onHome = section === 'home';
 
   return (
-    <nav className="bottom-nav" role="tablist">
-      <button
-        type="button"
-        role="tab"
-        aria-selected={onHome && tab === 'assets'}
-        className="nav-item"
-        onClick={() => openTab('assets')}
-        data-testid="live-tab-assets"
-      >
-        <Wallet size={19} />
-        Wallet
-      </button>
-      <button
-        type="button"
-        role="tab"
-        aria-selected={onHome && tab === 'activity'}
-        className="nav-item"
-        onClick={() => openTab('activity')}
-        data-testid="live-tab-activity"
-        style={{ position: 'relative' }}
-      >
-        <span style={{ position: 'relative', display: 'inline-flex' }}>
-          <History size={19} />
-          {unreadActivity > 0 && (
-            <span
-              data-testid="live-activity-badge"
-              aria-label={`${unreadActivity} new`}
-              style={{
-                position: 'absolute',
-                top: -5,
-                right: -8,
-                minWidth: 15,
-                height: 15,
-                padding: '0 3px',
-                borderRadius: 8,
-                background: 'var(--danger)',
-                color: '#fff',
-                fontSize: 9,
-                fontWeight: 700,
-                lineHeight: '15px',
-                textAlign: 'center',
-                boxShadow: '0 0 0 2px var(--bg)',
-              }}
-            >
-              {unreadActivity > 9 ? '9+' : unreadActivity}
-            </span>
-          )}
-        </span>
-        Activity
-      </button>
-      <button
-        type="button"
-        role="tab"
-        aria-selected={section === 'settings'}
-        className="nav-item"
-        onClick={openSettings}
-        data-testid="live-settings-btn"
-      >
-        <Settings size={19} />
-        Settings
-      </button>
-      {/* Satori Network. Last in the row, unlabelled, and larger than the icon tabs:
-          the mark IS the label, and it earns the extra weight for being the Satori
-          entry point. */}
-      <button
-        type="button"
-        role="tab"
-        aria-selected={onHome && tab === 'network'}
-        className="nav-item nav-item-mark"
-        onClick={() => openTab('network')}
-        data-testid="live-tab-network"
-        aria-label="Satori Network"
-        title="Satori Network"
-      >
-        <BrandLogo slot="satori" size={30} alt="" />
-      </button>
-    </nav>
+    <>
+      {historyIssue && (
+        <div
+          data-testid="live-history-warning"
+          role="status"
+          title={historyIssue.serverMessage}
+          style={{
+            display: 'flex',
+            alignItems: 'flex-start',
+            gap: 7,
+            padding: '7px 11px',
+            borderTop: '1px solid var(--border)',
+            background: 'var(--warning-bg)',
+            color: 'var(--text-dim)',
+            fontSize: 11,
+            lineHeight: 1.35,
+          }}
+        >
+          <AlertTriangle size={13} color="var(--warning)" style={{ flex: '0 0 auto', marginTop: 1 }} />
+          <span>{historyIssue.message}</span>
+        </div>
+      )}
+      <nav className="bottom-nav" role="tablist">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={onHome && tab === 'assets'}
+          className="nav-item"
+          onClick={() => openTab('assets')}
+          data-testid="live-tab-assets"
+        >
+          <Wallet size={19} />
+          Wallet
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={onHome && tab === 'activity'}
+          className="nav-item"
+          onClick={() => openTab('activity')}
+          data-testid="live-tab-activity"
+          style={{ position: 'relative' }}
+        >
+          <span style={{ position: 'relative', display: 'inline-flex' }}>
+            <History size={19} />
+            {unreadActivity > 0 && (
+              <span
+                data-testid="live-activity-badge"
+                aria-label={`${unreadActivity} new`}
+                style={{
+                  position: 'absolute',
+                  top: -5,
+                  right: -8,
+                  minWidth: 15,
+                  height: 15,
+                  padding: '0 3px',
+                  borderRadius: 8,
+                  background: 'var(--danger)',
+                  color: '#fff',
+                  fontSize: 9,
+                  fontWeight: 700,
+                  lineHeight: '15px',
+                  textAlign: 'center',
+                  boxShadow: '0 0 0 2px var(--bg)',
+                }}
+              >
+                {unreadActivity > 9 ? '9+' : unreadActivity}
+              </span>
+            )}
+          </span>
+          Activity
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={section === 'settings'}
+          className="nav-item"
+          onClick={openSettings}
+          data-testid="live-settings-btn"
+        >
+          <Settings size={19} />
+          Settings
+        </button>
+        {/* Satori Network. Last in the row, unlabelled, and larger than the icon tabs:
+            the mark IS the label, and it earns the extra weight for being the Satori
+            entry point. */}
+        <button
+          type="button"
+          role="tab"
+          aria-selected={onHome && tab === 'network'}
+          className="nav-item nav-item-mark"
+          onClick={() => openTab('network')}
+          data-testid="live-tab-network"
+          aria-label="Satori Network"
+          title="Satori Network"
+        >
+          <BrandLogo slot="satori" size={30} alt="" />
+        </button>
+      </nav>
+    </>
   );
 }

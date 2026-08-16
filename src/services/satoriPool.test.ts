@@ -32,6 +32,13 @@ const KEY = {
   address: derived.address,
 };
 
+/** Nonce-shaped (UUID) challenge fixture. getChallenge refuses anything that
+ *  does not look like the server's real UUID nonce (the blind-signing guard),
+ *  so every stubbed challenge in this file must be UUID-shaped. */
+function uuidChallenge(n: number): string {
+  return `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+}
+
 /** Minimal Response-like stub. status/text drive parseJsonOk; ok mirrors status. */
 function res(status: number, body: string): Response {
   return {
@@ -121,13 +128,16 @@ describe('fetchOpenPools', () => {
 
 describe('getChallenge', () => {
   it('GETs the cache-busted challenge endpoint with no-store headers and returns it', async () => {
+    // A realistic (random-looking) UUID, not the fixture helper, so this test
+    // also covers uppercase-free lowercase hex and mixed digit/letter groups.
+    const nonce = 'd5f2a9c1-4b3e-4f6a-9c0d-2e7b8a1f3c5d';
     const spy = vi.fn(async (_url: unknown, _init?: RequestInit) =>
-      res(200, JSON.stringify({ challenge: 'nonce-abc' })),
+      res(200, JSON.stringify({ challenge: nonce })),
     );
     vi.stubGlobal('fetch', spy);
 
     const challenge = await getChallenge();
-    expect(challenge).toBe('nonce-abc');
+    expect(challenge).toBe(nonce);
     const [url, init] = spy.mock.calls[0];
     expect(String(url)).toMatch(new RegExp(`^${SATORI_NETWORK_BASE}/api/v1/auth/challenge\\?t=\\d+$`));
     const headers = init?.headers as Record<string, string>;
@@ -138,6 +148,37 @@ describe('getChallenge', () => {
   it('throws SatoriServerError when the challenge field is missing', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => res(200, JSON.stringify({}))));
     await expect(getChallenge()).rejects.toBeInstanceOf(SatoriServerError);
+  });
+
+  it('refuses any challenge that is not nonce-shaped (blind-signing guard)', async () => {
+    // Each of these is the kind of foreign message a compromised or MITM'd
+    // server could try to have signed for replay elsewhere: a human-readable
+    // authorization, a SIWE-style structured login prompt, a bare 64-hex txid,
+    // and a valid nonce smuggling a suffix.
+    const foreign = [
+      'I authorize the transfer of all funds',
+      'service.example wants you to sign in\nNonce: 12345',
+      'ab'.repeat(32),
+      `${uuidChallenge(1)} pays 10 EVR to E...`,
+      '',
+    ];
+    for (const challenge of foreign) {
+      vi.stubGlobal('fetch', vi.fn(async () => res(200, JSON.stringify({ challenge }))));
+      await expect(getChallenge()).rejects.toBeInstanceOf(SatoriServerError);
+    }
+  });
+
+  it('never signs a non-nonce challenge end to end: joinPool aborts before the lend POST', async () => {
+    const spy = vi.fn(async (url: unknown) =>
+      String(url).includes('/auth/challenge')
+        ? res(200, JSON.stringify({ challenge: 'Please sign to confirm your withdrawal' }))
+        : res(200, 'joined'),
+    );
+    vi.stubGlobal('fetch', spy);
+
+    await expect(joinPool('Epool', KEY)).rejects.toBeInstanceOf(SatoriServerError);
+    // Only the challenge GET happened — no signature was produced or sent.
+    expect(spy).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -172,7 +213,7 @@ describe('joinPool', () => {
     let capturedChallenge = '';
     const spy = vi.fn(async (url: unknown, _init?: RequestInit) => {
       if (String(url).includes('/auth/challenge')) {
-        capturedChallenge = 'challenge-xyz';
+        capturedChallenge = uuidChallenge(777);
         return res(200, JSON.stringify({ challenge: capturedChallenge }));
       }
       return res(200, 'joined');
@@ -206,7 +247,7 @@ describe('joinPool', () => {
   it('never leaks the private key in the request', async () => {
     const spy = vi.fn(async (url: unknown) =>
       String(url).includes('/auth/challenge')
-        ? res(200, JSON.stringify({ challenge: 'c1' }))
+        ? res(200, JSON.stringify({ challenge: uuidChallenge(1) }))
         : res(200, 'ok'),
     );
     vi.stubGlobal('fetch', spy);
@@ -220,7 +261,7 @@ describe('joinPool', () => {
       'fetch',
       vi.fn(async (url: unknown) =>
         String(url).includes('/auth/challenge')
-          ? res(200, JSON.stringify({ challenge: 'c1' }))
+          ? res(200, JSON.stringify({ challenge: uuidChallenge(1) }))
           : res(403, 'forbidden'),
       ),
     );
@@ -230,9 +271,10 @@ describe('joinPool', () => {
 
 describe('leavePool', () => {
   it('fetches a challenge then DELETEs /lender/lend with auth headers and no body', async () => {
+    const leaveNonce = uuidChallenge(42);
     const spy = vi.fn(async (url: unknown, _init?: RequestInit) =>
       String(url).includes('/auth/challenge')
-        ? res(200, JSON.stringify({ challenge: 'c-leave' }))
+        ? res(200, JSON.stringify({ challenge: leaveNonce }))
         : res(200, 'left'),
     );
     vi.stubGlobal('fetch', spy);
@@ -244,7 +286,7 @@ describe('leavePool', () => {
     expect(delInit?.body).toBeUndefined();
     const headers = delInit?.headers as Record<string, string>;
     expect(headers['wallet-pubkey']).toBe(bytesToHex(KEY.publicKey));
-    expect(verifyMessage(KEY.address, 'c-leave', headers.signature, EVRMORE_MAINNET)).toBe(true);
+    expect(verifyMessage(KEY.address, leaveNonce, headers.signature, EVRMORE_MAINNET)).toBe(true);
   });
 });
 
@@ -263,7 +305,7 @@ describe('multi-address sequencing', () => {
     const order: string[] = [];
     const spy = vi.fn(async (url: unknown) => {
       if (String(url).includes('/auth/challenge')) {
-        return res(200, JSON.stringify({ challenge: `c${order.length}` }));
+        return res(200, JSON.stringify({ challenge: uuidChallenge(order.length) }));
       }
       // lend POST
       lendCall += 1;
@@ -286,7 +328,7 @@ describe('multi-address sequencing', () => {
   it('leavePoolForKeys reports per-address success/failure sequentially', async () => {
     let lendCall = 0;
     const spy = vi.fn(async (url: unknown) => {
-      if (String(url).includes('/auth/challenge')) return res(200, JSON.stringify({ challenge: 'c' }));
+      if (String(url).includes('/auth/challenge')) return res(200, JSON.stringify({ challenge: uuidChallenge(9) }));
       lendCall += 1;
       return lendCall === 2 ? res(400, 'nope') : res(200, 'ok');
     });

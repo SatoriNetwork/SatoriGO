@@ -104,3 +104,60 @@ describe('formatSyncBannerText', () => {
     );
   });
 });
+
+// A wallet can be perfectly synced to a chain that has stopped producing blocks.
+// Bitcoin Gold S did exactly that for hours while real deposits sat unconfirmed,
+// and the header still read a green "Synced".
+describe('stale chain tip', () => {
+  const HOUR = 60 * 60 * 1000;
+
+  it('says how old the tip is instead of claiming everything is fine', () => {
+    const status = deriveSyncStatus(
+      baseInput({ lastSyncAt: 1_700_000_000_000, tipAgeMs: 6 * HOUR + 12 * 60 * 1000 }),
+    );
+    expect(status.ledState).toBe('stale');
+    expect(status.label).toBe('No block 6h 12m');
+    // The tooltip must make clear the WALLET is fine and the chain is not.
+    expect(status.tooltip).toMatch(/cannot confirm/i);
+  });
+
+  it('stays "Synced" for a quiet but normal gap', () => {
+    const status = deriveSyncStatus(
+      baseInput({ lastSyncAt: 1_700_000_000_000, tipAgeMs: 20 * 60 * 1000 }),
+    );
+    expect(status.ledState).toBe('connected');
+    expect(status.label).toBe('Synced');
+  });
+
+  it('stays "Synced" when the tip age is unknown, rather than accusing the chain', () => {
+    for (const tipAgeMs of [null, undefined]) {
+      const status = deriveSyncStatus(baseInput({ lastSyncAt: 1_700_000_000_000, tipAgeMs }));
+      expect(status.ledState).toBe('connected');
+    }
+  });
+
+  it('offline still wins: no point reporting tip age we cannot trust', () => {
+    const status = deriveSyncStatus(
+      baseInput({ offline: true, lastSyncAt: 1_700_000_000_000, tipAgeMs: 9 * HOUR }),
+    );
+    expect(status.ledState).toBe('offline');
+  });
+
+  it('an in-progress sync still wins, since that is the more actionable state', () => {
+    const status = deriveSyncStatus(
+      baseInput({
+        lastSyncAt: 1_700_000_000_000,
+        syncProgress: { done: 5, total: 50 },
+        tipAgeMs: 9 * HOUR,
+      }),
+    );
+    expect(status.ledState).toBe('syncing');
+  });
+
+  it('formats a long outage in days rather than a huge minute count', () => {
+    const status = deriveSyncStatus(
+      baseInput({ lastSyncAt: 1_700_000_000_000, tipAgeMs: 50 * HOUR }),
+    );
+    expect(status.label).toBe('No block 2d 2h');
+  });
+});

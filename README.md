@@ -12,15 +12,42 @@ injected `window.evrmore` provider. Chrome is the only target that is fully gate
 and shipped-quality today; see `KNOWN_LIMITATIONS.md` for Firefox's unverified
 runtime status.
 
-The chain layer also carries **Ravencoin (RVN)** — the sister chain that shares
-Evrmore's key derivation (same coin type, same address algorithm, only the
-version byte differs) — with its own per-chain Electrum server pool, block
-explorer and chain-aware address validation. You can create or import a
-Ravencoin wallet from the same onboarding flow. It is built and unit-tested but
-not yet verified end-to-end against the real Ravencoin network; see
-`KNOWN_LIMITATIONS.md` (Platform section) for exactly what is and isn't proven.
+The chain layer carries seven chains, each with its own Electrum server pool,
+block explorer, fee policy and chain-aware address validation, and you can
+create or import a wallet on any of them from the same onboarding flow. Chains
+are described by parameters rather than by name, so support is a data entry
+rather than a special case.
 
-Version **1.1.1**. (The canonical version lives in each target's manifest under
+Two of the seven have had a funded send confirmed by a human on mainnet. The
+rest are verified for derivation, address validation, balance reading, fee
+estimation and transaction building, but not for a real send. See
+`KNOWN_LIMITATIONS.md`, which says exactly which is which.
+
+### Supported networks
+
+Listed in the order the wallet shows them. "Assets" means the chain has its own
+on-chain token layer that the wallet reads; the others carry their native coin
+only. "Funded send" records whether a real transaction has been sent and
+confirmed by a person, which is the bar this project treats as proof.
+
+| Network | Ticker | Addresses | Assets | Funded send | Project |
+|---|---|---|---|---|---|
+| Bitcoin | BTC | native segwit | no | not yet | [bitcoin.org](https://bitcoin.org) |
+| Litecoin | LTC | native segwit | no | not yet | [litecoin.org](https://litecoin.org) |
+| Dogecoin | DOGE | legacy | no | not yet | [dogecoin.com](https://dogecoin.com) |
+| Evrmore | EVR | legacy | yes | **confirmed** | [evrmore.com](https://evrmore.com) |
+| Ravencoin | RVN | legacy | yes | **confirmed** | [ravencoin.org](https://ravencoin.org) |
+| Bitcoin Gold S | BTGS | native segwit | no | not yet | [bitcoingold.site](https://bitcoingold.site) |
+| WojakCoin | WJK | legacy | no | not yet | [wojakcoin.cash](https://wojakcoin.cash) |
+
+Bitcoin Gold S is a new Bitcoin Core fork and is **not** the 2017 Bitcoin Gold
+(BTG). It and WojakCoin are young networks with little mining power, and the
+wallet marks them as such in the network list.
+
+Any network can be hidden from the switcher in expert Settings, so a wallet that
+only uses two of them need not scroll past seven.
+
+Version **1.3.0**. (The canonical version lives in each target's manifest under
 `platforms/<target>/manifest.json`; this line is informational and can lag —
 check the manifest if in doubt.)
 
@@ -296,12 +323,13 @@ interface EvrmoreProvider {
 
 ## Documentation
 
-Start here if you're picking this project up:
+Start here if you're picking this project up (human or AI):
 
 | Doc | What it's for |
 |---|---|
-| [`REVIEWERS.md`](REVIEWERS.md) | Build environment and exact steps to reproduce the published add-on package. |
+| [`CHANGELOG.md`](CHANGELOG.md) | What each release added, in plain language. |
 | [`KNOWN_LIMITATIONS.md`](KNOWN_LIMITATIONS.md) | Honest limitations of the shipping wallet. |
+| [`REVIEWERS.md`](REVIEWERS.md) | Build environment and exact steps to reproduce the published add-on package. |
 | [`PRIVACY.md`](PRIVACY.md) | What the wallet stores and what it talks to. |
 
 ## License

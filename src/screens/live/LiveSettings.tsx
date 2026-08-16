@@ -16,6 +16,7 @@ import {
   Globe,
   Info,
   KeyRound,
+  Layers,
   Link2,
   List,
   Monitor,
@@ -28,6 +29,7 @@ import {
   Trash2,
   Unplug,
   Wallet,
+  Activity,
 } from 'lucide-react';
 import { Button } from '../../components/Button';
 import { TextField, PasswordField } from '../../components/TextField';
@@ -40,8 +42,23 @@ import { BrandLogo } from '../../components/BrandLogo';
 import { EmptyState } from '../../components/EmptyState';
 import { AccentSwatches } from '../settings/AppearanceSettings';
 import { useSettingsStore } from '../../store/settingsStore';
-import { useLiveStore, activeChainId } from '../../store/liveStore';
+import {
+  useLiveStore,
+  activeChainId,
+  chainDisplayName,
+  chainHideBlockedReason,
+  walletsOnChain,
+} from '../../store/liveStore';
+import type { SettingsMode } from '../../store/liveStore';
+import {
+  readStorageStats,
+  formatBytes,
+  type StorageStats,
+} from '../../services/storageStats';
+import { lastCacheWriteError, lastHistoryFetchError } from '../../services/chain/txCache';
 import { networkFor } from '../../services/chain/chainParams';
+import { CHAIN_OPTIONS } from './ChainPicker';
+import { TokenIcon } from '../../components/BrandLogo';
 import { MIN_PASSWORD_LENGTH, getAppVersion } from '../../services/constants';
 import type { ThemeMode } from '../../services/settings';
 import type { LiveTransaction } from '../../services/chain/electrumProvider';
@@ -63,6 +80,8 @@ type SettingsSection =
   | 'network'
   | 'sites'
   | 'transactions'
+  | 'networks'
+  | 'diagnostics'
   | 'about';
 
 const SECTION_TITLES: Record<SettingsSection, string> = {
@@ -73,8 +92,24 @@ const SECTION_TITLES: Record<SettingsSection, string> = {
   network: 'Network & Explorer',
   sites: 'Connected sites',
   transactions: 'Transactions',
+  networks: 'Visible networks',
+  diagnostics: 'Diagnostics',
   about: 'About',
 };
+
+/** Sections hidden in BASIC mode. Chosen by "can a wrong move here cost the user
+ *  something, or is it meaningless without context": the server pool, the raw
+ *  address list, dApp grants, the CSV export and the diagnostics page. Wallets,
+ *  Security, Appearance and About stay visible always, because a user must
+ *  always be able to reach their password, their secrets and the reset. */
+const EXPERT_ONLY: ReadonlySet<SettingsSection> = new Set<SettingsSection>([
+  'addresses',
+  'network',
+  'sites',
+  'transactions',
+  'networks',
+  'diagnostics',
+]);
 
 /** Auto-lock idle-timeout options (minutes). 0 = never. */
 const AUTO_LOCK_OPTIONS: { value: number; label: string }[] = [
@@ -188,6 +223,12 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
   const settings = useSettingsStore((s) => s.settings);
   const updateSettings = useSettingsStore((s) => s.update);
 
+  // Params of the chain in use, for the diagnostics readout.
+  const activeNet = networkFor(activeChainId());
+  const hiddenChains = useLiveStore((s) => s.hiddenChains);
+  const setChainHidden = useLiveStore((s) => s.setChainHidden);
+  const settingsMode = useLiveStore((s) => s.settingsMode);
+  const setSettingsMode = useLiveStore((s) => s.setSettingsMode);
   const requirePasswordToSend = useLiveStore((s) => s.requirePasswordToSend);
   const setRequirePasswordToSend = useLiveStore((s) => s.setRequirePasswordToSend);
   const autoLockMinutes = useLiveStore((s) => s.autoLockMinutes);
@@ -221,6 +262,45 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
   const disconnectAllSites = useLiveStore((s) => s.disconnectAllSites);
 
   const [section, setSection] = useState<SettingsSection | null>(null);
+
+  // Dropping to basic while an expert-only sub-screen is open would strand the
+  // user on a page they can no longer navigate back to from the list.
+  useEffect(() => {
+    if (settingsMode === 'basic' && section !== null && EXPERT_ONLY.has(section)) {
+      setSection(null);
+    }
+  }, [settingsMode, section]);
+
+  // Storage diagnostics, read on entering the section (not on mount: it walks
+  // every stored value, which is wasted work for anyone not looking at it).
+  const [storageStats, setStorageStats] = useState<StorageStats | null>(null);
+  const [storageError, setStorageError] = useState('');
+  const [cacheWriteError, setCacheWriteError] = useState('');
+  const [historyFetchError, setHistoryFetchError] = useState('');
+  useEffect(() => {
+    if (section !== 'diagnostics') return;
+    let cancelled = false;
+    setStorageError('');
+    // A failed cache write is the symptom of a full quota, and it used to be
+    // swallowed entirely. Reading it here is the only place it surfaces.
+    const writeErr = lastCacheWriteError();
+    setCacheWriteError(writeErr ? writeErr.message : '');
+    // A server REFUSING an address (typically "history too large") is not a
+    // connection problem, so it never shows as offline. This is where a
+    // technical user goes to find out why an Activity list stays empty.
+    const histErr = lastHistoryFetchError();
+    setHistoryFetchError(histErr ? `${histErr.address}: ${histErr.message}` : '');
+    readStorageStats()
+      .then((stats) => {
+        if (!cancelled) setStorageStats(stats);
+      })
+      .catch((err) => {
+        if (!cancelled) setStorageError(err instanceof Error ? err.message : String(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [section]);
 
   // Keep the wallet + address + connected-site lists fresh whenever Settings
   // mounts (the root row shows a live site count).
@@ -537,8 +617,40 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
       </button>
     );
 
+    // A section row that simply is not rendered in basic mode. Filtering at the
+    // row keeps one list rather than two divergent ones.
+    const expertRow = (
+      id: SettingsSection,
+      testId: string,
+      icon: ReactNode,
+      title: string,
+      desc: string,
+      iconClass?: string,
+    ) =>
+      settingsMode === 'expert' || !EXPERT_ONLY.has(id)
+        ? sectionRow(testId, icon, title, desc, () => setSection(id), iconClass)
+        : null;
+
     return (
       <Shell title="Settings" onBack={onBack} testId="live-settings" modals={modals}>
+        {/* Mode switch first: it explains why the list below is short. */}
+        <div className="field" style={{ marginBottom: 12 }}>
+          <label>Detail level</label>
+          <Segmented<SettingsMode>
+            options={[
+              { value: 'basic', label: 'Basic' },
+              { value: 'expert', label: 'Expert' },
+            ]}
+            value={settingsMode}
+            onChange={setSettingsMode}
+            testIdPrefix="live-settings-mode"
+          />
+          <span className="text-faint" style={{ fontSize: 10, display: 'block', marginTop: 6 }}>
+            {settingsMode === 'basic'
+              ? 'Everyday settings only. Expert adds servers, addresses, connected sites, export and diagnostics.'
+              : 'Everything, including settings that can break your connection if set wrong.'}
+          </span>
+        </div>
         {sectionRow(
           'live-settings-row-appearance',
           <Palette size={17} />,
@@ -553,12 +665,12 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
           `${wallets.length} wallet${wallets.length === 1 ? '' : 's'} · rename or remove`,
           () => setSection('wallets'),
         )}
-        {sectionRow(
+        {expertRow(
+          'addresses',
           'live-settings-row-addresses',
           <List size={17} />,
           'Addresses',
           'Receive addresses of this wallet',
-          () => setSection('addresses'),
         )}
         {sectionRow(
           'live-settings-row-security',
@@ -568,28 +680,42 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
           () => setSection('security'),
           'success',
         )}
-        {sectionRow(
+        {expertRow(
+          'network',
           'live-settings-row-network',
           <Globe size={17} />,
           'Network & Explorer',
           'Block explorer link and server status',
-          () => setSection('network'),
         )}
-        {sectionRow(
+        {expertRow(
+          'networks',
+          'live-settings-row-networks',
+          <Layers size={17} />,
+          'Visible networks',
+          'Show or hide networks in the switcher',
+        )}
+        {expertRow(
+          'sites',
           'live-settings-row-sites',
           <Link2 size={17} />,
           'Connected sites',
           connectedSites.length === 0
             ? 'No dApps connected via window.evrmore'
             : `${connectedSites.length} site${connectedSites.length === 1 ? '' : 's'} can read your address`,
-          () => setSection('sites'),
         )}
-        {sectionRow(
+        {expertRow(
+          'transactions',
           'live-settings-row-transactions',
           <Download size={17} />,
           'Transactions',
           'Export your history as CSV',
-          () => setSection('transactions'),
+        )}
+        {expertRow(
+          'diagnostics',
+          'live-settings-row-diagnostics',
+          <Activity size={17} />,
+          'Diagnostics',
+          'Storage use, cache and connection details',
         )}
         {sectionRow(
           'live-address-book-btn',
@@ -698,7 +824,9 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
                           <span className="chip warning" style={{ fontSize: 9, padding: '1px 5px' }}>No password</span>
                         )}
                       </span>
-                      <span className="row-desc">{w.network}</span>
+                      {/* Chain name from the chain params — never the raw
+                          internal chain id ("mainnet"). */}
+                      <span className="row-desc">{chainDisplayName(w.network)}</span>
                     </span>
                     <button
                       type="button"
@@ -1133,9 +1261,19 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
                   }}
                 />
                 <span className="row-main" style={{ flex: 1, minWidth: 0 }}>
+                  {/* One line, middle never wraps ("…:500 / 04"): ellipsize and
+                      put the full URL in the tooltip. display:block overrides
+                      .row-title's flex so text-overflow can actually apply. */}
                   <span
                     className="row-title mono"
-                    style={{ fontSize: 11.5, wordBreak: 'break-all' }}
+                    title={url}
+                    style={{
+                      fontSize: 11.5,
+                      display: 'block',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
                   >
                     {url}
                   </span>
@@ -1306,6 +1444,258 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
             {txs.length > 0
               ? `Download all ${txs.length} transaction${txs.length === 1 ? '' : 's'} as a CSV file.`
               : 'No transactions yet. Exports a header-only CSV file.'}
+          </p>
+        </>
+      )}
+
+      {section === 'networks' && (
+        <>
+          <p className="text-dim" style={{ fontSize: 11.5, margin: '0 2px 12px', lineHeight: 1.5 }}>
+            Choose which networks appear in the switcher and when creating a
+            wallet. This only changes what you see: hiding a network deletes
+            nothing, and any wallet on it comes back the moment you show it
+            again.
+          </p>
+          {CHAIN_OPTIONS.map((opt) => {
+            const net = networkFor(opt.value);
+            const blocked = chainHideBlockedReason(net.chainId, activeChainId());
+            const hidden = hiddenChains.includes(net.chainId);
+            const walletCount = walletsOnChain(wallets, net.chainId).length;
+            return (
+              <div className="list-row" key={opt.value}>
+                <span className="row-icon">
+                  <TokenIcon assetId={net.ticker} size={17} />
+                </span>
+                <span className="row-main">
+                  <span className="row-title">{net.displayName}</span>
+                  <span className="row-desc">
+                    {blocked
+                      ? blocked
+                      : walletCount > 0
+                      ? `${walletCount} wallet${walletCount === 1 ? '' : 's'} on this network`
+                      : 'No wallet on this network'}
+                  </span>
+                </span>
+                <Toggle
+                  checked={!hidden}
+                  onChange={(on) => setChainHidden(net.chainId, !on)}
+                  disabled={blocked !== null}
+                  testId={`live-settings-chain-${net.chainId}`}
+                  label={`Show ${net.displayName}`}
+                />
+              </div>
+            );
+          })}
+        </>
+      )}
+
+      {section === 'diagnostics' && (
+        <>
+          {/* Storage first: it is the only number here that can silently break
+              the wallet. chrome.storage.local caps the WHOLE extension, shared
+              by vaults, settings and the transaction cache, and a write past the
+              cap is swallowed, so the cache would freeze with no visible error.
+              Showing the figure is what makes that state diagnosable at all. */}
+          <div className="section-label" style={{ marginBottom: 6 }}>
+            Storage
+          </div>
+          {storageError && (
+            <div className="banner danger" style={{ marginBottom: 10 }} data-testid="live-diag-error">
+              <AlertTriangle size={14} />
+              Could not read storage usage. {storageError}
+            </div>
+          )}
+          {!storageStats && !storageError && (
+            <p className="text-faint" style={{ fontSize: 11, margin: '2px 2px 10px' }}>
+              Reading…
+            </p>
+          )}
+          {storageStats && (
+            <>
+              <div className="card solid" style={{ marginBottom: 10 }} data-testid="live-diag-storage">
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'baseline',
+                    justifyContent: 'space-between',
+                    gap: 8,
+                  }}
+                >
+                  <span style={{ fontSize: 20, fontWeight: 700 }} data-testid="live-diag-storage-used">
+                    {formatBytes(storageStats.usedBytes)}
+                  </span>
+                  <span className="text-dim" style={{ fontSize: 11 }}>
+                    of {formatBytes(storageStats.quotaBytes)} ·{' '}
+                    <span data-testid="live-diag-storage-pct">
+                      {storageStats.percentUsed.toFixed(1)}%
+                    </span>
+                  </span>
+                </div>
+                {/* A bar reads faster than a number when the point is headroom. */}
+                <div
+                  style={{
+                    height: 6,
+                    borderRadius: 999,
+                    background: 'var(--border)',
+                    overflow: 'hidden',
+                    margin: '8px 0 4px',
+                  }}
+                >
+                  <div
+                    style={{
+                      width: `${Math.max(1, storageStats.percentUsed)}%`,
+                      height: '100%',
+                      background:
+                        storageStats.percentUsed >= 90
+                          ? 'var(--danger)'
+                          : storageStats.percentUsed >= 70
+                          ? 'var(--warning)'
+                          : 'var(--success)',
+                    }}
+                  />
+                </div>
+                <span className="text-faint" style={{ fontSize: 10 }}>
+                  {storageStats.measured
+                    ? 'Reported by the browser, including its own per-entry overhead.'
+                    : 'Estimated by measuring stored values (browser total unavailable here).'}{' '}
+                  {storageStats.entryCount} entries.
+                </span>
+              </div>
+
+              {historyFetchError && (
+                <div
+                  className="banner warning"
+                  style={{ marginBottom: 10, alignItems: 'flex-start' }}
+                  data-testid="live-diag-history-error"
+                >
+                  <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+                  <span>
+                    The server refused to return this address's history, so Activity
+                    may be incomplete. Balances are unaffected. ({historyFetchError})
+                  </span>
+                </div>
+              )}
+
+              {cacheWriteError && (
+                <div
+                  className="banner danger"
+                  style={{ marginBottom: 10, alignItems: 'flex-start' }}
+                  data-testid="live-diag-cache-write-error"
+                >
+                  <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+                  <span>
+                    The transaction cache could not be saved, so history will keep
+                    being re-fetched and may not appear. This usually means storage
+                    is full. ({cacheWriteError})
+                  </span>
+                </div>
+              )}
+
+              {storageStats.percentUsed >= 70 && (
+                <div className="banner warning" style={{ marginBottom: 10, alignItems: 'flex-start' }}>
+                  <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+                  <span>
+                    Storage is filling up. The transaction cache is the part that grows;
+                    once the limit is reached, new history stops being saved.
+                  </span>
+                </div>
+              )}
+
+              {storageStats.categories.map((cat) => (
+                <div className="list-row" key={cat.id}>
+                  <span className="row-main">
+                    <span className="row-title">{cat.label}</span>
+                    <span className="row-desc">
+                      {cat.entries} {cat.entries === 1 ? 'entry' : 'entries'}
+                    </span>
+                  </span>
+                  <span className="text-dim mono" style={{ fontSize: 11 }}>
+                    {formatBytes(cat.bytes)}
+                  </span>
+                </div>
+              ))}
+
+              {storageStats.largest.length > 0 && (
+                <>
+                  <div className="section-label" style={{ margin: '14px 0 6px' }}>
+                    Largest entries
+                  </div>
+                  {storageStats.largest.map((e) => (
+                    <div className="list-row" key={e.key}>
+                      <span className="row-main" style={{ minWidth: 0 }}>
+                        <span
+                          className="row-title mono"
+                          style={{
+                            fontSize: 10.5,
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          {e.key}
+                        </span>
+                      </span>
+                      <span className="text-dim mono" style={{ fontSize: 11, flexShrink: 0 }}>
+                        {formatBytes(e.bytes)}
+                      </span>
+                    </div>
+                  ))}
+                </>
+              )}
+            </>
+          )}
+
+          <div className="section-label" style={{ margin: '14px 0 6px' }}>
+            Wallet
+          </div>
+          <div className="list-row">
+            <span className="row-main">
+              <span className="row-title">Chain</span>
+              <span className="row-desc">{activeNet.chainId}</span>
+            </span>
+            <span className="text-dim" style={{ fontSize: 11 }}>
+              {chainDisplayName()}
+            </span>
+          </div>
+          <div className="list-row">
+            <span className="row-main">
+              <span className="row-title">Derivation</span>
+              <span className="row-desc">SLIP-44 coin type {activeNet.coinType}</span>
+            </span>
+            <span className="text-dim mono" style={{ fontSize: 11 }}>
+              {activeNet.addressFormat === 'p2wpkh' ? "m/84'" : "m/44'"}
+            </span>
+          </div>
+          <div className="list-row">
+            <span className="row-main">
+              <span className="row-title">Wallets</span>
+              <span className="row-desc">Across all chains</span>
+            </span>
+            <span className="text-dim" style={{ fontSize: 11 }}>
+              {wallets.length}
+            </span>
+          </div>
+          <div className="list-row">
+            <span className="row-main">
+              <span className="row-title">Transactions loaded</span>
+              <span className="row-desc">Cached for the active wallet</span>
+            </span>
+            <span className="text-dim" style={{ fontSize: 11 }}>
+              {txs.length}
+            </span>
+          </div>
+          <div className="list-row">
+            <span className="row-main">
+              <span className="row-title">Version</span>
+              <span className="row-desc">Satori GO</span>
+            </span>
+            <span className="text-dim mono" style={{ fontSize: 11 }}>
+              {getAppVersion()}
+            </span>
+          </div>
+          <p className="text-faint" style={{ fontSize: 10.5, margin: '10px 2px 4px', lineHeight: 1.5 }}>
+            These figures describe this browser profile only. Nothing here is sent
+            anywhere, and none of it reveals a key or a recovery phrase.
           </p>
         </>
       )}

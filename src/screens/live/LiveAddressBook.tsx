@@ -8,7 +8,7 @@ import { Button } from '../../components/Button';
 import { TextField } from '../../components/TextField';
 import { CopyButton } from '../../components/CopyButton';
 import { EmptyState } from '../../components/EmptyState';
-import { useLiveStore, nativeTickerFor } from '../../store/liveStore';
+import { useLiveStore, chainDisplayName } from '../../store/liveStore';
 import { LiveNav } from './LiveNav';
 
 interface LiveAddressBookProps {
@@ -27,8 +27,6 @@ export function LiveAddressBook({ onBack, onPick }: LiveAddressBookProps) {
   const addContact = useLiveStore((s) => s.addContact);
   const renameContact = useLiveStore((s) => s.renameContact);
   const removeContact = useLiveStore((s) => s.removeContact);
-
-  const nativeTicker = nativeTickerFor();
   const [label, setLabel] = useState('');
   const [address, setAddress] = useState('');
   const [error, setError] = useState('');
@@ -97,10 +95,10 @@ export function LiveAddressBook({ onBack, onPick }: LiveAddressBookProps) {
             autoComplete="off"
           />
           <TextField
-            label={nativeTicker === 'RVN' ? 'Ravencoin address' : 'EVRmore address'}
+            label={`${chainDisplayName()} address`}
             value={address}
             onChange={(e) => { setAddress(e.target.value); setError(''); }}
-            placeholder={nativeTicker === 'RVN' ? 'RVN address (starts with R)' : 'EVR address (starts with E)'}
+            placeholder={`${chainDisplayName()} address`}
             testId="live-contact-address"
             autoComplete="off"
             error={error || undefined}

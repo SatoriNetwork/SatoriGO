@@ -10,10 +10,38 @@ import satoriLogoUrl from '../assets/satori-logo.png';
 // src/qt/res/icons/raven.png (MIT licensed), downscaled from 1024x1024 to
 // 256x256. https://raw.githubusercontent.com/RavenProject/Ravencoin/master/src/qt/res/icons/raven.png
 import rvnLogoUrl from '../assets/raven-logo.png';
+// Official Bitcoin Gold (BTGS) logo. Source: the project's own coins repo,
+// BTGSCOINDEV/coins, icons_original/btgs.png, downscaled 500x500 -> 256x256 to
+// match the other marks and keep the packaged bundle small.
+import btgsLogoUrl from '../assets/btgs-logo.png';
+// Litecoin (LTC) mark. Source: KomodoPlatform/coins, icons/ltc.png, upscaled
+// from 128x128 to 256x256 to match the other marks. This is the same repository
+// the verified Litecoin ElectrumX endpoints came from.
+import ltcLogoUrl from '../assets/litecoin-logo.png';
+// WojakCoin (WJK) mark. Source: the project's own coins repo, BTGSCOINDEV/coins,
+// icons_original/wjk.png, downscaled 1015x1010 -> 256x256 to match the other
+// marks. This is the SAME repository the verified Bitcoin Gold logo (and the
+// BTGSCOINDEV/coins electrums/WJK server list in network.ts) came from.
+import wjkLogoUrl from '../assets/wojak-logo.png';
+// Official Bitcoin (BTC) mark. Source: KomodoPlatform/coins, icons/btc.png,
+// resized from 128x128 to 256x256 to match the other marks. This is the SAME
+// repository the verified Litecoin logo (and the KomodoPlatform/coins
+// electrums/BTC server list in network.ts) came from.
+import btcLogoUrl from '../assets/bitcoin-logo.png';
+// Dogecoin (DOGE) mark. Source: KomodoPlatform/coins, icons/doge.png, resized
+// from 128x128 to 256x256 to match the other marks. This is the SAME repository
+// the Bitcoin and Litecoin marks came from, and the same operator family
+// (cipig) whose verified DOGE ElectrumX endpoints are listed in network.ts.
+import dogeLogoUrl from '../assets/dogecoin-logo.png';
 
 export function officialLogoUrl(slot: LogoSlot): string {
   if (slot === 'satori') return satoriLogoUrl;
   if (slot === 'rvn') return rvnLogoUrl;
+  if (slot === 'btgs') return btgsLogoUrl;
+  if (slot === 'ltc') return ltcLogoUrl;
+  if (slot === 'wjk') return wjkLogoUrl;
+  if (slot === 'btc') return btcLogoUrl;
+  if (slot === 'doge') return dogeLogoUrl;
   return evrLogoUrl;
 }
 
@@ -50,9 +78,10 @@ export function BrandLogo({ slot, size, bare = false, alt = '', className }: Bra
 }
 
 interface TokenIconProps {
-  /** Any EVRmore asset name. "EVR" -> EVR logo; "RVN" -> the Ravencoin logo;
-   *  a name containing "SATORI" -> the Satori logo; anything else -> a
-   *  generic deterministic badge. */
+  /** Any native coin or asset name. "EVR" -> EVR logo; "RVN" -> Ravencoin;
+   *  "BTGS" -> Bitcoin Gold; "LTC" -> Litecoin; "WJK" -> WojakCoin; "BTC" ->
+   *  Bitcoin; "DOGE" -> Dogecoin; a name containing "SATORI" -> the Satori
+   *  logo; anything else -> a generic deterministic badge. */
   assetId: string;
   size?: number;
 }
@@ -98,6 +127,11 @@ export function TokenIcon({ assetId, size = 38 }: TokenIconProps) {
   const name = (assetId ?? '').toUpperCase();
   if (name === 'EVR') return <BrandLogo slot="evr" size={size} alt="EVR" />;
   if (name === 'RVN') return <BrandLogo slot="rvn" size={size} alt="RVN" />;
+  if (name === 'BTGS') return <BrandLogo slot="btgs" size={size} alt="BTGS" />;
+  if (name === 'LTC') return <BrandLogo slot="ltc" size={size} alt="LTC" />;
+  if (name === 'WJK') return <BrandLogo slot="wjk" size={size} alt="WJK" />;
+  if (name === 'BTC') return <BrandLogo slot="btc" size={size} alt="BTC" />;
+  if (name === 'DOGE') return <BrandLogo slot="doge" size={size} alt="DOGE" />;
   if (name.includes('SATORI')) return <BrandLogo slot="satori" size={size} alt={name} />;
   return <GenericTokenBadge name={name} size={size} />;
 }

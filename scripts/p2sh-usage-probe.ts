@@ -93,7 +93,19 @@ async function main() {
 
   for (const addr of addresses) {
     (addr.startsWith('E') ? () => addrP2pkh++ : () => addrP2sh++)();
-    const sh = addressToElectrumScripthash(addr);
+    // addressToElectrumScripthash now REFUSES a P2SH address instead of hashing
+    // a P2PKH script over the script hash. That is the correct behaviour (the
+    // old answer was a scripthash for a script the address does not use, which
+    // read back as "no history"), but this probe deliberately feeds it a mix of
+    // address types, so an unsupported one must be counted and skipped rather
+    // than ending the run.
+    let sh: string;
+    try {
+      sh = addressToElectrumScripthash(addr);
+    } catch (err) {
+      console.log(`  ${addr}  SKIPPED: ${err instanceof Error ? err.message : String(err)}`);
+      continue;
+    }
     const history = await electrumGetHistory(client, sh);
     const txids = history.slice(-MAX_TXS_PER_ADDRESS).map((h) => h.tx_hash);
     console.log(`  ${addr}  ${history.length} txs (sampling ${txids.length})`);

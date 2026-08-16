@@ -1,9 +1,9 @@
-import { useState, useCallback, useEffect } from 'react';
-import { Check, Lock } from 'lucide-react';
+import { useState, useCallback, useEffect, useRef } from 'react';
+import { Check } from 'lucide-react';
 import { Button } from '../../components/Button';
 import { PasswordField } from '../../components/TextField';
-import { BrandLogo } from '../../components/BrandLogo';
-import { useLiveStore, nativeTickerFor } from '../../store/liveStore';
+import { BrandLogo, TokenIcon } from '../../components/BrandLogo';
+import { useLiveStore, chainDisplayName, nativeTickerFor } from '../../store/liveStore';
 
 type LiveLockProps = Record<string, never>;
 
@@ -25,6 +25,15 @@ export function LiveLock(_props: LiveLockProps) {
   useEffect(() => {
     if (wallets.length === 0) void loadWallets();
   }, [wallets.length, loadWallets]);
+
+  // With enough wallets the list scrolls, and the selected one can start out
+  // below the fold: the user would then see a list with nothing ticked and no
+  // sign that the password field already belongs to a specific wallet. Bring it
+  // into view. 'nearest' so a list that already shows it does not jump.
+  const selectedRowRef = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    selectedRowRef.current?.scrollIntoView({ block: 'nearest' });
+  }, [activeWalletId, wallets.length]);
 
   const activeWallet = wallets.find((w) => w.id === activeWalletId) ?? null;
   // Bug fix: switchWallet() only auto-unlocks a passwordless target when it
@@ -107,27 +116,18 @@ export function LiveLock(_props: LiveLockProps) {
           </span>
         </div>
 
-        <div className="lock-logo">
-          <div
-            style={{
-              width: 48,
-              height: 48,
-              borderRadius: '50%',
-              background: 'var(--danger-bg)',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              color: 'var(--danger)',
-              border: '1px solid color-mix(in srgb, var(--danger) 25%, transparent)',
-            }}
-          >
-            <Lock size={20} />
-          </div>
-        </div>
+        {/* No lock badge above this heading: it restated what the heading says
+            in words, and the ~62px it cost came straight out of the wallet
+            list, which is the one thing on this screen that needs the height. */}
         <h2>Live Wallet Locked</h2>
-        <p className="lock-account">
-          {activeWallet?.name ?? (nativeTickerFor() === 'RVN' ? 'Real Ravencoin Network' : 'Real EVRmore Network')}
-        </p>
+        {/* The wallet picker below already names the selected wallet on its own
+            row — repeat nothing. The subtitle only earns its place when there
+            is no list to show yet. */}
+        {wallets.length === 0 && (
+          <p className="lock-account">
+            {activeWallet?.name ?? `Real ${chainDisplayName()} Network`}
+          </p>
+        )}
 
         {/* Wallet picker: the LAST-USED (active) wallet is preselected; picking
             another one switches to it while staying on this lock screen. */}
@@ -135,30 +135,38 @@ export function LiveLock(_props: LiveLockProps) {
           <div className="stack lock-wallets" data-testid="live-lock-wallets">
             {wallets.map((w, i) => {
               const selected = w.id === activeWalletId;
+              // Chain badge from the chain params (mirrors the LiveHome wallet
+              // switcher): each row's OWN chain drives its mark + ticker chip,
+              // so a BTGS/LTC/any future wallet is identified here too — never
+              // a hardcoded chain-id test, which silently skipped every chain
+              // added after Ravencoin.
+              const walletTicker = nativeTickerFor(w.network);
+              const isOtherChain = walletTicker !== 'EVR';
               return (
                 <button
                   key={w.id}
                   type="button"
+                  ref={selected ? selectedRowRef : undefined}
                   className="lock-wallet"
                   aria-pressed={selected}
                   onClick={() => pickWallet(w.id)}
                   data-testid={`live-lock-wallet-${i}`}
                 >
                   {w.kind === 'pk' && <BrandLogo slot="satori" size={16} alt="Satori" />}
-                  {w.network === 'ravencoin-mainnet' && <BrandLogo slot="rvn" size={16} alt="RVN" />}
+                  {isOtherChain && <TokenIcon assetId={walletTicker} size={16} />}
                   <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {w.name}
                   </span>
                   <span className="chip neutral" style={{ fontSize: 8.5, padding: '1px 4px', flexShrink: 0 }}>
                     {w.kind === 'pk' ? 'Satori' : 'Seed'}
                   </span>
-                  {w.network === 'ravencoin-mainnet' && (
+                  {isOtherChain && (
                     <span
                       className="chip neutral"
                       data-testid={`live-lock-wallet-chain-${i}`}
                       style={{ fontSize: 8.5, padding: '1px 4px', flexShrink: 0 }}
                     >
-                      RVN
+                      {walletTicker}
                     </span>
                   )}
                   {w.passwordless && (

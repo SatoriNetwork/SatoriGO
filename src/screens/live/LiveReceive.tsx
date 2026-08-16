@@ -3,11 +3,13 @@ import { QRCodeView } from '../../components/QRCodeView';
 import { CopyButton } from '../../components/CopyButton';
 import { Button } from '../../components/Button';
 import { TokenIcon } from '../../components/BrandLogo';
-import { useLiveStore, nativeTickerFor } from '../../store/liveStore';
-import { networkFor } from '../../services/chain/chainParams';
-import type { LiveNetworkId } from '../../services/chain/liveWallet';
+import { useLiveStore, nativeTickerFor, assetsSupported, chainDisplayName } from '../../store/liveStore';
 import { ChevronLeft, CheckCircle, Plus } from 'lucide-react';
 import { LiveNav } from './LiveNav';
+
+// The chain name comes from chainParams via chainDisplayName(); this screen used
+// to keep its own hand-maintained ticker table, which silently went stale every
+// time a chain was added.
 
 interface LiveReceiveProps {
   onBack(): void;
@@ -28,14 +30,16 @@ export function LiveReceive({ onBack }: LiveReceiveProps) {
   const activeWalletId = useLiveStore((s) => s.activeWalletId);
   const addReceiveAddress = useLiveStore((s) => s.addReceiveAddress);
 
-  // The active chain's native ticker (EVR on Evrmore, RVN on Ravencoin) and full
-  // network name. Every asset on a chain shares ONE receive address, so the screen
-  // shows the network, not a per-asset picker.
+  // The active chain's native ticker (EVR / RVN / BTGS) and full network name.
+  // Every asset on an asset-capable chain shares ONE receive address, so the
+  // screen shows the network, not a per-asset picker.
   const activeWallet = wallets.find((w) => w.id === activeWalletId);
   const nativeTicker = nativeTickerFor();
-  const networkName = nativeTicker === 'RVN' ? 'Ravencoin' : 'EVRmore';
-  // Kept for potential future use of the resolved chain params (no branch today).
-  void networkFor((activeWallet?.network as LiveNetworkId | undefined) ?? 'mainnet');
+  const networkName = chainDisplayName();
+  // Whether the active chain has an asset protocol at all — gates whether the
+  // helper text below mentions "or any {chain} asset". Capability-driven, never
+  // a hardcoded ticker check, so a future plain chain needs no edit here.
+  const canHoldAssets = assetsSupported();
 
   // The active wallet's kind gates the add-address affordance: only seed wallets
   // can derive more addresses (a pk / Satori wallet has one fixed address).
@@ -67,8 +71,13 @@ export function LiveReceive({ onBack }: LiveReceiveProps) {
     if (last) setSelectedIndex(last.index);
   };
 
-  // One address receives the native coin AND every asset on this chain.
-  const helper = `Send ${nativeTicker} or any ${networkName} asset to this address. They all share it.`;
+  // On a chain with an asset protocol, one address receives the native coin
+  // AND every asset on it. On a plain chain (no asset protocol, e.g. Bitcoin
+  // Gold) only the native coin can ever land here, so the copy must not
+  // mention assets that cannot exist.
+  const helper = canHoldAssets
+    ? `Send ${nativeTicker} or any ${networkName} asset here. Every asset shares this address.`
+    : `Send ${nativeTicker} to this address.`;
 
   return (
     <div className="app-frame screen-enter">
@@ -82,9 +91,7 @@ export function LiveReceive({ onBack }: LiveReceiveProps) {
       <div className="app-content" data-testid="live-receive">
         <div className="banner info" style={{ marginBottom: 14 }}>
           <CheckCircle size={14} />
-          {nativeTicker === 'RVN'
-            ? 'Ready to receive. This is your real Ravencoin address.'
-            : 'Ready to receive. This is your real EVRmore address.'}
+          {`Ready to receive. This is your real ${networkName} address.`}
         </div>
 
         {/* Network header: which chain this address is on. Assets are not listed

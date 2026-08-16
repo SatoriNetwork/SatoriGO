@@ -45,8 +45,19 @@ export function App() {
   // Approval mode replaces the whole app (no wallet boot) — the window only
   // exists to decide ONE pending dApp request.
   const dappId = getDappRequestId();
-  if (dappId) return <DappApproval requestId={dappId} />;
+  if (dappId) return <ThemedDappApproval requestId={dappId} />;
   return <MainApp />;
+}
+
+/** The approval route bypasses MainApp entirely, so without this wrapper
+ *  useThemeSync never ran for it and the window ignored the user's theme
+ *  (always dark). Load the display settings and apply the same sync here. */
+function ThemedDappApproval({ requestId }: { requestId: string }) {
+  useThemeSync();
+  useEffect(() => {
+    void useSettingsStore.getState().load();
+  }, []);
+  return <DappApproval requestId={requestId} />;
 }
 
 function MainApp() {

@@ -4,11 +4,16 @@ import { Button } from '../../components/Button';
 import { TextField, PasswordField } from '../../components/TextField';
 import { TokenIcon } from '../../components/BrandLogo';
 import { useLiveStore, computeDisplayedAssets, walletsOnChain } from '../../store/liveStore';
-import { isValidAddress, isP2pkhAddress } from '../../services/chain/keys';
+import { isValidAddress, isSpendableAddress } from '../../services/chain/keys';
+import { supportsSegwit } from '../../services/chain/chainParams';
 import { networkFor } from '../../services/chain/chainParams';
+import { distinctFeeOptions } from '../../services/chain/feePolicy';
 import { isLegacyAsset } from '../../services/assetNotes';
-import type { LiveSendPlan, LiveNetworkId } from '../../services/chain/liveWallet';
+import type { FeeEstimate, LiveSendPlan, LiveNetworkId } from '../../services/chain/liveWallet';
+import { estimateTxBytes } from '../../services/chain/txBuilder';
+import { ELECTRUM_CLOSED, ELECTRUM_NOT_CONNECTED } from '../../services/chain/electrumClient';
 import { LiveNav } from './LiveNav';
+import type { NativeTicker } from '../../services/chain/chainParams';
 
 interface LiveSendProps {
   onBack(): void;
@@ -22,6 +27,32 @@ interface LiveSendProps {
 const SUCCESS_AUTO_RETURN_MS = 4_000;
 
 type SendStep = 'form' | 'review' | 'success';
+
+/**
+ * Typical transaction sizes (bytes) used only to PREVIEW a fee amount before
+ * the real transaction is built. These are UTXO chains: the fee is rate × the
+ * transaction's actual size, and the size is unknown until the inputs are
+ * selected at build time — so the form shows "~amount at a typical size" and
+ * the review shows the exact fee of the actually-built transaction.
+ *   - native send: 1 input, 2 outputs (payment + change);
+ *   - asset transfer: 1 asset + 1 native input, asset out + asset change +
+ *     native change, padded ~60 bytes per asset-script output (mirrors the
+ *     builder's own padding in buildAssetSend).
+ */
+const TYPICAL_SEND_TX_BYTES = estimateTxBytes(1, 2);
+const TYPICAL_ASSET_TX_BYTES = estimateTxBytes(2, 3) + 120;
+
+/** Presentation for the engine's fee targets (2/6/25 blocks — fastest first).
+ *  An unexpected target still renders (generic label), it just isn't named. */
+const SPEED_META: Record<number, { key: string; label: string }> = {
+  2: { key: 'fast', label: 'Fast' },
+  6: { key: 'normal', label: 'Normal' },
+  25: { key: 'slow', label: 'Slow' },
+};
+
+function speedMetaFor(targetBlocks: number): { key: string; label: string } {
+  return SPEED_META[targetBlocks] ?? { key: `t${targetBlocks}`, label: `${targetBlocks} blocks` };
+}
 
 function fmtSats(sats: bigint): string {
   const val = Number(sats) / 1e8;
@@ -47,40 +78,35 @@ function fmtBalance(amount: number, decimals: number): string {
   return dp === 0 ? s : s.replace(/\.?0+$/, '');
 }
 
-/** Turn a raw build/broadcast error code into a clear, human message. `native`
- *  is the active chain's ticker ('EVR' or 'RVN'): every message keeps its exact
- *  historical EVR wording (the live smoke asserts on it) and only branches for
- *  a Ravencoin wallet. */
-function friendlyError(msg: string, assetId: string, native: 'EVR' | 'RVN'): string {
-  const isRvn = native === 'RVN';
+/** Turn a raw build/broadcast error code into a clear, human message.
+ *  `native` is the active chain's ticker and `chainName` its display name, both
+ *  looked up from the chain params, so a message never names the wrong chain. */
+function friendlyError(msg: string, assetId: string, native: NativeTicker, chainName: string): string {
   switch (msg) {
     case 'insufficient-asset':
       return `Insufficient ${assetId} balance for this transfer.`;
     case 'insufficient-evr-for-fee':
-      return isRvn
-        ? 'Not enough RVN to cover the network fee for this asset transfer.'
-        : 'Not enough EVR to cover the network fee for this asset transfer.';
+      return `Not enough ${native} to cover the network fee for this asset transfer.`;
     case 'invalid-amount-precision':
       return `That amount is finer than ${assetId} allows. Reduce the number of decimals.`;
     case 'unknown-asset':
-      return isRvn
-        ? `Asset "${assetId}" was not found on the Ravencoin network.`
-        : `Asset "${assetId}" was not found on the EVRmore network.`;
+      return `Asset "${assetId}" was not found on the ${chainName} network.`;
     case 'invalid-amount':
       return 'Enter a valid amount greater than 0.';
     case 'insufficient-funds':
-      return isRvn
-        ? 'Insufficient RVN balance for this transaction (amount + network fee).'
-        : 'Insufficient EVR balance for this transaction (amount + network fee).';
+      return `Insufficient ${native} balance for this transaction (amount + network fee).`;
     case 'unsupported-address-type':
-      return isRvn
-        ? 'That is not a standard Ravencoin address (only addresses starting with R are supported; P2SH / wrong-network addresses are rejected).'
-        : 'That is not a standard EVRmore address (only addresses starting with E are supported; P2SH / wrong-network addresses are rejected).';
+      return `That is not a standard ${chainName} address. Script and wrong-network addresses are rejected.`;
     case 'input-verify-failed':
     case 'input-value-mismatch':
       return 'Could not verify your coins against the network (the server may be faulty or malicious). Nothing was sent. Try another Electrum server in Settings.';
     case 'broadcast-unconfirmed':
       return 'The server had a problem and the transaction could not be confirmed as sent. Nothing appears on the network. It is safe to try again.';
+    case ELECTRUM_NOT_CONNECTED:
+    case ELECTRUM_CLOSED:
+      // Reachable by tapping Review in the seconds after a chain switch, before
+      // that chain's socket is up. Nothing was built and nothing was sent.
+      return `Still connecting to the ${chainName} network. Wait a moment and try again.`;
     default:
       return msg;
   }
@@ -104,6 +130,7 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
   const pinnedAssets = useLiveStore((s) => s.pinnedAssets);
   const hiddenAssets = useLiveStore((s) => s.hiddenAssets);
   const estimateMaxEvr = useLiveStore((s) => s.estimateMaxEvr);
+  const estimateFeeOptions = useLiveStore((s) => s.estimateFeeOptions);
 
   // A passwordless wallet has no password to confirm — skip the whole password
   // step (no `live-send-password` field). Otherwise honour the user setting.
@@ -114,7 +141,7 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
   // The active wallet's chain (defaults to Evrmore mainnet, same as the store's
   // own default) drives address validation + every chain-aware label below.
   const activeNet = networkFor((activeWallet?.network as LiveNetworkId | undefined) ?? 'mainnet');
-  const nativeTicker = activeNet.ticker; // 'EVR' | 'RVN'
+  const nativeTicker = activeNet.ticker;
 
   // Resolve which asset we're sending. Absent / the chain's native ticker => the
   // native coin (EVR on Evrmore, RVN on Ravencoin).
@@ -152,7 +179,9 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
   // Address-book entries are plain addresses with no chain tag, so scope them by
   // what the address itself decodes to: only P2PKH addresses of the ACTIVE chain
   // are offered (an EVR contact on a Ravencoin wallet is a guaranteed error).
-  const chainContacts = addressBook.filter((c) => isP2pkhAddress(c.address, activeNet));
+  // Address-book entries are scoped to the active chain, and to the address
+  // types this chain can actually pay to (segwit included where available).
+  const chainContacts = addressBook.filter((c) => isSpendableAddress(c.address, activeNet));
 
   const [step, setStep] = useState<SendStep>('form');
   const [to, setTo] = useState('');
@@ -168,12 +197,25 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
   const [successTxid, setSuccessTxid] = useState('');
 
   // Quick-amount ("Max") state. For EVR, Max is async (queries UTXOs) and the
-  // fee it deducts is shown in the fee note. `typicalFeeEvr` is an optional
-  // on-mount estimate of the current fee, shown before Max is used.
+  // fee it deducts is shown in the fee note.
   const [maxLoading, setMaxLoading] = useState(false);
   const [maxUsed, setMaxUsed] = useState(false);
   const [maxFeeEvr, setMaxFeeEvr] = useState<number | null>(null);
-  const [typicalFeeEvr, setTypicalFeeEvr] = useState<number | null>(null);
+
+  // --- network fee choice ---------------------------------------------------
+  // The chain's fee options (fetched once on mount). null only while loading:
+  // the store action never rejects — an offline/useless server resolves to the
+  // chain's policy defaults, so the send is never blocked on this.
+  const [feeEstimate, setFeeEstimate] = useState<FeeEstimate | null>(null);
+  // targetBlocks of the picked speed option (differentiated chains only);
+  // null = the wallet's long-standing 6-block "normal" target.
+  const [pickedTarget, setPickedTarget] = useState<number | null>(null);
+  // Custom sat/byte rate: open/closed + raw input text ('' = none entered, so
+  // the picked/auto rate still applies).
+  const [customOpen, setCustomOpen] = useState(false);
+  const [customText, setCustomText] = useState('');
+  // Rate the last Max estimate was computed at (null = server-probed rate).
+  const lastMaxRateRef = useRef<bigint | null>(null);
 
   // Save-to-address-book affordance for a freshly-entered recipient.
   const [savingContact, setSavingContact] = useState(false);
@@ -202,21 +244,110 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
     return () => clearTimeout(timer);
   }, [step]);
 
-  // Non-blocking: fetch the current typical EVR fee once so the fee note can show
-  // "~<fee> EVR" before the user taps Max. Errors are swallowed (store already
-  // returns 0 on failure); asset sends don't need this (fixed fee note).
+  // Non-blocking: fetch the chain's fee options once so the fee panel can show
+  // the real rate(s) and amounts. The store action never rejects (an offline
+  // server resolves to the chain's policy defaults); the chainId guard drops a
+  // stale estimate if the active chain somehow changed mid-flight.
   useEffect(() => {
-    if (isAsset) return;
     let cancelled = false;
-    void estimateMaxEvr()
-      .then(({ feeDecimal }) => {
-        if (!cancelled) setTypicalFeeEvr(feeDecimal);
+    void estimateFeeOptions()
+      .then((est) => {
+        if (!cancelled && est.chainId === activeNet.chainId) setFeeEstimate(est);
       })
       .catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, [isAsset, estimateMaxEvr]);
+  }, [estimateFeeOptions, activeNet.chainId]);
+
+  // --- fee choice derivation ------------------------------------------------
+  // Effective option when nothing is picked: the 6-block "normal" target, the
+  // wallet's long-standing single-probe target (middle of the offered set).
+  const feeOptions = feeEstimate?.options ?? [];
+  const autoOption = feeOptions.find((o) => o.targetBlocks === 6) ?? feeOptions[1] ?? feeOptions[0];
+  const pickedOption =
+    feeEstimate?.differentiated && pickedTarget !== null
+      ? feeOptions.find((o) => o.targetBlocks === pickedTarget) ?? autoOption
+      : autoOption;
+
+  // Custom rate, validated against the chain's real floor/ceiling for immediate
+  // feedback. DISPLAY validation only: the wallet service independently
+  // re-clamps whatever rate reaches it, so nothing here is a safety boundary.
+  const trimmedCustom = customText.trim();
+  let customRate: bigint | null = null;
+  let customError = '';
+  if (customOpen && trimmedCustom !== '' && feeEstimate) {
+    if (!/^\d+$/.test(trimmedCustom)) {
+      customError = 'Enter a whole number of sat/byte.';
+    } else {
+      const v = BigInt(trimmedCustom);
+      if (v < feeEstimate.floorSatPerByte) {
+        customError = `Too low. This network does not relay transactions under ${feeEstimate.floorSatPerByte.toString()} sat/byte.`;
+      } else if (v > feeEstimate.ceilingSatPerByte) {
+        customError = `Too high. This wallet caps the rate at ${feeEstimate.ceilingSatPerByte.toString()} sat/byte on this network.`;
+      } else {
+        customRate = v;
+      }
+    }
+  }
+
+  // The rate the send is actually built at (undefined only while the estimate
+  // is still loading; the wallet then probes the server itself, as before).
+  const effectiveRate: bigint | undefined =
+    customOpen && customRate !== null ? customRate : pickedOption?.satPerByte;
+  // Rate shown in the headline (falls back to the chain default for safety;
+  // in practice effectiveRate is always set once the estimate has loaded).
+  const headlineRate: bigint | null = effectiveRate ?? feeEstimate?.defaultSatPerByte ?? null;
+
+  // ~fee amount (in the chain's own coin) at `rate` for a typical transaction
+  // size. These are UTXO chains: the exact fee follows the built transaction's
+  // size, so the form previews and the review states the exact number.
+  const typicalTxBytes = isAsset ? TYPICAL_ASSET_TX_BYTES : TYPICAL_SEND_TX_BYTES;
+  const feePreviewDecimal = (rate: bigint): number => Number(rate * BigInt(typicalTxBytes)) / 1e8;
+
+  // Honest label for where the headline rate comes from: a degraded probe is
+  // named as the default, never passed off as a live estimate.
+  const rateSourceLabel =
+    customOpen && customRate !== null
+      ? 'custom rate'
+      : pickedOption && !pickedOption.estimated
+      ? 'network default rate'
+      : feeEstimate?.differentiated && pickedOption
+      ? `about ${pickedOption.targetBlocks} blocks`
+      : 'current network rate';
+
+  // Keep a Max-filled amount honest when the chosen rate changes afterwards:
+  // Max = balance − fee(rate), so a rate change silently invalidates it (too
+  // high -> insufficient-funds at build; too low -> coins left behind). Small
+  // debounce so typing a custom rate doesn't fire a UTXO query per keystroke.
+  useEffect(() => {
+    if (isAsset || !maxUsed) return;
+    if (lastMaxRateRef.current === (effectiveRate ?? null)) return;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      void estimateMaxEvr(effectiveRate)
+        .then(({ maxDecimal, feeDecimal }) => {
+          if (cancelled) return;
+          lastMaxRateRef.current = effectiveRate ?? null;
+          setAmount(maxDecimal > 0 ? fmtBalance(maxDecimal, 8) : '0');
+          setMaxFeeEvr(feeDecimal);
+        })
+        .catch(() => {});
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [isAsset, maxUsed, effectiveRate, estimateMaxEvr]);
+
+  const toggleCustomRate = () => {
+    if (customOpen) {
+      setCustomOpen(false);
+      setCustomText('');
+    } else {
+      setCustomOpen(true);
+    }
+  };
 
   const trimmedTo = to.trim();
   const alreadySaved = addressBook.some((c) => c.address === trimmedTo);
@@ -272,9 +403,12 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
       return;
     }
     // EVR: Max = all UTXOs − the fee to spend them, so the tx fits. Async.
+    // Computed at the CHOSEN fee rate so Max stays consistent with the fee the
+    // send is actually built at (the re-estimate effect keeps it so later).
     setMaxLoading(true);
     try {
-      const { maxDecimal, feeDecimal } = await estimateMaxEvr();
+      const { maxDecimal, feeDecimal } = await estimateMaxEvr(effectiveRate);
+      lastMaxRateRef.current = effectiveRate ?? null;
       setAmount(maxDecimal > 0 ? fmtBalance(maxDecimal, 8) : '0');
       if (maxDecimal > 0) {
         setMaxUsed(true);
@@ -289,19 +423,20 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
     }
   };
 
-  // Network-fee note under the chips. Interpolating `nativeTicker` reproduces the
-  // exact historical 'EVR' wording on an Evrmore wallet (nativeTicker === 'EVR'),
-  // and reads correctly ('RVN') on a Ravencoin one.
+  // Contextual fee note inside the fee panel. Interpolating `nativeTicker`
+  // reproduces the exact historical 'EVR' wording on an Evrmore wallet
+  // (nativeTicker === 'EVR'), and reads correctly on every other chain. The
+  // amount itself now lives in the panel headline; this line carries what the
+  // headline cannot: where the fee is paid from, and (after Max) the exact fee
+  // the Max amount already deducts.
   const feeNote = isAsset
     ? `Network fee: paid in ${nativeTicker} (from your ${nativeTicker} balance).`
     : maxUsed && maxFeeEvr != null
     ? `Network fee: ~${fmtBalance(maxFeeEvr, 8)} ${nativeTicker} (deducted from Max)`
-    : typicalFeeEvr != null && typicalFeeEvr > 0
-    ? `Network fee: ~${fmtBalance(typicalFeeEvr, 8)} ${nativeTicker} (deducted from your ${nativeTicker} balance at review).`
-    : `Network fee: deducted from your ${nativeTicker} balance at review.`;
+    : `Network fee: deducted from your ${nativeTicker} balance at review. The exact fee follows the transaction's size.`;
 
   // The store keeps raw error codes; map them for display on this screen.
-  const mappedStoreError = storeError ? friendlyError(storeError, assetId, nativeTicker) : null;
+  const mappedStoreError = storeError ? friendlyError(storeError, assetId, nativeTicker, activeNet.displayName) : null;
 
   const handleBuild = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -312,18 +447,20 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
       return;
     }
     if (!isValidAddress(to.trim())) {
-      setFieldError(nativeTicker === 'RVN' ? 'Invalid Ravencoin address.' : 'Invalid EVRmore address.');
+      setFieldError(`Invalid ${activeNet.displayName} address.`);
       return;
     }
-    // Only standard P2PKH recipients are spendable — the builder emits P2PKH
-    // outputs, so a P2SH ('e…') / wrong-network address would burn the funds.
-    // Validated against the ACTIVE WALLET's chain (not a hardcoded Evrmore
-    // constant), so an RVN wallet accepts R... and rejects E... here too.
-    if (!isP2pkhAddress(to.trim(), activeNet)) {
+    // Only recipients the builder can actually pay to are accepted: standard
+    // P2PKH on every chain, plus native segwit (P2WPKH) on chains that have it.
+    // isValidAddress deliberately passes more than that (P2SH, and on a segwit
+    // chain also P2WSH/taproot), and paying to a script this wallet cannot
+    // construct would burn the funds. Checked against the ACTIVE WALLET's chain,
+    // so a wrong-network address is rejected here too.
+    if (!isSpendableAddress(to.trim(), activeNet)) {
       setFieldError(
-        nativeTicker === 'RVN'
-          ? 'Only standard Ravencoin addresses (starting with R) are supported. P2SH / wrong-network addresses are rejected.'
-          : 'Only standard EVRmore addresses (starting with E) are supported. P2SH / wrong-network addresses are rejected.',
+        supportsSegwit(activeNet)
+          ? `Enter a standard ${activeNet.displayName} address (${activeNet.bech32Hrp}1...). Script and wrong-network addresses are rejected.`
+          : `Enter a standard ${activeNet.displayName} address. Script and wrong-network addresses are rejected.`,
       );
       return;
     }
@@ -332,8 +469,15 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
       setFieldError('Enter a valid amount greater than 0.');
       return;
     }
+    // A custom rate outside the chain's bounds is never submitted; the inline
+    // message under the rate input already explains the refusal. (The service
+    // would re-clamp it anyway; refusing here keeps the UI honest instead of
+    // silently building at a different rate than the one typed.)
+    if (customOpen && trimmedCustom !== '' && customRate === null) {
+      return;
+    }
 
-    const result = await buildSend(to.trim(), amountNum, assetId);
+    const result = await buildSend(to.trim(), amountNum, assetId, effectiveRate);
     if (result) {
       setPlan(result);
       setStep('review');
@@ -355,8 +499,7 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
     }
   };
 
-  const handleArmChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const val = e.target.checked;
+  const handleArmToggle = (val: boolean) => {
     setArmed(val);
     arm(val);
   };
@@ -391,14 +534,13 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
     }
   };
 
-  const displayFormError = fieldError || (step === 'form' ? mappedStoreError : null);
   // The unit shown on the review's amount row (asset name for asset sends; the
   // chain's native ticker for a native send).
   const amountUnit = plan?.assetName ?? nativeTicker;
   // "EVRmore"/"Ravencoin network" mention on the review + success screens. Kept
   // as an explicit branch (not net.displayName) so the Evrmore wording stays the
   // exact historical "EVRmore network" the live smoke asserts on.
-  const chainNetworkName = nativeTicker === 'RVN' ? 'Ravencoin network' : 'EVRmore network';
+  const chainNetworkName = `${activeNet.displayName} network`;
 
   if (step === 'success') {
     return (
@@ -485,20 +627,44 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
             className="card"
             style={{ marginBottom: 14 }}
           >
-            <label
-              style={{ display: 'flex', gap: 10, alignItems: 'flex-start', cursor: 'pointer' }}
+            {/* Custom check tile (same design as the onboarding ack tiles) in
+                the arm's danger accent. role="checkbox" + aria-checked kept so
+                Playwright .check()/.uncheck() still drive it. */}
+            <div
+              role="checkbox"
+              aria-checked={armed}
+              tabIndex={0}
               data-testid="live-arm-checkbox"
+              onClick={() => handleArmToggle(!armed)}
+              onKeyDown={(e) => {
+                if (e.key === ' ' || e.key === 'Enter') {
+                  e.preventDefault();
+                  handleArmToggle(!armed);
+                }
+              }}
+              style={{ display: 'flex', gap: 10, alignItems: 'flex-start', cursor: 'pointer' }}
             >
-              <input
-                type="checkbox"
-                checked={armed}
-                onChange={handleArmChange}
-                style={{ marginTop: 2, flexShrink: 0, accentColor: 'var(--danger)' }}
-              />
+              <div
+                style={{
+                  width: 18,
+                  height: 18,
+                  borderRadius: 5,
+                  border: `2px solid ${armed ? 'var(--danger)' : 'var(--border-strong)'}`,
+                  background: armed ? 'var(--danger-bg)' : 'transparent',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  flexShrink: 0,
+                  marginTop: 1,
+                  transition: 'all 0.15s',
+                }}
+              >
+                {armed && <span style={{ color: 'var(--danger)', fontSize: 11, fontWeight: 700 }}>✓</span>}
+              </div>
               <span style={{ fontSize: 12, lineHeight: 1.5 }}>
                 I understand this sends real {amountUnit} and cannot be undone.
               </span>
-            </label>
+            </div>
           </div>
 
           {requirePassword && (
@@ -561,11 +727,16 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
         <h2>Send {assetId}</h2>
         <span />
       </div>
-      <div className="app-content">
+      {/* send-pinned: the fields scroll in .send-scroll below while the CTA row
+          (.send-cta, with the no-gas + store-error banners) stays pinned above
+          the bottom nav — the primary action can never be clipped by it. See
+          global.css. */}
+      <div className="app-content send-pinned">
         <form onSubmit={handleBuild}>
+          <div className="send-scroll">
           <TextField
             label="Recipient address"
-            placeholder={nativeTicker === 'RVN' ? 'RVN address (starts with R)' : 'EVR address (starts with E)'}
+            placeholder={`${activeNet.displayName} address`}
             value={to}
             onChange={(e) => { setTo(e.target.value); setContactSaved(false); }}
             testId="live-send-to"
@@ -684,7 +855,7 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
             value={amount}
             onChange={(e) => setAmountManual(e.target.value)}
             testId="live-send-amount"
-            error={displayFormError ?? undefined}
+            error={fieldError || undefined}
           />
 
           {/* Available balance for the selected asset. A small positive top margin
@@ -725,20 +896,134 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
             </button>
           </div>
 
-          {/* Network fee note. */}
-          <p
-            className="text-dim"
-            data-testid="live-send-fee-note"
-            style={{ fontSize: 11, margin: '0 2px 14px', lineHeight: 1.5 }}
-          >
-            {feeNote}
-          </p>
+          {/* Network fee: the amount in the chain's own coin is the headline
+              (that is what a user pays), the sat/byte rate is secondary detail.
+              A speed choice renders ONLY when the chain genuinely returns
+              different rates per confirmation target; most chains answer one
+              flat rate for every target, so the single-fee view is the normal,
+              finished presentation, not a fallback. A custom rate is always
+              available, validated against the chain's real floor and ceiling. */}
+          <div className="section-label">Network fee</div>
+          <div className="card" data-testid="live-fee-section" style={{ marginBottom: 10, padding: 12 }}>
+            {feeEstimate === null || headlineRate === null ? (
+              <div className="text-dim" style={{ fontSize: 11.5 }}>
+                Fetching the current network fee…
+              </div>
+            ) : (
+              <>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                  <div style={{ minWidth: 0 }}>
+                    <div data-testid="live-fee-amount" style={{ fontWeight: 700, fontSize: 13.5 }}>
+                      ~{fmtBalance(feePreviewDecimal(headlineRate), 8)} {nativeTicker}
+                    </div>
+                    <div className="text-dim" data-testid="live-fee-rate" style={{ fontSize: 11, marginTop: 1 }}>
+                      {headlineRate.toString()} sat/byte · {rateSourceLabel}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className={customOpen ? 'chip' : 'chip neutral'}
+                    data-testid="live-fee-custom-toggle"
+                    aria-pressed={customOpen}
+                    onClick={toggleCustomRate}
+                    style={{ cursor: 'pointer', flexShrink: 0 }}
+                  >
+                    Custom
+                  </button>
+                </div>
+
+                {feeEstimate.differentiated && !customOpen && (
+                  <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
+                    {/* Duplicates by effective rate are collapsed (fastest
+                        target of each rate survives): a chain can answer e.g.
+                        fast 1860 / normal 1006 / slow 1006 (seen live on
+                        Ravencoin), and rendering two chips with the SAME
+                        amount offers no choice — see distinctFeeOptions for
+                        why collapsing beats demanding all three to differ.
+                        The picked highlight compares RATES, not targets, so
+                        the default 6-block pick still lights the surviving
+                        chip that carries its rate when target 6 itself was
+                        collapsed away. */}
+                    {distinctFeeOptions(feeEstimate.options).map((o) => {
+                      const meta = speedMetaFor(o.targetBlocks);
+                      const isPicked = pickedOption?.satPerByte === o.satPerByte;
+                      return (
+                        <button
+                          key={o.targetBlocks}
+                          type="button"
+                          className={isPicked ? 'chip' : 'chip neutral'}
+                          data-testid={`live-fee-option-${meta.key}`}
+                          aria-pressed={isPicked}
+                          onClick={() => setPickedTarget(o.targetBlocks)}
+                          title={`${meta.label}: about ${o.targetBlocks} blocks at ${o.satPerByte.toString()} sat/byte`}
+                          style={{
+                            flex: 1,
+                            flexDirection: 'column',
+                            alignItems: 'center',
+                            gap: 1,
+                            padding: '6px 4px',
+                            borderRadius: 10,
+                            cursor: 'pointer',
+                          }}
+                        >
+                          <span style={{ fontWeight: 700 }}>{meta.label}</span>
+                          <span style={{ fontSize: 10, opacity: 0.9 }}>
+                            ~{fmtBalance(feePreviewDecimal(o.satPerByte), 8)}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {customOpen && (
+                  <div style={{ marginTop: 10 }}>
+                    <TextField
+                      label="Custom rate (sat/byte)"
+                      type="number"
+                      min="1"
+                      step="1"
+                      inputMode="numeric"
+                      placeholder={(pickedOption?.satPerByte ?? feeEstimate.defaultSatPerByte).toString()}
+                      value={customText}
+                      onChange={(e) => setCustomText(e.target.value)}
+                      testId="live-fee-custom"
+                      hint={
+                        customError
+                          ? undefined
+                          : `Between ${feeEstimate.floorSatPerByte.toString()} and ${feeEstimate.ceilingSatPerByte.toString()} sat/byte on this network.`
+                      }
+                    />
+                    {customError && (
+                      <span
+                        role="alert"
+                        data-testid="live-fee-custom-error"
+                        style={{ fontSize: 11.5, color: 'var(--danger)', display: 'block', marginTop: 4 }}
+                      >
+                        {customError}
+                      </span>
+                    )}
+                  </div>
+                )}
+              </>
+            )}
+            <p
+              className="text-dim"
+              data-testid="live-send-fee-note"
+              style={{ fontSize: 11, margin: '8px 0 0', lineHeight: 1.5 }}
+            >
+              {feeNote}
+            </p>
+          </div>
 
           <div className="section-label">Asset</div>
           {/* Name over description in a shrinkable column so a long asset name
               (e.g. JACKDAWTOKEN.COM/WHITEPAPER) truncates cleanly instead of
               crushing the description into a 4-line sliver. */}
-          <div className="token-row" style={{ marginBottom: 6 }}>
+          {/* The card's own description already says what is being sent and in
+              which coin fees are paid — the old standalone sentence repeating
+              it below was deleted to keep the primary CTA above the fold. */}
+          <div className="token-row" style={{ marginBottom: 10 }}>
             <TokenIcon assetId={assetId} size={30} />
             <div style={{ minWidth: 0, marginLeft: 8, flex: 1 }}>
               <div
@@ -762,13 +1047,9 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
                   whiteSpace: 'nowrap',
                 }}
               >
-                {nativeTicker === 'RVN'
-                  ? isAsset
-                    ? 'Ravencoin asset · fee paid in RVN'
-                    : 'Ravencoin'
-                  : isAsset
-                  ? 'EVRmore asset · fee paid in EVR'
-                  : 'EVRmore'}
+                {isAsset
+                  ? `${activeNet.displayName} asset · fee paid in ${nativeTicker}`
+                  : activeNet.displayName}
               </div>
             </div>
           </div>
@@ -781,28 +1062,31 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
               Legacy SATORI. The Satori Network now uses SATORIEVR.
             </p>
           )}
-          <p className="text-dim" style={{ fontSize: 11.5, margin: '0 2px 14px', lineHeight: 1.5 }}>
-            {isAsset
-              ? `Sending ${assetId}. Network fees are always paid in ${nativeTicker}.`
-              : `Sending the native ${nativeTicker} coin.`}
-          </p>
+          </div>{/* /send-scroll */}
 
-          {noEvrForGas && (
-            <div className="banner danger" data-testid="no-evr-gas-banner" style={{ marginBottom: 10 }}>
-              <AlertTriangle size={14} />
-              You need {nativeTicker} to pay the network fee. You can&apos;t send assets while your {nativeTicker} balance is 0.
-            </div>
-          )}
+          {/* Pinned with the CTA (not inside the scroll region): the no-gas
+              banner is the reason the button below it is disabled, and a build
+              error is the outcome of pressing it — both must stay in view next
+              to the always-visible button, never scrolled below the fold. */}
+          <div className="send-cta">
+            {noEvrForGas && (
+              <div className="banner danger" data-testid="no-evr-gas-banner" style={{ marginBottom: 10 }}>
+                <AlertTriangle size={14} />
+                You need {nativeTicker} to pay the network fee. You can&apos;t send assets while your {nativeTicker} balance is 0.
+              </div>
+            )}
+            {/* Store/build errors (e.g. insufficient funds) show HERE only; field
+                validation errors render once, under the field they belong to. */}
+            {mappedStoreError && (
+              <div className="banner danger" data-testid="live-send-error" style={{ marginBottom: 10 }}>
+                {mappedStoreError}
+              </div>
+            )}
 
-          {displayFormError && (
-            <div className="banner danger" data-testid="live-send-error" style={{ marginBottom: 10 }}>
-              {displayFormError}
-            </div>
-          )}
-
-          <Button type="submit" block loading={loadingSend} disabled={noEvrForGas}>
-            Review transaction
-          </Button>
+            <Button type="submit" block loading={loadingSend} disabled={noEvrForGas}>
+              Review transaction
+            </Button>
+          </div>
         </form>
       </div>
       <LiveNav />

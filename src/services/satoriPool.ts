@@ -238,9 +238,39 @@ export function paginatePools(pools: PoolInfo[], page: number, pageSize: number 
 }
 
 /**
+ * The exact shape of a signable challenge: one bare UUID (8-4-4-4-12 hex),
+ * which is what the live server issues (verified against the Magic Flutter
+ * reference AND live via scripts/pool-api-probe.ts — see the header block).
+ *
+ * WHY SHAPE-VALIDATE INSTEAD OF SHOWING THE CHALLENGE TO THE USER: the staking
+ * flow signs this server-supplied string sight unseen, so a compromised or
+ * MITM'd server could substitute a message that MEANS something elsewhere
+ * (another service's login challenge, an "I authorize..." statement, a txid to
+ * confirm a withdrawal) and replay the signature there. A confirmation UI would
+ * not fix that: the legitimate challenge is an opaque machine nonce, so a user
+ * shown "2f1a…-…" has no basis to approve or reject it — the dialog would only
+ * train click-through. What a reviewing user WOULD catch is the challenge not
+ * looking like a nonce, and this regex checks exactly that, mechanically:
+ * nothing human-readable, nothing structured (SIWE-style multi-line prompts),
+ * and no bare hex payloads (a 64-char txid fails the fixed 8-4-4-4-12 layout)
+ * can ever reach the signer. Deliberately STRICT (fail closed): if the server
+ * ever changes its nonce format, staking fails loudly with a clear error and
+ * the fix is a reviewed edit here — never silently signing whatever arrives.
+ *
+ * Residual risk, stated honestly: another service whose challenges are ALSO
+ * bare UUIDs verified under the same Evrmore signmessage scheme cannot be
+ * distinguished by shape. Preventing that replay needs the SERVER to bind its
+ * challenges to itself (e.g. an audience/domain field); no wallet-side check
+ * on an unbound nonce can do it.
+ */
+const CHALLENGE_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
  * Fetch a fresh authentication challenge (a nonce to sign). Cache-busted with a
  * timestamp query param + no-store headers so each join/leave signs a unique
- * challenge (the server will not accept a replayed one).
+ * challenge (the server will not accept a replayed one). Refuses (throws) any
+ * challenge that is not nonce-shaped — see CHALLENGE_SHAPE for why this is the
+ * blind-signing defence.
  */
 export async function getChallenge(): Promise<string> {
   const url = `${SATORI_NETWORK_BASE}/api/v1/auth/challenge?t=${Date.now()}`;
@@ -255,6 +285,15 @@ export async function getChallenge(): Promise<string> {
   const challenge = (json as Record<string, unknown>)?.challenge;
   if (typeof challenge !== 'string' || !challenge) {
     throw new SatoriServerError('Getting challenge: no challenge in response.', res.status);
+  }
+  // Trust boundary: this is the ONLY place a challenge enters the wallet, and
+  // buildAuthHeaders (the only signer) takes its challenge exclusively from
+  // here, so validating once at this boundary covers every signing path.
+  if (!CHALLENGE_SHAPE.test(challenge)) {
+    throw new SatoriServerError(
+      'Getting challenge: the server sent a challenge that does not look like a nonce, so it was not signed.',
+      res.status,
+    );
   }
   return challenge;
 }
@@ -275,7 +314,11 @@ export async function getLenderStatus(address: string): Promise<LenderStatus> {
 
 /** Build the exact auth headers the server expects for a lend/unlend request:
  *  the compressed pubkey (hex), the challenge as the signed `message`, and its
- *  base64 recoverable signature. Signs with the shared Evrmore signmessage impl. */
+ *  base64 recoverable signature. Signs with the shared Evrmore signmessage impl.
+ *  INVARIANT: `challenge` must come from getChallenge(), which shape-validates
+ *  it (CHALLENGE_SHAPE) so an arbitrary foreign message can never be signed
+ *  blind here. A new caller sourcing a challenge from anywhere else must apply
+ *  the same validation before signing. */
 function buildAuthHeaders(challenge: string, key: PoolSigningKey): Record<string, string> {
   const compressed = key.compressed ?? true;
   const signature = signMessageWithKey(key.privateKey, challenge, compressed);

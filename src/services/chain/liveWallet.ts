@@ -12,14 +12,30 @@ import {
   EVRMORE_MAINNET,
   EVRMORE_TESTNET,
   RAVENCOIN_MAINNET,
+  BITCOINGOLD_MAINNET,
+  LITECOIN_MAINNET,
+  WOJAKCOIN_MAINNET,
+  BITCOIN_MAINNET,
+  DOGECOIN_MAINNET,
+  supportsAssets,
+  feePolicyFor,
   type EvrmoreNetwork,
 } from './chainParams';
+import {
+  FEE_OPTION_TARGET_BLOCKS,
+  assertFeeSane,
+  buildFeeEstimate,
+  clampFeeRate,
+  serverEstimateToSatPerByte,
+  type FeeEstimate,
+} from './feePolicy';
 import {
   deriveAddress,
   addressToElectrumScripthash,
   addressToHash160,
+  isSpendableAddress,
   isP2pkhAddress,
-  p2pkhScript,
+  addressToScript,
   generateMnemonic,
   validateMnemonic,
   mnemonicToSeed,
@@ -28,7 +44,7 @@ import {
   type DerivedKey,
 } from './keys';
 import { signMessageWithKey } from './message';
-import { verifyInputAmounts } from './verifyUtxo';
+import { verifyInputAmounts, parseTx } from './verifyUtxo';
 import { createVault, unlockVaultString, changeVaultPassword, type VaultRecord } from './vault';
 import {
   createElectrumClient,
@@ -41,6 +57,7 @@ import {
   buildAndSignEvrTx,
   buildAndSignAssetTransfer,
   estimateTxBytes,
+  estimateSpendVBytes,
   txid,
   type SignableUtxo,
   type BuiltTx,
@@ -53,7 +70,15 @@ import { bytesToHex } from '@noble/hashes/utils';
 // Stored per-wallet network id. 'mainnet'/'testnet' are the LEGACY Evrmore ids
 // (kept verbatim so existing wallet records still resolve to Evrmore); new
 // non-Evrmore chains use their canonical id, e.g. 'ravencoin-mainnet'.
-export type LiveNetworkId = 'mainnet' | 'testnet' | 'ravencoin-mainnet';
+export type LiveNetworkId =
+  | 'mainnet'
+  | 'testnet'
+  | 'ravencoin-mainnet'
+  | 'bitcoingold-mainnet'
+  | 'litecoin-mainnet'
+  | 'wojakcoin-mainnet'
+  | 'bitcoin-mainnet'
+  | 'dogecoin-mainnet';
 
 /** Legacy single-wallet record shape (storage key `liveWallet`). Retained only
  *  so the one-time migration can read a pre-multi-wallet install. */
@@ -100,6 +125,56 @@ export const MAX_RECEIVE_ADDRESSES = 20;
  *  no user secret. This is convenience, not protection — documented to the user. */
 const NO_PASSWORD = '';
 
+/**
+ * What a SEED wallet's vault decrypts to.
+ *
+ * BACKWARD COMPATIBILITY BY CONSTRUCTION, NOT BY MIGRATION. Every wallet ever
+ * written by an earlier build stored the bare mnemonic string, and a wallet with
+ * NO BIP39 passphrase still does, byte for byte. Only a wallet that actually has
+ * a passphrase is stored as this envelope. So there is no upgrade step that can
+ * fail, existing vaults are never rewritten, and an older build can still open
+ * every wallet it could open before.
+ *
+ * The discriminator is safe: a BIP39 mnemonic is wordlist words separated by
+ * spaces and a WIF is base58, so neither can ever begin with '{'.
+ *
+ * The one honest limit: a wallet imported WITH a passphrase cannot be read by an
+ * older build. That is not a regression, because an older build could not derive
+ * that wallet's addresses in the first place.
+ */
+interface SeedSecretEnvelope {
+  v: 1;
+  mnemonic: string;
+  /** BIP39 passphrase, the "25th word". Part of KEY DERIVATION, not a password. */
+  passphrase: string;
+}
+
+/** Vault payload for a seed wallet. Bare mnemonic when there is no passphrase. */
+export function encodeSeedSecret(mnemonic: string, passphrase: string): string {
+  if (!passphrase) return mnemonic;
+  const envelope: SeedSecretEnvelope = { v: 1, mnemonic, passphrase };
+  return JSON.stringify(envelope);
+}
+
+/** Inverse of encodeSeedSecret. Anything unrecognised is treated as a bare
+ *  mnemonic, so a malformed or future payload degrades to today's behaviour
+ *  instead of throwing on unlock and locking the user out of their wallet. */
+export function decodeSeedSecret(secret: string): { mnemonic: string; passphrase: string } {
+  if (!secret.startsWith('{')) return { mnemonic: secret, passphrase: '' };
+  try {
+    const parsed = JSON.parse(secret) as Partial<SeedSecretEnvelope>;
+    if (parsed && parsed.v === 1 && typeof parsed.mnemonic === 'string') {
+      return {
+        mnemonic: parsed.mnemonic,
+        passphrase: typeof parsed.passphrase === 'string' ? parsed.passphrase : '',
+      };
+    }
+  } catch {
+    // Not our envelope; fall through and treat the whole string as the mnemonic.
+  }
+  return { mnemonic: secret, passphrase: '' };
+}
+
 /** Persisted multi-wallet store (storage key `liveWallets`). */
 interface LiveWalletsStore {
   version: 1;
@@ -145,26 +220,43 @@ function genWalletId(existingIds: Set<string>): string {
   return id;
 }
 
-/** Default fee rate (sat/byte) when the server gives no estimate. Fees are only
- *  consumed at broadcast time, which is gated; exposed for tuning. */
-const DEFAULT_FEE_RATE_SAT_PER_BYTE = 10n;
+// SECURITY: fee rates come from an UNTRUSTED Electrum server (estimatefee), so
+// every rate is clamped into the ACTIVE chain's [floor, ceiling] policy band and
+// every built tx's absolute fee is independently capped by assertFeeSane — see
+// feePolicy.ts for the logic and chainParams.CHAIN_FEE_POLICIES for the measured
+// per-chain values. There is deliberately NO global fee constant here anymore:
+// the old single 1000 sat/byte ceiling clamped Evrmore's measured 1626 and
+// Ravencoin's 1041 estimate to EXACTLY their 1000 relay floor (zero headroom
+// against a relay-floor rise) while allowing a hostile server ~1000× Bitcoin's
+// real next-block rate. One number cannot serve six chains.
 
-// SECURITY: the fee rate comes from an untrusted Electrum server (estimatefee).
-// Without a ceiling, a hostile/MITM'd server could return an enormous rate so the
-// whole balance is consumed as the fee (change below dust is absorbed into it).
-// Real Evrmore fees are ~1–10 sat/byte, so cap the rate hard, AND independently
-// reject any built transaction whose absolute fee exceeds MAX_ABSOLUTE_FEE_SATS.
-const MAX_FEE_RATE_SAT_PER_BYTE = 1000n; // ~0.004 EVR for a typical tx — plenty
-const MAX_ABSOLUTE_FEE_SATS = 100_000_000n; // 1 EVR hard ceiling on any single tx fee
+/** Re-exported so UI/store code can type the estimateFeeOptions() result
+ *  without reaching into feePolicy.ts directly. */
+export type { FeeEstimate, FeeOption } from './feePolicy';
 
-/** Reject an implausibly large fee before it is ever broadcast (defence-in-depth
- *  against a malicious estimatefee even if the rate cap is bypassed). */
-function assertFeeSane(feeSats: bigint): void {
-  if (feeSats > MAX_ABSOLUTE_FEE_SATS) {
-    throw new Error(
-      `fee-too-high: ${feeSats} sats exceeds the ${MAX_ABSOLUTE_FEE_SATS}-sat safety ceiling ` +
-        `(possible hostile fee estimate)`,
-    );
+/** Optional fee knobs for the build/estimate methods. */
+export interface SendFeeOptions {
+  /** Chosen rate in sat/byte — e.g. an option picked from estimateFeeOptions().
+   *  ALWAYS re-clamped into the active chain's [floor, ceiling] policy band, so
+   *  a UI bug or poisoned store value can neither exceed the anti-drain ceiling
+   *  nor undercut the chain's relay floor. Omitted => the wallet probes the
+   *  server at the 6-block target as before. */
+  feeRateSatPerByte?: bigint;
+}
+
+/**
+ * The txid of a signed transaction, computed LOCALLY and defensively.
+ *
+ * Prefers the witness-free serialization, which is what a txid is defined over.
+ * If the bytes cannot be parsed for any reason this falls back to hashing them
+ * as-is: this runs on the broadcast path, where the transaction is already
+ * signed, so refusing to compute an id must never be what stops it being sent.
+ */
+function localTxidOf(rawHex: string): string {
+  try {
+    return txid(parseTx(rawHex).strippedHex);
+  } catch {
+    return txid(rawHex);
   }
 }
 
@@ -316,6 +408,16 @@ export class LiveWalletService {
         return EVRMORE_TESTNET;
       case 'ravencoin-mainnet':
         return RAVENCOIN_MAINNET;
+      case 'bitcoingold-mainnet':
+        return BITCOINGOLD_MAINNET;
+      case 'litecoin-mainnet':
+        return LITECOIN_MAINNET;
+      case 'wojakcoin-mainnet':
+        return WOJAKCOIN_MAINNET;
+      case 'bitcoin-mainnet':
+        return BITCOIN_MAINNET;
+      case 'dogecoin-mainnet':
+        return DOGECOIN_MAINNET;
       case 'mainnet':
       default:
         return EVRMORE_MAINNET;
@@ -367,16 +469,24 @@ export class LiveWalletService {
     return { mnemonic };
   }
 
-  /** Import an existing BIP39 mnemonic as a NEW wallet, make it active + unlock. */
+  /**
+   * Import an existing BIP39 mnemonic as a NEW wallet, make it active + unlock.
+   *
+   * `passphrase` is the BIP39 passphrase (the "25th word"), which is NOT the
+   * wallet password: it feeds the seed derivation, so a different passphrase is
+   * a different wallet with different addresses. Omitted/empty behaves exactly
+   * as before.
+   */
   async import(
     mnemonic: string,
     password: string,
     network: LiveNetworkId = 'mainnet',
     name?: string,
+    passphrase = '',
   ): Promise<void> {
     const trimmed = mnemonic.trim().replace(/\s+/g, ' ');
     if (!validateMnemonic(trimmed)) throw new Error('Invalid recovery phrase');
-    await this.addWallet(trimmed, password, network, name);
+    await this.addWallet(trimmed, password, network, name, passphrase);
   }
 
   /** Encrypt the mnemonic, append a seed-wallet entry, set it active and unlock it. */
@@ -385,11 +495,15 @@ export class LiveWalletService {
     password: string,
     network: LiveNetworkId,
     name?: string,
+    passphrase = '',
   ): Promise<void> {
     const store = await this.loadStore();
     const passwordless = password.length === 0;
-    const vault = await createVault(mnemonic, passwordless ? NO_PASSWORD : password);
-    const seed = await mnemonicToSeed(mnemonic);
+    const vault = await createVault(
+      encodeSeedSecret(mnemonic, passphrase),
+      passwordless ? NO_PASSWORD : password,
+    );
+    const seed = await mnemonicToSeed(mnemonic, passphrase);
     const net = this.netFor(network);
     const address = deriveAddress(seed, net, 0, 0, 0).address;
     const id = genWalletId(new Set(store.wallets.map((w) => w.id)));
@@ -414,6 +528,19 @@ export class LiveWalletService {
   ): Promise<void> {
     const { privateKey, compressed } = parsePrivateKey(privateKeyInput);
     const net = this.netFor(network);
+    // An uncompressed key cannot back a usable native-segwit wallet: the P2WPKH
+    // address built from it is unspendable under standard relay policy, and no
+    // other wallet derives that address, so accepting the import would strand
+    // anything sent to it. Refuse at the import boundary with a message the user
+    // can act on, rather than letting the address layer throw a byte-count error.
+    // Deliberately NOT silently compressing: the compressed key is a DIFFERENT
+    // address, so "helpfully" switching would show a funded-looking wallet that
+    // is not where this key's coins actually are.
+    if (!compressed && net.addressFormat === 'p2wpkh') {
+      throw new Error(
+        `This is an uncompressed private key. ${net.displayName} uses native segwit addresses, which require a compressed key.`,
+      );
+    }
     const derived = privateKeyToDerived(privateKey, net, compressed);
     const store = await this.loadStore();
     const passwordless = password.length === 0;
@@ -455,7 +582,10 @@ export class LiveWalletService {
       this.setActivePk(privateKey, compressed);
       address = privateKeyToDerived(privateKey, this.net, compressed).address;
     } else {
-      const seed = await mnemonicToSeed(secret);
+      // A pre-passphrase vault decodes to itself, so this is a no-op for every
+      // wallet that already existed.
+      const { mnemonic, passphrase } = decodeSeedSecret(secret);
+      const seed = await mnemonicToSeed(mnemonic, passphrase);
       this.setActiveSeed(seed);
       address = deriveAddress(seed, this.net, 0, 0, 0).address;
     }
@@ -587,12 +717,32 @@ export class LiveWalletService {
    *  or null on a wrong password. Returns null for a pk-wallet (which has NO
    *  recovery phrase — only a private key). Does not alter session state. */
   async revealMnemonic(password: string): Promise<string | null> {
+    const secret = await this.revealSeedSecret(password);
+    // The WORDS only: a caller showing this to the user must never be handed the
+    // envelope, and the passphrase is revealed separately and deliberately.
+    return secret ? secret.mnemonic : null;
+  }
+
+  /**
+   * Verify `password`, then return the ACTIVE seed wallet's mnemonic AND its
+   * BIP39 passphrase. Used where the secret is re-imported rather than displayed
+   * (enableChain deriving the same wallet on another chain): dropping the
+   * passphrase there would silently produce a DIFFERENT wallet at a different
+   * address, which is the whole trap this pair exists to avoid.
+   */
+  async revealSeedSecret(
+    password: string,
+  ): Promise<{ mnemonic: string; passphrase: string } | null> {
     const store = await this.loadStore();
     const entry = this.activeEntry(store);
     if (!entry) return null;
     if (entry.kind === 'pk') return null; // pk-wallets have no seed phrase
     try {
-      return await unlockVaultString(entry.vault, entry.passwordless ? NO_PASSWORD : password);
+      const raw = await unlockVaultString(
+        entry.vault,
+        entry.passwordless ? NO_PASSWORD : password,
+      );
+      return decodeSeedSecret(raw);
     } catch {
       return null;
     }
@@ -738,22 +888,70 @@ export class LiveWalletService {
 
   // --- sending (build+sign; broadcast gated) -------------------------------
 
-  private async feeRate(): Promise<bigint> {
+  /**
+   * Effective fee rate (sat/byte) for the ACTIVE chain, policy-clamped.
+   *
+   * `overrideSatPerByte` (the UI's pick from estimateFeeOptions()) skips the
+   * server probe but is clamped IDENTICALLY — no caller-supplied value escapes
+   * the chain's [floor, ceiling] band. Otherwise the untrusted server is probed
+   * at the 6-block target and its answer clamped; a missing/broken/-1 estimate
+   * degrades to the chain's defaultSatPerByte, which the policy tests pin
+   * inside the band and above the chain's relay floor (the old global default
+   * of 10 sat/byte sat BELOW Evrmore/Ravencoin's measured 1000 relay floor, so
+   * a fallback-fee tx there could never have relayed).
+   */
+  private async feeRate(overrideSatPerByte?: bigint): Promise<bigint> {
+    const policy = feePolicyFor(this.net);
+    if (overrideSatPerByte !== undefined) return clampFeeRate(overrideSatPerByte, policy);
     try {
-      const evrPerKb = await this.client.request<number>(ELECTRUM_METHODS.estimateFee, [6]);
-      if (typeof evrPerKb === 'number' && evrPerKb > 0) {
-        const satPerByte = BigInt(Math.max(1, Math.ceil((evrPerKb * 1e8) / 1000)));
-        // Clamp the untrusted server rate to a sane ceiling (anti-drain).
-        return satPerByte > MAX_FEE_RATE_SAT_PER_BYTE ? MAX_FEE_RATE_SAT_PER_BYTE : satPerByte;
-      }
+      const coinPerKb = await this.client.request<number>(ELECTRUM_METHODS.estimateFee, [6]);
+      const satPerByte = serverEstimateToSatPerByte(coinPerKb);
+      if (satPerByte !== null) return clampFeeRate(satPerByte, policy);
     } catch {
-      /* fall through to default */
+      /* fall through to the chain default */
     }
-    return DEFAULT_FEE_RATE_SAT_PER_BYTE;
+    return policy.defaultSatPerByte;
+  }
+
+  /**
+   * Fee OPTIONS for the ACTIVE chain — the UI's data source for a fee-speed
+   * picker. Probes the server at FEE_OPTION_TARGET_BLOCKS (2/6/25: fast,
+   * normal, slow) and returns each target's effective, policy-clamped rate plus
+   * the chain's floor/ceiling/default for display.
+   *
+   * `differentiated` tells the UI whether a speed choice is REAL: measured
+   * 2026-08-14, five of the six chains answer one flat number for every target
+   * (only Bitcoin returns a curve), so rendering fast/normal/slow there would
+   * offer three identical options. Only offer a picker when it is true; when
+   * false, any option (or the chain default) is THE rate. A chosen option's
+   * satPerByte is applied by passing it as SendFeeOptions.feeRateSatPerByte to
+   * buildEvrSend / buildAssetSend / estimateMaxEvr (it is re-clamped there).
+   *
+   * NEVER throws: a target whose probe errors or answers -1 degrades to the
+   * chain default (marked estimated:false), and a hostile rate is ceiling-
+   * clamped, so the UI always gets a usable, bounded set of rates.
+   */
+  async estimateFeeOptions(): Promise<FeeEstimate> {
+    const policy = feePolicyFor(this.net);
+    const ratesByTarget = await Promise.all(
+      FEE_OPTION_TARGET_BLOCKS.map(async (target): Promise<bigint | null> => {
+        try {
+          const coinPerKb = await this.client.request<number>(ELECTRUM_METHODS.estimateFee, [target]);
+          return serverEstimateToSatPerByte(coinPerKb);
+        } catch {
+          return null; // this target degrades to the chain default
+        }
+      }),
+    );
+    return buildFeeEstimate(this.net.chainId, policy, ratesByTarget);
   }
 
   private toSignable(utxos: ElectrumUtxo[], key: DerivedKey): SignableUtxo[] {
-    const scriptPubKeyHex = bytesToHex(p2pkhScript(addressToHash160(key.address).hash));
+    // The prevout script must match the address's ACTUAL type: a native-segwit
+    // wallet's own addresses are bech32, which addressToHash160 cannot decode at
+    // all. addressToScript handles both, and the builder routes each input to
+    // legacy or BIP143 signing based on exactly these bytes.
+    const scriptPubKeyHex = bytesToHex(addressToScript(key.address));
     return utxos.map((u) => {
       // Harden against untrusted server data: a float or out-of-safe-range value
       // would throw or silently lose precision before reaching the fee/change
@@ -787,15 +985,16 @@ export class LiveWalletService {
 
   /** Build + sign an EVR payment spending from ALL the wallet's addresses.
    *  Change returns to the primary (index-0) address. Does NOT broadcast. */
-  async buildEvrSend(toAddress: string, amountSats: bigint): Promise<LiveSendPlan> {
+  async buildEvrSend(toAddress: string, amountSats: bigint, opts?: SendFeeOptions): Promise<LiveSendPlan> {
     if (amountSats <= 0n) throw new Error('invalid-amount');
-    // The builder only emits P2PKH outputs — reject any non-P2PKH / wrong-network
-    // recipient (isValidAddress also passes P2SH), else funds would be unspendable.
-    if (!isP2pkhAddress(toAddress, this.net)) throw new Error('unsupported-address-type');
+    // Reject any recipient the builder cannot pay to: P2PKH on every chain, plus
+    // native segwit where the chain has it. isValidAddress also passes P2SH (and
+    // P2WSH/taproot on a segwit chain), which would make the funds unspendable.
+    if (!isSpendableAddress(toAddress, this.net)) throw new Error('unsupported-address-type');
     const keys = await this.allKeys();
     const key = keys[0];
     const signable = await this.gatherEvrUtxos(keys);
-    const feeRate = await this.feeRate();
+    const feeRate = await this.feeRate(opts?.feeRateSatPerByte);
     const selection = selectCoins(signable, amountSats, feeRate);
     if ('error' in selection) throw new Error('insufficient-funds');
     // Trustlessly verify the selected inputs' amounts (legacy sighash doesn't
@@ -815,22 +1014,28 @@ export class LiveWalletService {
       outputs: [{ address: toAddress, valueSats: amountSats }],
       changeAddress: key.address,
       feeSats: selection.feeSats,
+      // Lets the builder assert a segwit input never appears on a legacy chain.
+      net: this.net,
     });
-    assertFeeSane(built.feeSats);
+    assertFeeSane(built.feeSats, feePolicyFor(this.net));
     return { built, toAddress, amountSats, feeSats: built.feeSats };
   }
 
   /** Max EVR that can be SENT = (all EVR UTXOs) − network fee to spend them all
    *  into a single output (no change). Returns the sendable amount and that fee,
    *  both in sats. Used by the "Max" button so the user can empty the wallet. */
-  async estimateMaxEvr(): Promise<{ maxSats: bigint; feeSats: bigint; totalSats: bigint }> {
+  async estimateMaxEvr(opts?: SendFeeOptions): Promise<{ maxSats: bigint; feeSats: bigint; totalSats: bigint }> {
     const keys = await this.allKeys();
     const signable = await this.gatherEvrUtxos(keys);
     const totalSats = signable.reduce((acc, u) => acc + u.valueSats, 0n);
     if (totalSats === 0n || signable.length === 0) return { maxSats: 0n, feeSats: 0n, totalSats: 0n };
-    const feeRate = await this.feeRate();
+    const feeRate = await this.feeRate(opts?.feeRateSatPerByte);
     // Fee for a tx spending every UTXO into ONE recipient output (no change).
-    const feeSats = feeRate * BigInt(estimateTxBytes(signable.length, 1));
+    // Size from the ACTUAL utxos, not from their count: estimateTxBytes prices
+    // every input as legacy p2pkh (148 vB), while a segwit input really costs
+    // about 68. On a Max send the fee IS the remainder, so an over-estimate is
+    // not a harmless safety margin, it is burnt to miners instead of being sent.
+    const feeSats = feeRate * BigInt(estimateSpendVBytes(signable, 1));
     const maxSats = totalSats > feeSats ? totalSats - feeSats : 0n;
     return { maxSats, feeSats, totalSats };
   }
@@ -846,9 +1051,18 @@ export class LiveWalletService {
    * buildTransferAssetScriptFromHash160 — verified byte-for-byte against real
    * on-chain asset UTXOs (SATORIEVR/SATORI/CHUPPA_CHUB). EVR inputs pay the fee.
    */
-  async buildAssetSend(toAddress: string, assetName: string, amountSats: bigint): Promise<LiveSendPlan> {
+  async buildAssetSend(
+    toAddress: string,
+    assetName: string,
+    amountSats: bigint,
+    opts?: SendFeeOptions,
+  ): Promise<LiveSendPlan> {
     const name = assetName.trim().toUpperCase();
     if (amountSats <= 0n) throw new Error('invalid-amount');
+    // Asset transfers only exist on Ravencoin-family chains. On a plain chain
+    // (no OP_x_ASSET) this path must never build anything: fail loudly here
+    // rather than emit a script that chain's consensus does not understand.
+    if (!supportsAssets(this.net)) throw new Error('assets-not-supported');
     // Asset transfer scripts embed a P2PKH recipient — reject non-P2PKH / wrong
     // network so the asset can't be sent to an output the recipient can't spend.
     if (!isP2pkhAddress(toAddress, this.net)) throw new Error('unsupported-address-type');
@@ -906,7 +1120,7 @@ export class LiveWalletService {
     // EVR inputs (from all addresses) pay the fee. Grow the selection until EVR
     // covers the (fee-rate × size) estimate, padding for the asset-script outputs.
     const evrSignable = await this.gatherEvrUtxos(keys);
-    const feeRate = await this.feeRate();
+    const feeRate = await this.feeRate(opts?.feeRateSatPerByte);
     const numAssetOuts = assetChangeSats > 0n ? 2 : 1;
     const evrInputs: SignableUtxo[] = [];
     let evrAcc = 0n;
@@ -962,7 +1176,7 @@ export class LiveWalletService {
       assetMarkerPrefix: this.net.assetMarkerPrefix,
     });
 
-    assertFeeSane(built.feeSats);
+    assertFeeSane(built.feeSats, feePolicyFor(this.net));
     return { built, toAddress, amountSats, feeSats: built.feeSats, assetName: name, assetDecimals: meta.decimals };
   }
 
@@ -994,9 +1208,20 @@ export class LiveWalletService {
    *  it shows up, the send worked — return success. If it never appears,
    *  throw the 'broadcast-unconfirmed' error code so the caller can tell the
    *  user nothing was sent and it's safe to retry. */
-  async broadcast(rawHex: string): Promise<string> {
+  async broadcast(rawHex: string, knownTxid?: string): Promise<string> {
     if (!this.allowBroadcast) throw new BroadcastGatedError();
-    const expectedTxid = txid(rawHex); // computed locally, before broadcast
+    // A txid is the hash of the WITNESS-FREE serialization. `rawHex` is what we
+    // broadcast, which for a segwit spend INCLUDES the witness, so hashing it
+    // here yields the wtxid. Polling for that after an ambiguous broadcast could
+    // never find the transaction, so a send that actually landed was reported as
+    // "nothing was sent, safe to try again" on every segwit chain, inviting a
+    // second real payment.
+    //
+    // Callers holding a built plan pass its txid, which the builder already
+    // computed over the stripped form. Otherwise derive it, but NEVER let that
+    // derivation fail the send: the transaction is signed and about to go out,
+    // so a parse problem must degrade to the raw hash, not throw.
+    const expectedTxid = knownTxid ?? localTxidOf(rawHex); // local, pre-broadcast
     try {
       return await this.client.request<string>(ELECTRUM_METHODS.txBroadcast, [rawHex]);
     } catch (err) {
