@@ -38,7 +38,7 @@ of them has been, by the owner's own testing rather than by an automated run.
 | Dogecoin | DOGE | legacy | no | **confirmed** | [dogecoin.com](https://dogecoin.com) |
 | Evrmore | EVR | legacy | yes | **confirmed** | [evrmore.com](https://evrmore.com) |
 | Ravencoin | RVN | legacy | yes | **confirmed** | [ravencoin.org](https://ravencoin.org) |
-| Bitcoin Gold S | BTGS | native segwit | no | **confirmed** | [bitcoingold.site](https://bitcoingold.site) |
+| BitcoinGold | BTGS | native segwit | no | **confirmed** | [bitcoingold.site](https://bitcoingold.site) |
 | WojakCoin | WJK | legacy | no | **confirmed** | [wojakcoin.cash](https://wojakcoin.cash) |
 
 Bitcoin Gold S is a new Bitcoin Core fork and is **not** the 2017 Bitcoin Gold
