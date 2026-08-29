@@ -1,16 +1,17 @@
 {
   "name": "satori-go-wallet",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "private": true,
   "license": "MIT",
   "description": "EVRmore + SATORI browser wallet for the Satori Network (real network).",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "node scripts/build.mjs --target=all",
-    "build:chrome": "node scripts/build.mjs --target=chrome",
-    "build:edge": "node scripts/build.mjs --target=edge",
-    "build:firefox": "node scripts/build.mjs --target=firefox",
+    "build": "node scripts/build.mjs --target=all --evm --package",
+    "build:chrome": "node scripts/build.mjs --target=chrome --evm --package",
+    "build:edge": "node scripts/build.mjs --target=edge --evm --package",
+    "build:firefox": "node scripts/build.mjs --target=firefox --evm --package",
+    "build:evm": "node scripts/build.mjs --target=chrome --evm",
     "preview": "vite preview --port 4173 --strictPort",
     "test": "vitest run",
     "lint": "eslint .",
@@ -21,7 +22,9 @@
     "package:edge": "node scripts/package.mjs --target=edge",
     "package:firefox": "node scripts/package.mjs --target=firefox",
     "qa:live": "node scripts/live-extension-smoke.mjs",
-    "qa:dapp": "node scripts/dapp-smoke.mjs"
+    "qa:dapp": "node scripts/dapp-smoke.mjs",
+    "qa:evm": "node scripts/evm-extension-smoke.mjs",
+    "check:dist": "node scripts/check-dist.mjs"
   },
   "dependencies": {
     "@fontsource-variable/inter": "^5.2.8",

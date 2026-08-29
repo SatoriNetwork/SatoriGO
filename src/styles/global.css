@@ -117,6 +117,20 @@ h1, h2, h3, h4 { font-weight: 650; }
   --font-hero: 32px;
   --dur: 0.18s;
   --ease: cubic-bezier(0.3, 0.7, 0.3, 1);
+  /* ONE type + rhythm scale for the surface and its asset list, so a density
+     change moves the base size, the token symbol, the amount, the secondary
+     fiat value and the 24h chip TOGETHER instead of drifting apart one
+     override at a time. These are the roomy values (the side panel, the
+     detached window, a popup holding a couple of tokens); `.home-tight`
+     further down is the only thing that redefines them, and the token mark
+     beside them is a prop (see LiveHome's BalanceRow) because TokenIcon sizes
+     its frame inline. */
+  --ui-font: 14px;
+  --token-font: 13px;
+  --token-meta: 11px;
+  --token-row-pad: 7px;
+  --token-row-gap: 6px;
+  --token-row-x: 10px;
 }
 :root[data-compact='true'] {
   --r-lg: 10px;
@@ -151,7 +165,7 @@ body {
   background: var(--bg);
   color: var(--text);
   font-family: 'Inter Variable', 'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
-  font-size: 14px;
+  font-size: var(--ui-font);
   line-height: 1.45;
   -webkit-font-smoothing: antialiased;
 }
@@ -168,6 +182,17 @@ body {
 :root[data-detached] body { width: 100%; height: 100%; min-height: 100vh; }
 :root[data-detached] #root { min-height: 100vh; }
 :root[data-detached] .app-frame { max-width: 400px; margin: 0 auto; }
+
+/* Side panel (services/sidePanel.ts, EXPERIMENTAL): main.tsx stamps data-panel
+   on <html> for index.html?panel=1. The browser owns the panel's size (the user
+   drags its width; the height is the window's), so the fixed popup box must
+   not apply: the canvas follows the panel, the column fills its width up to a
+   readable cap and centres beyond it, and a narrow panel is allowed down to
+   320px instead of forcing a horizontal scrollbar at 400. */
+:root[data-panel] { width: 100%; height: 100%; }
+:root[data-panel] body { width: 100%; height: 100%; min-width: 320px; min-height: 100vh; }
+:root[data-panel] #root { min-height: 100vh; }
+:root[data-panel] .app-frame { max-width: 480px; margin: 0 auto; }
 
 /* Ambient glow, copied from the neuron's own `body::before` / `body::after`:
    an INDIGO ellipse top-left and a VIOLET one top-right, heavily blurred, bleeding
@@ -246,20 +271,31 @@ body {
    stops scrolling and becomes a flex column; the .home-scroll child takes the
    leftover height and scrolls its overflow (rows + footer) with the same thin
    scrollbar the panel already uses. Pinned children keep their natural height
-   (default min-height:auto); .home-scroll gets min-height:0 so it absorbs all
-   the shrinkage instead of squeezing the pinned block. */
+   (default min-height:auto); .home-scroll shrinks first, down to a floor, so it
+   absorbs the shrinkage instead of squeezing the pinned block.
+
+   THE FLOOR AND THE FALLBACK SCROLL (2026-08-25). The split's one weak point is
+   that a pinned block taller than the panel is CLIPPED, not scrolled, and a
+   notice carrying a picture on top of the coin mark, the balance and the two
+   actions is the first thing that ever got near that in the fixed 600px popup.
+   With `min-height: 0` the list was squeezed to nothing first and the Assets
+   header (and its "Add token") went out of reach with it. So the region keeps a
+   floor of one row, and the panel falls back to scrolling instead of clipping.
+   Both are inert whenever the block fits, which is the normal case: the panel
+   has nothing to scroll and the list is far taller than its floor. What they
+   buy is that nothing on this screen can become unreachable, whatever the owner
+   publishes. */
 .app-content.home-pinned {
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 .app-content.home-pinned .home-scroll {
   flex: 1 1 auto;
-  min-height: 0;
+  min-height: 64px;
   overflow-y: auto;
   overflow-x: hidden;
-  scrollbar-width: thin;
-  scrollbar-color: var(--border-strong) transparent;
 }
 /* A chain with no asset protocol has nothing to list here, so the only child is
    the footer. Left alone it would sit at the top of the leftover space with a
@@ -269,8 +305,247 @@ body {
   flex-direction: column;
   justify-content: flex-end;
 }
-.app-content.home-pinned .home-scroll::-webkit-scrollbar { width: 6px; }
-.app-content.home-pinned .home-scroll::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 3px; }
+/* The asset list's scrollbar is a REAL one, not the browser's overlay (owner,
+   live testing 2026-08-25: "in the popup there is no scrollbar and no hint that
+   content continues below"). Two separate defects were behind that:
+
+   1. `scrollbar-width: thin` + `scrollbar-color` (what this region used to
+      declare) is the STANDARD styling path, and in Chromium a standard-styled
+      scrollbar is an OVERLAY: it takes no layout width, and it fades out a
+      moment after the scroll stops. In a toolbar popup, which nobody drags a
+      pointer across idly, that means no scrollbar at all in practice. Setting
+      EITHER standard property also makes Chromium ignore the ::-webkit-scrollbar
+      rules underneath, so the 6px thumb below never applied.
+   2. The thumb colour was --border-strong: white at 20% alpha over a #0d0d0d
+      background, which is very nearly invisible even when it is painted.
+
+   So the standard properties move to the @supports block below, where only a
+   browser WITHOUT ::-webkit-scrollbar (Firefox) picks them up, and Chromium
+   gets these: a classic, always-present 8px track carrying a 4px accent thumb
+   (2px of transparent border clipped to the padding box is what slims it while
+   keeping the full 8px as the grab target). It appears only when the region
+   actually overflows, because that is when a classic scrollbar exists at all.
+
+   Scoped to .home-scroll deliberately. The other scroll regions (.app-content,
+   .send-scroll, .lock-wallets) keep the quiet overlay scrollbar they have. */
+.app-content.home-pinned .home-scroll::-webkit-scrollbar { width: 8px; }
+.app-content.home-pinned .home-scroll::-webkit-scrollbar-track { background: transparent; }
+.app-content.home-pinned .home-scroll::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--accent) 55%, transparent);
+  background-clip: padding-box;
+  border: 2px solid transparent;
+  border-radius: var(--r-pill);
+}
+.app-content.home-pinned .home-scroll::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--accent) 85%, transparent);
+  background-clip: padding-box;
+}
+@supports not selector(::-webkit-scrollbar) {
+  .app-content.home-pinned .home-scroll {
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in srgb, var(--accent) 55%, transparent) transparent;
+  }
+}
+
+/* The picture an owner-authored notice can carry, above its title and body
+   (components/NotificationBanner.tsx). Authored at 120px, which is right in the
+   side panel and the detached window.
+
+   The TOOLBAR POPUP is a different problem: it is a fixed 600px box, its home
+   screen already spends nearly all of that on the coin mark, the balance and
+   the two primary actions, and the column those sit in is PINNED (only
+   .home-scroll scrolls). So a 120px picture on top of them did not push the
+   screen into a scroll, it pushed Send and Receive under the bottom nav, where
+   they were clipped and unreachable. In a short viewport the picture is what
+   gives way; object-fit: cover means it crops rather than distorts. 640px sits
+   just above the popup's own 600px canvas and well below any real side panel or
+   detached window. */
+.live-notification-image {
+  display: block;
+  width: 100%;
+  max-height: 120px;
+  object-fit: cover;
+  border-radius: var(--r-sm);
+}
+@media (max-height: 640px) {
+  .live-notification-image { max-height: 72px; }
+}
+
+/* "There is more below": the chevron half of the same affordance (the other
+   half is the scrollbar above). See src/components/ScrollMoreCue.tsx for what
+   drives it. Absolutely positioned against .app-content, whose padding box it
+   is anchored to, which lands it in the screen's own bottom padding band:
+   UNDER the last row, never over it. pointer-events: none on top of that, so
+   even at the moment the list scrolls past it, it cannot take a tap meant for
+   a row. Hidden outright (not just transparent) when there is nothing below,
+   so it is out of the accessibility tree and out of a screenshot both. */
+.scroll-more-cue {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 16px;
+  pointer-events: none;
+  color: var(--accent-text);
+  opacity: 0.85;
+  transition: opacity var(--dur) var(--ease);
+}
+.scroll-more-cue[data-more='false'] {
+  opacity: 0;
+  visibility: hidden;
+}
+
+/* Home CENTRING, on a chain that HAS a token list (owner, 2026-08-24: in the
+   side panel, which is a whole browser window tall, a wallet holding one or two
+   tokens left a large dead zone under the list; "move the whole thing to the
+   centre, and as tokens are added it should move up, like on bitcoin").
+   Pure flex auto margins: no measuring, no resize listener, no JS at all.
+
+   The pinned column's leftover height is split EQUALLY between the two auto
+   margins below, so the block between them (hero + Send/Receive/Stake + the
+   Assets label + the list + the footer that rides at its end) sits dead centre
+   of the space under the status row. Each token added eats free space, so the
+   block rises on its own; the moment the content outgrows the panel the free
+   space turns negative, flexbox resolves BOTH auto margins to zero, and the
+   layout is exactly what it was before this rule existed: the hero pinned at
+   the top and .home-scroll taking the leftover height and scrolling its rows
+   from the top. That collapse is what makes the pattern safe, unlike
+   `justify-content: center`, which would push the top of the content out of
+   reach once it overflows.
+
+   `flex: 0 1 auto` (instead of the `flex: 1 1 auto` above) is the other half of
+   it: with `flex: 1` the scroll region GREW into all the leftover height, so
+   there was no free space left for any margin to take, the block stayed pinned
+   to the top and the dead zone sat inside the list. It still shrinks first
+   (min-height: 0), so the overflow behaviour is unchanged.
+
+   Scoped by .home-centered, which LiveHome adds only on a chain with an asset
+   list. A chain without one keeps .home-roomy (further down): there
+   .home-hero-wrap GROWS and centres its own content and the footer stays at
+   the bottom, and since a grow factor consumes the free space before alignment
+   runs, these two rules would be no-ops there anyway. */
+.app-content.home-pinned.home-centered .home-hero-wrap { margin-top: auto; }
+.app-content.home-pinned.home-centered .home-scroll {
+  flex: 0 1 auto;
+  margin-bottom: auto;
+}
+
+/* HOME, COMPACT: the hero gives its height to the LIST (owner, live testing
+   2026-08-25: "you can see only one token and have to scroll it, it looks very
+   bad when someone has a lot of tokens").
+
+   Measured in the fixed 400x600 toolbar popup with eight tokens, before this
+   block existed: 394px of screen under the header, of which the status row took
+   26, the hero 176, Send/Receive 94 and the Assets label 15. That is 311, so
+   the asset list was pinned at its 64px floor and exactly ONE 42px row was
+   visible while the panel itself scrolled.
+
+   Every declaration below buys list height back, and each is a proportion
+   change rather than a removal: nothing on the screen disappears, the coin mark
+   is still the coin mark (40px, set in LiveHome beside the class), the balance
+   is still the largest thing on the screen, and Send/Receive/Stake keep their
+   labels and their circles.
+
+   `home-tight` is added ONLY when the viewport is short AND the list is at
+   least TIGHT_LIST_ROWS long (LiveHome + shortViewport.ts, which owns the
+   breakpoint). A side panel, a detached window, or a popup showing one or two
+   tokens never sees any of it, so yesterday's roomy centred hero is untouched
+   where it was asked for. */
+/* THE DENSITY (owner, 2026-08-25, from measured options: the popup is capped
+   at 600px by the browser, so height cannot grow and extra width buys no rows;
+   the answer is 400x600 with a denser list, target about six rows visible).
+
+   Redefining the :root scale HERE is what makes that one decision instead of a
+   dozen: the base size, the token symbol, the amount, the fiat value, the 24h
+   chip and the row rhythm all move together, and nothing outside this
+   container sees any of it, so the side panel and the detached window keep the
+   roomier look they were asked for.
+
+   10px is the floor and nothing user-facing on this screen goes under it. The
+   hero balance is deliberately NOT in the scale: it stays 21px, comfortably the
+   largest thing on the screen, because that is the number the screen is for. */
+.app-content.home-pinned.home-tight {
+  font-size: var(--ui-font);
+  --ui-font: 13px;
+  --token-font: 12px;
+  --token-meta: 10.5px;
+  --token-row-pad: 4px;
+  --token-row-gap: 5px;
+  --token-row-x: 8px;
+}
+/* The hero's own trailing padding is gone: the actions row below it carries no
+   top padding either, so the two are separated by the action circles' own
+   breathing room rather than by a band of nothing. */
+.app-content.home-pinned.home-tight .hero { padding: 0; }
+.live-scope .home-tight .hero-value { font-size: 21px; }
+.app-content.home-pinned.home-tight .hero .hero-value { margin-top: 0; line-height: 1.1; }
+.app-content.home-pinned.home-tight .hero-mark { margin-bottom: 2px; }
+/* The gap over the "Total balance" line is an INLINE style in LiveHome (a
+   stylesheet rule here lost to it silently and bought nothing for two
+   releases), so the compact value lives beside the roomy one there. */
+/* The "ETH BALANCE" micro-label, and ONLY that one: the DIRECT child of .hero.
+   The value under it already ends in the ticker and the coin's own mark sits
+   above it, so on a screen this tight the label is a 16px restatement of two
+   things already on screen. The "Total balance" label beside the USD figure is
+   nested one level deeper and is untouched, because that line has no other way
+   of saying what it is. */
+.app-content.home-pinned.home-tight .hero > .hero-label { display: none; }
+.app-content.home-pinned.home-tight .actions-row { padding: 0; gap: 26px; }
+.app-content.home-pinned.home-tight .action-round { gap: 3px; font-size: 11px; }
+.app-content.home-pinned.home-tight .action-round .action-circle { width: 36px; height: 36px; }
+/* The Assets label sits between the actions and the list; 16px of top margin is
+   a break the compact screen cannot pay for. */
+.app-content.home-pinned.home-tight .section-label { margin: 2px 4px 2px; font-size: 10px; }
+/* The branding footer rides at the END of the scroll region, so its 18px of top
+   padding is 18px the rows above it do not get on the first screenful. */
+.app-content.home-pinned.home-tight .home-scroll > .text-faint { padding-top: 8px; }
+
+/* THE CHROME AROUND IT (owner, 2026-08-25: "jak nie ma zadnych notification z
+   naszej bramki to mozemy calosc jeszcze przesunac wyzej i bedzie wiecej
+   miejsca na liste z tokenami"). The banner already reserves nothing when it is
+   absent (it renders null), so what pushed the list down was the FIXED chrome
+   above and below it: the header, the screen's own padding and the tab bar.
+   `home-tight` cannot reach any of them: it sits on .app-content, and the
+   header and the nav are its SIBLINGS. So LiveHome stamps `frame-tight` on
+   .app-frame under exactly the same condition (short viewport + a list long
+   enough to matter). One state, two scopes.
+
+   Measured in the 400x600 popup with 24 tokens before this block existed:
+   header 69.8px (52.8 of content, 17 of padding and row gap), the address line
+   alone 22.8px for a 12.5px string, .app-content 16px of padding above the
+   status row on top of the header's own 6, and a 58.2px tab bar. Nothing below
+   removes a control, a label or a glyph: every number here is padding, a row
+   gap or a line box, and the type, the coin mark and the touch targets are
+   untouched. A tall viewport never sees the class, so the side panel and the
+   detached window keep the roomy chrome exactly as they had it. */
+.app-frame.frame-tight .app-header { padding-top: 7px; padding-bottom: 4px; row-gap: 0; }
+/* 1.5 line-height on a 12.5px monospace string is 19px of box for 13px of text.
+   1.25 still clears the glyphs and keeps the whole line as the copy target. */
+.app-frame.frame-tight .wallet-address { padding-top: 1px; padding-bottom: 1px; line-height: 1.25; }
+/* The gap under the address line: the header already ends in 4px of its own, so
+   16 more before the block pill was the largest single band of nothing on the
+   screen. The BOTTOM padding stays 16: .scroll-more-cue is anchored to it and
+   is 16px tall, so taking it would put the chevron over the last row. */
+.app-frame.frame-tight .app-content { padding-top: 6px; }
+/* The tab bar. Its labels, its 19px icons and its selected states are all
+   unchanged; what goes is 6px of padding around them. */
+.app-frame.frame-tight .bottom-nav { padding-top: 3px; padding-bottom: calc(5px + env(safe-area-inset-bottom, 0px)); }
+.app-frame.frame-tight .nav-item { padding: 5px 0 2px; }
+
+/* ...EXCEPT while an owner-authored notice is on screen (owner, live testing
+   2026-08-25: "too much space between the banner and the coin"). The notice is
+   top-anchored above the centred block, so the block was then centring in ALL
+   the height LEFT UNDER IT, and on a short list that put half the leftover
+   space between the notice and the coin mark. LiveHome adds `has-notice` while
+   the banner is rendered; dropping the TOP auto margin makes the hero hug the
+   notice, and the bottom auto margin is untouched, so it still absorbs every
+   bit of the slack. With no notice the class is absent and yesterday's
+   behaviour is byte-for-byte what it was: dead-centred when short, both
+   margins collapsed and top-anchored the moment it overflows. */
+.app-content.home-pinned.home-centered.has-notice .home-hero-wrap { margin-top: 0; }
 
 /* Send form only: the primary CTA must never slide under the bottom nav. The
    nav is an IN-FLOW flex sibling of .app-content (not an overlay), so padding
@@ -397,18 +672,37 @@ body {
 .text-success { color: var(--success); }
 
 /* ----- Header ------------------------------------------------------------ */
+/* MetaMask's order: the network pill on the LEFT, the wallet as the centre
+   piece, the icon actions on the RIGHT. Sized for a side panel the user can
+   drag from 320px up: the two side slots keep their intrinsic width and the
+   centre slot takes whatever is left and ellipsises inside it, so the three
+   can never collide however narrow the panel gets. */
+/* The Home header is a GRID: row 1 holds the three controls (chain pill, wallet
+   switcher, icon buttons) at ONE height, vertically centred on one line; row 2
+   is the address, centred under the name and spanning the row. One baseline
+   for the controls and the address in its own line is what keeps this from
+   reading as three things of three different heights. */
 .app-header {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto;
+  column-gap: 8px;
+  row-gap: 1px;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 12px var(--pad-screen) 10px;
+  padding: 10px var(--pad-screen) 6px;
 }
-.app-header .brand {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  min-width: 0;
+/* Left slot: the chain trigger (ChainSwitcher.tsx). It hugs its own text and
+   does NOT shrink — the chain name is a safety surface, so it is the wallet
+   name (which the user already knows) that gives way when the panel is narrow.
+   The cap is what stops a long chain name from taking the whole row. Same
+   30px height as the wallet switcher and the icon buttons. */
+.app-header .chain-trigger {
+  grid-column: 1;
+  grid-row: 1;
+  max-width: 136px;
+  height: 30px;
+  padding: 0 9px 0 7px;
+  font-size: 11.5px;
 }
 .brand-title {
   font-size: 14.5px;
@@ -426,7 +720,104 @@ body {
   text-overflow: ellipsis;
   margin-top: -1px;
 }
-.header-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+/* Centre slot: the wallet, the header's centrepiece. It holds TWO buttons
+   stacked — the switcher (name + identicon) and the address (click to copy) —
+   because the address must copy without opening the menu, and a button cannot
+   nest inside a button. flex:1 with min-width:0 is what makes the slot take the
+   width the two side slots do not need and ellipsise inside it rather than
+   pushing them off the row; both children stretch to the slot, so the switcher's
+   own box is still exactly the centre column. */
+.wallet-switcher {
+  grid-column: 2;
+  grid-row: 1;
+  justify-self: center;
+  max-width: 100%;
+  min-width: 0;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px 0 6px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  transition: background var(--dur) var(--ease);
+}
+.wallet-switcher:hover { background: var(--card-hover); }
+/* A flex item, so overflow:hidden actually clips here (an inline box with
+   overflow:hidden paints past its container instead — see .row-main). */
+.wallet-switcher-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The one address on Home. A real button (click = copy the WHOLE address), so
+   it needs a hit target and a hover, but it must still read as the switcher's
+   quiet second line and not as a third control competing with the two pickers
+   beside it — hence the faint colour and the 9.5px type the plain text line
+   used to have. */
+.wallet-address {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  justify-self: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  max-width: 100%;
+  margin-top: 0;
+  padding: 2px 8px;
+  border: 0;
+  border-radius: 999px;
+  background: none;
+  color: var(--text-dim);
+  font-size: 10.5px;
+  font-weight: 500;
+  line-height: 1.5;
+  cursor: pointer;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+.wallet-address:hover { background: var(--card-hover); color: var(--text-dim); }
+.wallet-address svg { flex-shrink: 0; opacity: 0.75; }
+.wallet-address-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Right slot. 30px buttons (not the stock 32) and a 6px gap: at 320px every
+   pixel this row gives back is a pixel of wallet name or chain name. */
+.header-actions { grid-column: 3; grid-row: 1; display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.header-actions .icon-btn { width: 30px; height: 30px; }
+/* A side panel dragged below 360px. Every pixel the outer padding and the gaps
+   give back here is a pixel of wallet name, and 320px is the width at which
+   that name would otherwise ellipsise down to two characters. The popup (a
+   fixed 400px viewport) never sees this. */
+/* Narrower than the popup's fixed 400px, i.e. a side panel. The centre slot now
+   carries the ADDRESS as well as the name, and the address is 15 characters
+   whose last six are the half that tells two addresses apart — so the icon row
+   hands 3px per button back to it. 27px still clears a comfortable target. */
+@media (max-width: 399px) {
+  .app-header .header-actions .icon-btn { width: 27px; height: 27px; }
+  /* And the address gives up its copy GLYPH before it gives up characters: the
+     glyph is decoration (the whole line is the button, with a tooltip and an
+     aria-label saying so), the last six characters are information. Dropping it
+     plus half a point of type is exactly what makes the whole address fit at a
+     360px panel instead of ellipsising mid-tail. */
+  .wallet-address { font-size: 10px; }
+}
+@media (max-width: 359px) {
+  .app-header { padding-left: 12px; padding-right: 12px; column-gap: 6px; }
+  /* A side panel dragged under 360px: the chain pill keeps its mark and its
+     chevron and drops the NAME (it is in the title / aria-label, in the
+     dropdown, and the balance hero names the coin); the wallet name gets the
+     width back. MetaMask's header shows only the network mark at every width. */
+  .app-header .chain-trigger { max-width: none; padding: 0 6px 0 7px; gap: 3px; }
+  .app-header .chain-trigger .chain-trigger-text { display: none; }
+  .app-header .header-actions { gap: 2px; }
+}
 
 .sub-header {
   display: grid;
@@ -434,6 +825,19 @@ body {
   align-items: center;
   padding: 10px var(--pad-screen) 6px;
 }
+/* Wider side slots for a header that carries BOTH a control and the connection
+   dot (the staking screen). Widened SYMMETRICALLY and only where opted into:
+   the h2 is centred by sitting in the middle track, so unequal side tracks
+   would push the title off centre, and changing the base rule would move every
+   other sub-header in the app to fix one screen. */
+.sub-header.sub-header-wide { grid-template-columns: 66px 1fr 66px; }
+.sub-header .header-slot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
+}
+
 /* min-width:0 lets the h2 shrink inside the 1fr grid track; the rest truncates a
    long title (e.g. "Send JACKDAWTOKEN.COM/WHITEPAPER") instead of overflowing. */
 .sub-header h2 {
@@ -490,6 +894,16 @@ body {
 .pill.state-stale { color: var(--warning); }
 .pill.state-offline .dot { background: var(--danger); }
 @keyframes pulse { 50% { opacity: 0.35; } }
+
+/* Dot-only pill (SyncStatusPill compact): same state colours, no label, for
+   spots too narrow for the text (the Settings sub-header's fixed 40px slot —
+   see .sub-header below). Square padding keeps it a touch target rather than
+   a bare 7px dot. */
+.pill.pill-dot { padding: 6px; gap: 0; }
+/* Right-align within the sub-header's 40px grid column, mirroring the back
+   button's flush-left placement in the (also 40px) left column, so the h2
+   between them stays visually centred. */
+.sub-header .pill-dot { justify-self: end; }
 
 .chip {
   display: inline-flex;
@@ -583,6 +997,14 @@ button.list-row:hover, a.list-row:hover { background: var(--card-hover); border-
   margin: 16px 4px 7px;
 }
 .section-label:first-child { margin-top: 2px; }
+/* Day header inside the Activity list ("Today" / "Yesterday" / "14 Aug 2026").
+   The same label style as every other section heading, tightened: it sits
+   BETWEEN rows, so the stock 16px top margin would open a gap wide enough to
+   read as a break in the list rather than a heading over the rows below it.
+   :first-child does not apply to the header itself (each one is wrapped with
+   its own rows), so the first group's header is zeroed via its wrapper. */
+.activity-day { margin: 12px 2px 4px; }
+.activity-day-group:first-child .activity-day { margin-top: 2px; }
 
 .divider { height: 1px; background: var(--border); margin: 4px 0; border: none; }
 
@@ -688,6 +1110,10 @@ button.list-row:hover, a.list-row:hover { background: var(--card-hover); border-
   line-height: 1.15;
 }
 .hero .hero-change { margin-top: 7px; display: flex; justify-content: center; }
+/* The big coin mark above the balance. A class rather than an inline style so
+   the compact home (.home-tight) can close the gap under it; the mark's own
+   SIZE stays a prop, because TokenIcon sizes its frame inline. */
+.hero-mark { display: flex; justify-content: center; margin-bottom: 10px; }
 
 .actions-row {
   display: flex;
@@ -783,6 +1209,67 @@ button.list-row:hover, a.list-row:hover { background: var(--card-hover); border-
   white-space: nowrap;
 }
 .token-sub { font-size: 11.5px; color: var(--text-dim); margin-top: 1px; }
+
+/* ----- Asset list EDIT MODE (drag handle + tick + selection bar) ------------
+   The two controls are deliberately SMALL GLYPHS in a 26px box: the box is the
+   touch target (over the 24px floor), the glyph is what the eye sees, and 26px
+   is exactly the height of the coin mark beside it, so turning edit mode on
+   does not make a row any taller than it already is. */
+.asset-edit-grip,
+.asset-edit-tick {
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--r-sm);
+  color: var(--text-dim);
+  background: none;
+  border: 0;
+  padding: 0;
+}
+.asset-edit-grip { cursor: grab; touch-action: none; }
+.asset-edit-grip:hover:not(:disabled) { background: var(--card-hover); color: var(--text); }
+.asset-edit-grip:active:not(:disabled) { cursor: grabbing; }
+/* The native coin's handle: present so the row keeps its shape and its columns
+   line up with every other row, but visibly inert. It is never focusable. */
+.asset-edit-grip:disabled { opacity: 0.3; cursor: default; }
+.asset-edit-grip:focus-visible,
+.asset-edit-tick:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.asset-edit-tick { cursor: pointer; }
+.asset-edit-tick input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+.asset-edit-tick input:disabled { cursor: default; opacity: 0.35; }
+/* The row being dragged: it is lifted off the list, so it may not animate its
+   own hover/press transform under the pointer. */
+.token-row[data-dragging='true'] { transform: none; }
+.token-row-edit:hover { background: var(--card); border-color: var(--border); }
+
+/* The bar under the rows: what edit mode can do, and the one action it offers
+   once something is ticked. Inside the scroll region, so it rides at the end of
+   the rows instead of covering the last one. */
+.asset-edit-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+  padding: 6px 8px;
+  border-radius: var(--r-md);
+  border: 1px dashed var(--border-strong);
+  background: var(--bg-elev);
+  font-size: 11.5px;
+}
 
 /* ----- Fields ------------------------------------------------------------------------ */
 .field { display: flex; flex-direction: column; gap: 6px; }
@@ -956,11 +1443,19 @@ button.list-row:hover, a.list-row:hover { background: var(--card-hover); border-
   padding: 3px 0;
   flex: 0 0 46px;
 }
+/* The Satori mark is the ONLY entry point to the network statistics, so it
+   must read as a button, not as a watermark: near-full opacity at rest (it sat
+   at 0.55 and users did not notice it), a soft ring, full on hover/selected. */
 .nav-item-mark img {
-  opacity: 0.55;
-  transition: opacity var(--dur) var(--ease);
+  opacity: 0.92;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--accent) 55%, transparent), 0 0 10px color-mix(in srgb, var(--accent) 30%, transparent);
+  transition: opacity var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
 }
-.nav-item-mark:hover img { opacity: 0.85; }
+.nav-item-mark:hover img {
+  opacity: 1;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 80%, transparent), 0 0 12px color-mix(in srgb, var(--accent) 45%, transparent);
+}
 .nav-item-mark[aria-selected='true'] {
   background: var(--accent-soft);
 }
@@ -983,6 +1478,12 @@ button.list-row:hover, a.list-row:hover { background: var(--card-hover); border-
 
 .modal {
   width: 100%;
+  /* The overlay centres the modal, so a modal taller than the popup used to be
+     clipped at BOTH ends (its title off the top, its buttons off the bottom)
+     with no way to reach them. Bounding it to the overlay and letting it scroll
+     keeps every control reachable; a modal that fits is unaffected. */
+  max-height: 100%;
+  overflow-y: auto;
   background: var(--bg-elev);
   border: 1px solid var(--border-strong);
   border-radius: var(--r-lg);
@@ -1149,6 +1650,170 @@ button.list-row:hover, a.list-row:hover { background: var(--card-hover); border-
 }
 .welcome .welcome-footer { font-size: 10.5px; color: var(--text-faint); margin-top: 22px; }
 
+/* ----- Constellation field -------------------------------------------------
+   The animated Satori network behind the first-run and lock screens
+   (components/ConstellationField.tsx). Pure decoration: it sits at the FLOOR of
+   the frame's stacking context and takes no pointer events, so nothing above it
+   changes behaviour. `.app-content` already carries `position: relative;
+   z-index: 1`; `.lock-screen` is the other direct child of `.app-frame` and
+   gets the same lift below. Colours are read from --accent by the component
+   itself; nothing is painted here. */
+.constellation-field {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 0;
+  pointer-events: none;
+}
+
+/* ----- First run: the welcome step ------------------------------------------
+   The one screen a user meets before there is any wallet, so it is the one
+   screen allowed a little theatre: the constellation behind it, a slow breath
+   under the mark, and the block entering once on mount.
+
+   CENTRING is the same pure-flex pattern Home adopted (see .home-centered
+   above): the column's leftover height is split between two auto margins, so
+   the block sits dead centre in a tall panel and, the moment the content
+   outgrows the viewport, both margins resolve to zero and the screen is exactly
+   the top-anchored, scrollable layout it was before. No measuring, no JS. */
+.app-content.welcome-centered {
+  display: flex;
+  flex-direction: column;
+}
+.welcome-wow {
+  margin-top: auto;
+  margin-bottom: auto;
+  text-align: center;
+  padding: 6px 0 2px;
+}
+
+/* The mark and the soft radial breath behind it. The glow is deliberately a
+   RADIAL WASH sized well beyond the logo, not a box-shadow on it: an
+   accent-coloured shadow hugging a card is the generic look the house style
+   rules out, while the neuron's own ambience is exactly this kind of blurred
+   bloom. */
+.welcome-mark {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.welcome-mark::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 200px;
+  height: 200px;
+  border-radius: 50%;
+  /* All the softness lives in the gradient stops; there is deliberately NO
+     filter: blur() here. A blurred layer is re-rendered while it scales, which
+     is one of the two sources of the shimmering/pixelated arrival the owner
+     saw (2026-08-25). will-change parks it on the GPU once. */
+  background: radial-gradient(
+    circle,
+    color-mix(in srgb, var(--accent) 26%, transparent) 0%,
+    color-mix(in srgb, var(--accent) 14%, transparent) 30%,
+    color-mix(in srgb, var(--accent) 6%, transparent) 52%,
+    transparent 72%
+  );
+  pointer-events: none;
+  z-index: 0;
+  transform: translate(-50%, -50%);
+  /* ONE breath while the mark arrives, then still. The owner asked for the
+     logo to settle into its final position once, with no loop (2026-08-25):
+     an animation that never ends reads as waiting, one that ends reads as
+     arrived. Fill-mode both parks it at the resting opacity. */
+  animation: welcomeGlowIn 1100ms var(--ease) both;
+}
+.welcome-mark > * { position: relative; z-index: 1; }
+@keyframes welcomeGlowIn {
+  0% { opacity: 0; transform: translate(-50%, -50%) scale(0.88); }
+  55% { opacity: 1; transform: translate(-50%, -50%) scale(1.04); }
+  100% { opacity: 0.75; transform: translate(-50%, -50%) scale(1); }
+}
+
+/* The mark itself sails in ONCE: from slightly above and small, one gentle
+   overshoot, then it is parked for good. Runs on mount only; nothing loops. */
+.welcome-mark-arrive {
+  animation: welcomeArrive 780ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  /* Promoted ONLY while this class is on. The class is removed on animationend
+     (see the mark in LiveOnboarding/LiveLock): a permanently composited layer
+     is a texture rasterised at CSS size, and Windows display scaling (125%)
+     stretches that texture, which is the standing pixelation the owner saw on
+     the lock screen (2026-08-25). Once the class drops, the mark is plain DOM
+     again and paints at native device resolution. */
+  will-change: transform, opacity;
+}
+@keyframes welcomeArrive {
+  0% { opacity: 0; transform: translate3d(0, -14px, 0) scale(0.9); }
+  70% { opacity: 1; transform: translate3d(0, 1px, 0) scale(1.015); }
+  100% { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
+}
+
+.welcome-wow-title {
+  font-size: 26px;
+  font-weight: 800;
+  letter-spacing: -0.025em;
+  line-height: 1.15;
+  margin-top: 16px;
+  /* Plain text. Gradient-filled headings are the one thing Satori never does. */
+  color: var(--text);
+}
+.welcome-wow-sub {
+  max-width: 296px;
+  margin: 9px auto 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+.welcome-wow-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 26px;
+}
+
+/* The entrance: fade and rise, staggered by the inline animation-delay each
+   element carries. `both` holds the from-state until the delay elapses, which
+   is what makes the stagger visible instead of everything appearing at once.
+   It runs on MOUNT only — a re-render does not restart a CSS animation, and
+   the block is only re-created when the user actually returns to this step. */
+.wow-in { animation: wowIn 420ms cubic-bezier(0.22, 1, 0.36, 1) both; }
+@keyframes wowIn {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* The Home notification banner's entrance (components/NotificationBanner.tsx):
+   a short fade + rise as the banner appears under the status row. Runs on MOUNT
+   only, so it plays when a notice first shows and not on an unrelated Home
+   re-render. It does NOT replay per rotation step: the banner renders every
+   notice in the set stacked in one grid cell and only swaps which of them is
+   visible, so the animated element is mounted once for the whole set. Reduced
+   motion collapses it below. */
+.live-notification-enter { animation: notifIn 260ms cubic-bezier(0.22, 1, 0.36, 1) both; }
+@keyframes notifIn {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Reduced motion: no breath, no entrance, and the content is simply THERE.
+   `:root[data-reduced-motion='true']` (App.tsx, which folds in the OS setting
+   AND the wallet's own switch) already collapses every animation to 0.01ms;
+   this media block is the belt to that braces, correct even before the app has
+   stamped the attribute. */
+@media (prefers-reduced-motion: reduce) {
+  .welcome-mark::before { animation: none; opacity: 0.75; }
+  .welcome-mark-arrive { animation: none; will-change: auto; }
+  .wow-in { animation: none; }
+  .live-notification-enter { animation: none; }
+}
+:root[data-reduced-motion='true'] .welcome-mark::before { opacity: 0.75; }
+:root[data-reduced-motion='true'] .welcome-mark-arrive { animation: none; will-change: auto; }
+:root[data-reduced-motion='true'] .live-notification-enter { animation: none; }
+
 /* ----- Lock ----------------------------------------------------------------------------------------------- */
 /* Centered column that must never clip. A plain `justify-content: center` on a
    fixed-height flex column pushes overflow out BOTH ends at once, so with a
@@ -1166,6 +1831,11 @@ button.list-row:hover, a.list-row:hover { background: var(--card-hover); border-
   overflow-y: auto;
   padding: 30px;
   text-align: center;
+  /* Above the constellation field, which is the other direct child of
+     `.app-frame` here. `.app-content` gets this from the base layout rules;
+     this screen does not use `.app-content`, so it says it itself. */
+  position: relative;
+  z-index: 1;
 }
 /* .lock-logo is gone with the lock badge it centred; the heading carries the
    message on its own and the reclaimed height goes to the wallet list. The
@@ -1435,15 +2105,291 @@ button.list-row:hover, a.list-row:hover { background: var(--card-hover); border-
   background: var(--accent-soft);
 }
 
-/* Denser, MetaMask-like asset + activity rows (user: rows still too large). */
-.live-scope .token-row { padding-top: 7px; padding-bottom: 7px; gap: 10px; border-radius: var(--r-md); }
-.live-scope .token-row + .token-row { margin-top: 6px; }
-.live-scope .token-name { font-size: 12.5px; font-weight: 650; }
+/* ----- Lock screen: two views ------------------------------------------------
+   A seed can contribute 20+ EVM accounts, so the old layout (a 3-row scroll
+   window of wallets stacked ON TOP of the password field) truncated the list
+   and looked broken. Now the password view names exactly ONE wallet and the
+   picker is a view of its own with the whole panel height to fill. */
+
+/* Roomier at 320px (side panel minimum) than the shared 30px padding allows:
+   this screen carries a card with chips that must not wrap. */
+.live-scope .lock-screen { padding: 26px 18px 22px; }
+
+/* Brand block of the password view (was inline styles; identical numbers).
+   The .brand-title override has to out-specify `.live-scope .brand-title`,
+   which sizes the small header wordmark. */
+.lock-brand {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  margin-bottom: 4px;
+}
+.live-scope .lock-brand .brand-title { font-size: 19px; margin-top: 10px; }
+.lock-brand .text-faint { font-size: 10.5px; }
+
+/* The TRANSITIONAL prompt on the lock screen: shown only while an app password
+   exists and THIS wallet is still on its own password. A quiet notice, not an
+   alarm: nothing is wrong, the wallet is simply about to move. */
+.live-scope .lock-migrate {
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  border-radius: var(--r-md);
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  text-align: left;
+}
+.live-scope .lock-migrate-text {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--text-dim);
+}
+.live-scope .lock-migrate-keep {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 9px;
+  font-size: 11.5px;
+  color: var(--text);
+  cursor: pointer;
+}
+.live-scope .lock-migrate-keep input {
+  accent-color: var(--accent);
+  flex-shrink: 0;
+  margin: 0;
+}
+
+/* The FORCED app-password setup (the app-password design notes §12). It borrows
+   `.lock-screen` (same frame, same constellation, same brand block) and only
+   needs one thing of its own: body copy that reads left-aligned at full width
+   inside a screen whose default is centred. It is a paragraph of explanation,
+   not a caption, so centring it would make it a wall. */
+.live-scope .force-pw-text {
+  width: 100%;
+  margin: 0 2px 10px;
+  font-size: 11.5px;
+  line-height: 1.55;
+  text-align: left;
+}
+.live-scope .force-pw-text:last-child { margin-bottom: 0; }
+
+/* The one wallet the password below opens. Same visual language as a picker
+   row, one step larger, with the "Change" affordance on the right. */
+.live-scope .lock-selected {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  margin-top: 16px;
+  padding: 9px 10px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  background: var(--card);
+  text-align: left;
+}
+/* Identicon + chain/brand mark, side by side. */
+.lock-selected-mark { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.lock-selected-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+/* Two halves: the seed's name gives way first (it ellipsises), the account
+   number never does — it is the half that tells sibling accounts apart. */
+.lock-selected-name {
+  display: flex;
+  align-items: baseline;
+  max-width: 100%;
+  min-width: 0;
+  font-size: 12.5px;
+  font-weight: 650;
+}
+.lock-selected-name-seed {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lock-selected-name-account { flex: 0 0 auto; white-space: pre; }
+.lock-selected-addr {
+  max-width: 100%;
+  font-size: 9.5px;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Chips keep their own row and never wrap: at 320px the name is what gives way
+   (it ellipsises), never the identity badges. */
+.lock-selected-chips { display: flex; align-items: center; gap: 4px; margin-top: 1px; }
+.lock-selected-chips .chip { font-size: 8.5px; padding: 1px 5px; flex-shrink: 0; }
+.lock-change {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  flex-shrink: 0;
+  padding: 5px 5px 5px 8px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  color: var(--accent-text);
+  font-size: 11px;
+  font-weight: 650;
+  transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease);
+}
+.lock-change:hover { background: var(--card-hover); border-color: var(--border-strong); }
+.lock-change:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* List view: a title row, then the list takes every remaining pixel and scrolls
+   inside itself (the screen itself must NOT scroll, or the header would slide
+   away with it). */
+.live-scope .lock-screen-list {
+  justify-content: flex-start;
+  overflow: hidden;
+  padding-top: 10px;
+  text-align: left;
+}
+.lock-list-head {
+  display: grid;
+  grid-template-columns: 32px 1fr 32px;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.live-scope .lock-screen-list .lock-list-head h2 {
+  margin: 0;
+  font-size: 15px;
+  text-align: center;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lock-list-hint {
+  flex-shrink: 0;
+  margin-top: 4px;
+  font-size: 10.5px;
+  color: var(--text-faint);
+  text-align: center;
+}
+.live-scope .lock-screen-list .lock-wallets {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin-top: 12px;
+  padding-right: 3px;
+}
+
+/* Rows. The name is the only flexible part; marks, chips and the tick keep
+   their intrinsic width so nothing wraps to a second line. */
+.lock-wallet > .lock-wallet-name { flex: 1; }
+.lock-wallet-name {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lock-wallet-main {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  flex: 1;
+  min-width: 0;
+}
+.lock-wallet-addr {
+  max-width: 100%;
+  font-size: 9px;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lock-wallet .lock-chip,
+.lock-group-head .lock-chip { font-size: 8.5px; padding: 1px 4px; flex-shrink: 0; }
+.lock-wallet-tick { color: var(--accent-text); flex-shrink: 0; }
+
+/* One seed, its accounts indented under it. `.stack` only spaces its OWN
+   children, so the members inside a group need their own rhythm. */
+.lock-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 4px 4px;
+  min-width: 0;
+}
+.lock-group-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 9.5px;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lock-group > .lock-wallet + .lock-wallet { margin-top: 6px; }
+/* Indent WITHOUT overflowing: `.lock-wallet` is width:100%, so the inset has to
+   come off the width too (the old inline margin-left pushed the row 8px past
+   the list's right edge). */
+.live-scope .lock-wallet-member { margin-left: 8px; width: calc(100% - 8px); }
+/* One seed = one row + its expand chevron (LiveLock, collapsed by default). */
+.lock-group-row { display: flex; align-items: stretch; gap: 4px; }
+.lock-group-row > .lock-wallet { flex: 1; min-width: 0; }
+.live-scope .lock-group-toggle { width: 34px; height: auto; flex-shrink: 0; border-radius: 10px; color: var(--text-dim); }
+.lock-group > .lock-group-row + .lock-wallet { margin-top: 6px; }
+
+/* At 320px (side-panel minimum) "Create new wallet" wrapped onto two lines and
+   left the pair lopsided against "Import wallet". Tighter horizontal padding
+   keeps both labels on one line; the vertical padding (the touch target) is
+   untouched. */
+.live-scope .lock-alt .btn { padding-left: 10px; padding-right: 10px; font-size: 12.5px; }
+
+/* Denser, MetaMask-like asset + activity rows (user: rows still too large).
+   Every number here comes from the scale in :root, so `.home-tight` can make
+   the popup's list denser without touching the roomy layouts. */
+.live-scope .token-row {
+  padding-top: var(--token-row-pad);
+  padding-bottom: var(--token-row-pad);
+  gap: var(--token-row-x);
+  border-radius: var(--r-md);
+}
+.live-scope .token-row + .token-row { margin-top: var(--token-row-gap); }
+.live-scope .token-name { font-size: var(--token-font); font-weight: 650; }
 .live-scope .token-sub { font-size: 10px; }
-.live-scope [data-testid^='live-balance-'] { font-size: 12.5px; }
+/* The row's amount, and the secondary fiat value + 24h chip beside it.
+   SCOPED TO THE ROW on purpose: this used to read
+   `.live-scope [data-testid^='live-balance-']`, which also matched
+   `live-balance-hero` and, at equal specificity but later in the file, beat
+   `.live-scope .hero-value`, so on any chain WITH an asset list the hero
+   balance rendered at 12.5px in the side panel and the detached window
+   (verified in the 420x900 capture, 2026-08-25). The popup never showed it
+   because `.live-scope .home-tight .hero-value` outranks both. */
+.live-scope .token-row .token-amount { font-size: var(--token-font); }
+.live-scope .token-row .token-meta { font-size: var(--token-meta); }
 
 /* Lock-screen "or create / import a new wallet" alternatives. */
 .live-scope .lock-alt { margin-top: 18px; width: 100%; }
+/* "Forgot your password?" (the app-password design notes §13.9). Deliberately a
+   quiet text link and not a button: it is the least likely thing on this screen
+   to be wanted, and the password field has to stay the obvious action. */
+.live-scope .lock-forgot {
+  color: var(--text-faint);
+  font-size: 11.5px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  transition: color var(--dur) var(--ease);
+}
+.live-scope .lock-forgot:hover { color: var(--accent-text); }
+.live-scope .lock-forgot:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
 .live-scope .lock-alt-sep {
   display: block; text-align: center; color: var(--text-faint);
   font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 10px;

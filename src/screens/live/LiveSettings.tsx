@@ -4,9 +4,10 @@
 // Explorer, Transactions (CSV export), Address Book, About (version, disclaimer,
 // reset). All pre-existing testids keep working inside their sub-screens.
 
-import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import {
   AlertTriangle,
+  Bell,
   BookUser,
   Check,
   ChevronLeft,
@@ -17,6 +18,7 @@ import {
   Info,
   KeyRound,
   Layers,
+  LifeBuoy,
   Link2,
   List,
   Monitor,
@@ -24,6 +26,7 @@ import {
   Palette,
   Pencil,
   Plus,
+  Search,
   Shield,
   Sun,
   Trash2,
@@ -35,16 +38,22 @@ import { Button } from '../../components/Button';
 import { TextField, PasswordField } from '../../components/TextField';
 import { PasswordStrengthBar } from '../../components/PasswordStrengthBar';
 import { Toggle } from '../../components/Toggle';
+import { isSidePanelWindow, useSidePanelPreference } from '../../services/sidePanel';
 import { Segmented } from '../../components/Segmented';
-import { Modal, ConfirmModal } from '../../components/Modal';
+import { ConfirmModal } from '../../components/Modal';
 import { CopyButton } from '../../components/CopyButton';
+import { SyncStatusPill } from '../../components/SyncStatusPill';
 import { BrandLogo } from '../../components/BrandLogo';
+import { AccountAvatar } from '../../components/AccountAvatar';
 import { EmptyState } from '../../components/EmptyState';
 import { AccentSwatches } from '../settings/AppearanceSettings';
+import { RecoverySettings } from './LiveRecovery';
 import { useSettingsStore } from '../../store/settingsStore';
 import {
   useLiveStore,
   activeChainId,
+  activeChainTarget,
+  activeFamily,
   chainDisplayName,
   chainHideBlockedReason,
   walletsOnChain,
@@ -57,19 +66,27 @@ import {
 } from '../../services/storageStats';
 import { lastCacheWriteError, lastHistoryFetchError } from '../../services/chain/txCache';
 import { networkFor } from '../../services/chain/chainParams';
+import { isGatewayElectrumUrl } from '../../services/chain/network';
 import { CHAIN_OPTIONS } from './ChainPicker';
+import {
+  groupWallets,
+  accountNumberOf,
+  isEvmSeedAccount,
+  siblingAccounts,
+  shortAccountAddress,
+  memberLabel,
+} from './walletGroups';
 import { TokenIcon } from '../../components/BrandLogo';
 import { MIN_PASSWORD_LENGTH, getAppVersion } from '../../services/constants';
 import type { ThemeMode } from '../../services/settings';
 import type { LiveTransaction } from '../../services/chain/electrumProvider';
 import { LiveNav } from './LiveNav';
+import { RevealSecretModal, type RevealKind } from './RevealSecretModal';
 
 interface LiveSettingsProps {
   onBack(): void;
   onOpenAddressBook(): void;
 }
-
-type RevealKind = 'seed' | 'key';
 
 /** The focused sub-screens reachable from the settings root list. */
 type SettingsSection =
@@ -77,6 +94,8 @@ type SettingsSection =
   | 'wallets'
   | 'addresses'
   | 'security'
+  | 'recovery'
+  | 'notifications'
   | 'network'
   | 'sites'
   | 'transactions'
@@ -89,13 +108,50 @@ const SECTION_TITLES: Record<SettingsSection, string> = {
   wallets: 'Wallets',
   addresses: 'Addresses',
   security: 'Security',
-  network: 'Network & Explorer',
+  // Its own screen since 2026-08-26. It used to be the last block of a Security
+  // screen ~600 lines long, which is the worst possible place for the thing a
+  // user goes looking for when something has gone wrong.
+  recovery: 'Recovery',
+  notifications: 'Notifications',
+  // "Network & Explorer" and "Visible networks" both led with the same word for
+  // unrelated jobs: one is which servers this wallet talks to, the other is
+  // which chains appear in the switcher.
+  network: 'Servers & explorer',
   sites: 'Connected sites',
-  transactions: 'Transactions',
-  networks: 'Visible networks',
+  // "Transactions" promised a screen about transactions; it is an export button.
+  transactions: 'Export history',
+  networks: 'Networks',
   diagnostics: 'Diagnostics',
   about: 'About',
 };
+
+/** Every row of the root list. 'addressBook' is not a section: it opens a
+ *  screen of its own that predates this list, and it is here because a user
+ *  looking for saved recipients looks under Wallet, not under "other". */
+type RootRowId = SettingsSection | 'addressBook';
+
+/** One row of the settings root list. */
+interface RootRow {
+  testId: string;
+  icon: ReactNode;
+  title: string;
+  desc: string;
+  onClick: () => void;
+  /** Tints the icon chip. Used sparingly, to mark Security and About. */
+  iconClass?: string;
+}
+
+/** The three groups the root list is shown under, in order. A flat list of ten
+ *  rows made the user read every one of them to find anything; the groups say
+ *  where to start looking. */
+const SECTION_GROUPS: ReadonlyArray<{ title: string; sections: readonly RootRowId[] }> = [
+  { title: 'Wallet', sections: ['wallets', 'addresses', 'addressBook', 'transactions'] },
+  { title: 'Security', sections: ['security', 'recovery'] },
+  {
+    title: 'App',
+    sections: ['appearance', 'notifications', 'networks', 'network', 'sites', 'diagnostics', 'about'],
+  },
+];
 
 /** Sections hidden in BASIC mode. Chosen by "can a wrong move here cost the user
  *  something, or is it meaningless without context": the server pool, the raw
@@ -110,6 +166,9 @@ const EXPERT_ONLY: ReadonlySet<SettingsSection> = new Set<SettingsSection>([
   'networks',
   'diagnostics',
 ]);
+// NOT expert-only, and deliberately: 'recovery' is what a user reaches for when
+// they have lost their password, which is not a moment to discover the control
+// was hidden behind a detail level; 'notifications' is one everyday toggle.
 
 /** Auto-lock idle-timeout options (minutes). 0 = never. */
 const AUTO_LOCK_OPTIONS: { value: number; label: string }[] = [
@@ -194,12 +253,20 @@ function Shell({
   testId,
   children,
   modals,
+  showSync = true,
 }: {
   title: string;
   onBack(): void;
   testId?: string;
   children: ReactNode;
   modals?: ReactNode;
+  /** Show the dot-only connection indicator in the sub-header's right-hand
+   *  slot. Defaults on for the focused sub-screens (Appearance, Wallets,
+   *  Security, ... — KNOWN_LIMITATIONS item 33, they had no connection
+   *  indicator at all). The settings ROOT screen passes false: it already
+   *  shows the full labelled pill under "Detail level" below, and a second
+   *  indicator up here would be redundant chrome. */
+  showSync?: boolean;
 }) {
   return (
     <div className="app-frame screen-enter">
@@ -208,7 +275,16 @@ function Shell({
           <ChevronLeft size={20} />
         </button>
         <h2>{title}</h2>
-        <span />
+        {showSync ? (
+          // The labelled pill was tried here first and clipped: at 400 px the
+          // back button and the centred title squeeze this slot to about
+          // 40 px, which cut "Synced" down to "Sy". The dot-only variant
+          // fits: it drops the visible label but keeps the state reachable
+          // via title/aria-label.
+          <SyncStatusPill compact />
+        ) : (
+          <span />
+        )}
       </div>
       <div className="app-content" data-testid={testId}>
         {children}
@@ -227,7 +303,56 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
   const activeNet = networkFor(activeChainId());
   const hiddenChains = useLiveStore((s) => s.hiddenChains);
   const setChainHidden = useLiveStore((s) => s.setChainHidden);
+  const evmChainsForSettings = useLiveStore((s) => s.evm.chains);
+  const activeEvmChainKey = useLiveStore((s) => s.evm.activeChainKey);
+  // The EVM chain in use (null on a UTXO chain): the Network section shows its
+  // gateway endpoints instead of the Electrum pool.
+  const activeEvmChain =
+    activeFamily() === 'evm' ? (evmChainsForSettings.find((c) => c.key === activeEvmChainKey) ?? null) : null;
+  const evmGateway = (() => {
+    try {
+      return typeof __EVM_GATEWAY_URL__ === 'string' ? __EVM_GATEWAY_URL__.trim().replace(/\/+$/, '') : '';
+    } catch {
+      return '';
+    }
+  })();
+  const evmEndpoints: Array<{ kind: string; url: string; label: string; required: boolean }> = activeEvmChain
+    ? evmGateway
+      ? [
+          { kind: 'rpc', url: `${evmGateway}/evm/${activeEvmChain.key}/rpc`, label: 'JSON-RPC, balances, sending (Satori GO gateway)', required: true },
+          ...(activeEvmChain.indexer || activeEvmChain.alchemy
+            ? [{ kind: 'history', url: activeEvmChain.alchemy ? `${evmGateway}/evm/${activeEvmChain.key}/rpc` : `${evmGateway}/evm/${activeEvmChain.key}/indexer`, label: 'Transaction history (Satori GO gateway)', required: true }]
+            : []),
+        ]
+      : [
+          { kind: 'rpc', url: `public JSON-RPC of ${activeEvmChain.displayName}`, label: 'Development build: the public endpoints from the registry, no gateway', required: true },
+          ...(activeEvmChain.indexer ? [{ kind: 'history', url: activeEvmChain.indexer.baseUrl, label: 'Transaction history (public explorer API)', required: false }] : []),
+        ]
+    : [];
   const settingsMode = useLiveStore((s) => s.settingsMode);
+  // Window mode (services/sidePanel.ts): the side panel is the default on
+  // Chrome and Edge, so this row is the way BACK to the toolbar popup and must
+  // stay visible in basic mode too. The change applies on the NEXT open.
+  const sidePanel = useSidePanelPreference();
+  const [sidePanelNote, setSidePanelNote] = useState<string | null>(null);
+  const onSidePanelToggle = async (next: boolean) => {
+    const applied = await sidePanel.setEnabled(next);
+    if (!applied) {
+      setSidePanelNote('This browser could not apply the change. The choice is saved and the popup stays.');
+    } else if (next) {
+      setSidePanelNote(
+        isSidePanelWindow()
+          ? 'On. The wallet keeps opening in the side panel.'
+          : 'On. Close this popup; the next click on the toolbar icon opens the wallet in the side panel.',
+      );
+    } else {
+      setSidePanelNote(
+        isSidePanelWindow()
+          ? 'Off. Close this panel; the next click on the toolbar icon opens the wallet in the popup.'
+          : 'Off. The next click on the toolbar icon opens the popup again.',
+      );
+    }
+  };
   const setSettingsMode = useLiveStore((s) => s.setSettingsMode);
   const requirePasswordToSend = useLiveStore((s) => s.requirePasswordToSend);
   const setRequirePasswordToSend = useLiveStore((s) => s.setRequirePasswordToSend);
@@ -245,6 +370,14 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
   const checkServers = useLiveStore((s) => s.checkServers);
   const txs = useLiveStore((s) => s.txs);
   const changePassword = useLiveStore((s) => s.changePassword);
+  const appPasswordSet = useLiveStore((s) => s.appPasswordSet);
+  // Shown on the Recovery row so the state is readable without opening it: the
+  // whole point of giving recovery its own row is that a user can see at a
+  // glance whether they have a way back in.
+  const recoveryCodeSet = useLiveStore((s) => s.recoveryCodeSet);
+  const setAppPassword = useLiveStore((s) => s.setAppPassword);
+  const changeAppPassword = useLiveStore((s) => s.changeAppPassword);
+  const setNoSendPassword = useLiveStore((s) => s.setNoSendPassword);
   const network = useLiveStore((s) => s.network);
   const wallets = useLiveStore((s) => s.wallets);
   const activeWalletId = useLiveStore((s) => s.activeWalletId);
@@ -254,6 +387,8 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
   const revealMnemonic = useLiveStore((s) => s.revealMnemonic);
   const revealPrivateKey = useLiveStore((s) => s.revealPrivateKey);
   const addresses = useLiveStore((s) => s.addresses);
+  const addressScan = useLiveStore((s) => s.addressScan);
+  const scanForUsedAddresses = useLiveStore((s) => s.scanForUsedAddresses);
   const loadAddresses = useLiveStore((s) => s.loadAddresses);
   const addReceiveAddress = useLiveStore((s) => s.addReceiveAddress);
   const connectedSites = useLiveStore((s) => s.connectedSites);
@@ -328,6 +463,19 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
   const activeWallet = wallets.find((w) => w.id === activeWalletId) ?? null;
   const isPkWallet = activeWallet?.kind === 'pk';
   const isPasswordless = activeWallet?.passwordless ?? false;
+  // A wallet already moved to the app password has no password of its own left
+  // to change, so the per-wallet card below is replaced by a line saying which
+  // password does open it (the app-password design notes §5).
+  const isAppProtected = activeWallet?.appProtected ?? false;
+  // §6: the "do not ask when sending" half a passwordless wallet keeps when it
+  // migrates. Shown and switchable on the card above, because it is what decides
+  // whether a send needs proof.
+  const noSendPassword = activeWallet?.noSendPassword ?? false;
+  /** Is the ACTIVE wallet outside the app-wide "require password to send" rule?
+   *  Both shapes count: a v1 wallet with no password at all, and one that kept
+   *  the convenience when it moved to the app password. Mirrors LiveSend's own
+   *  `isPasswordless` so the two screens cannot disagree about who is exempt. */
+  const sendPasswordExempt = isPasswordless || noSendPassword;
 
   // Change-password local form state.
   const [oldPw, setOldPw] = useState('');
@@ -340,6 +488,102 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
   const [pwBusy, setPwBusy] = useState(false);
   const [pwError, setPwError] = useState('');
   const [pwSuccess, setPwSuccess] = useState(false);
+
+  // --- App password (Settings > Security) local form state ---
+  const [appCurrentPw, setAppCurrentPw] = useState('');
+  const [appNewPw, setAppNewPw] = useState('');
+  const [appConfirmPw, setAppConfirmPw] = useState('');
+  const [appPwBusy, setAppPwBusy] = useState(false);
+  const [appPwError, setAppPwError] = useState('');
+  const [appPwSuccess, setAppPwSuccess] = useState('');
+  const [appFormOpen, setAppFormOpen] = useState(false);
+  const resetAppForm = () => {
+    setAppCurrentPw('');
+    setAppNewPw('');
+    setAppConfirmPw('');
+    setAppPwError('');
+  };
+  const onAppFieldChange = (setter: (v: string) => void) => (v: string) => {
+    setter(v);
+    setAppPwError('');
+    setAppPwSuccess('');
+  };
+
+  // --- "Ask for the password when sending" (§6) local form state ---
+  //
+  // Turning that check OFF is the one switch on this screen that REMOVES a
+  // control rather than adding one: afterwards a send from this wallet needs
+  // nothing typed. The v1 route to exactly that state (changePassword to an
+  // empty password) has always cost the current password AND an explicit risk
+  // acknowledgement, so this one costs the same two things, in the same words.
+  // Turning it back ON is free, and must be: asking for a password to make the
+  // wallet safer is how a safety switch stops being used.
+  const [sendPwFormOpen, setSendPwFormOpen] = useState(false);
+  const [sendPwValue, setSendPwValue] = useState('');
+  const [sendPwAck, setSendPwAck] = useState(false);
+  const [sendPwError, setSendPwError] = useState('');
+  const [sendPwBusy, setSendPwBusy] = useState(false);
+  const closeSendPwForm = () => {
+    setSendPwFormOpen(false);
+    setSendPwValue('');
+    setSendPwAck(false);
+    setSendPwError('');
+  };
+  const handleStopAskingWhenSending = async () => {
+    setSendPwError('');
+    if (!sendPwValue) {
+      setSendPwError('Enter your current app password.');
+      return;
+    }
+    if (!sendPwAck) {
+      setSendPwError('Check the box to confirm you understand the risk.');
+      return;
+    }
+    setSendPwBusy(true);
+    const res = await setNoSendPassword(true, sendPwValue);
+    setSendPwBusy(false);
+    if (!res.ok) {
+      // A reason only ever arrives for a failure that is NOT the password, and
+      // then it is the only true thing to show.
+      setSendPwError(res.error ?? 'Incorrect app password.');
+      return;
+    }
+    closeSendPwForm();
+  };
+
+  /** Set the app password for the first time, or change an existing one. Both
+   *  go through the same validation, because both are the same promise to the
+   *  user: this password, and nothing else, opens the wallets it protects. */
+  const handleAppPassword = async () => {
+    setAppPwError('');
+    setAppPwSuccess('');
+    if (appPasswordSet && !appCurrentPw) {
+      setAppPwError('Enter your current app password.');
+      return;
+    }
+    if (appNewPw.length < MIN_PASSWORD_LENGTH) {
+      setAppPwError(`App password must be at least ${MIN_PASSWORD_LENGTH} characters.`);
+      return;
+    }
+    if (appNewPw !== appConfirmPw) {
+      setAppPwError('App passwords do not match.');
+      return;
+    }
+    setAppPwBusy(true);
+    const result = appPasswordSet
+      ? await changeAppPassword(appCurrentPw, appNewPw)
+      : await setAppPassword(appNewPw);
+    setAppPwBusy(false);
+    if (!result.ok) {
+      setAppPwError(result.error ?? 'Could not save the app password.');
+      return;
+    }
+    resetAppForm();
+    setAppFormOpen(false);
+    // On a CHANGE the store has already locked the wallet (the design drops any
+    // cached master key), so this success line is only ever read after a SET.
+    setAppPwSuccess('App password set. Each wallet moves over the next time you open it with its current password.');
+  };
 
 
   // --- Addresses (derive new receive address) local state ---
@@ -373,6 +617,12 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
   const [removeId, setRemoveId] = useState<string | null>(null);
   const removeTarget = wallets.find((w) => w.id === removeId) ?? null;
   const removingLast = wallets.length <= 1;
+  // Other accounts of the same seed as the removal target: while they exist the
+  // seed does not leave this device, so the confirmation must not claim it does.
+  const removeSiblings = siblingAccounts(wallets, removeTarget);
+  // The wallets list uses the SAME grouping as the Home switcher, so a seed and
+  // its accounts read identically wherever they are listed.
+  const walletNodes = groupWallets(wallets);
 
   const startRename = (id: string, currentName: string) => {
     setRenamingId(id);
@@ -389,53 +639,127 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
     if (id) await removeWallet(id);
   };
 
-  // --- Reveal secret (recovery phrase / private key) local state ---
-  // The plaintext secret lives ONLY here and is cleared on close; never logged
-  // or persisted.
-  const [revealKind, setRevealKind] = useState<RevealKind | null>(null);
-  const [revealPw, setRevealPw] = useState('');
-  const [revealSecret, setRevealSecret] = useState<string | null>(null);
-  const [revealError, setRevealError] = useState('');
-  const [revealBusy, setRevealBusy] = useState(false);
+  /** One row of the wallets list. Shared by standalone wallets and by the
+   *  accounts nested under a seed, so both keep the same rename/remove
+   *  affordances and the same testids (which are keyed by wallet id, not by
+   *  position, so grouping moves nothing). An account's second line is its own
+   *  address: that is what distinguishes "Account 1" from "Account 2". */
+  const renderWalletRow = (w: (typeof wallets)[number], nested: boolean, label: string = w.name) => (
+    <div
+      key={w.id}
+      className="list-row"
+      data-testid={`live-settings-wallet-${w.id}`}
+      style={{ alignItems: 'center', gap: 8, ...(nested ? { paddingLeft: 14 } : null) }}
+    >
+      {renamingId === w.id ? (
+        <>
+          <span className="row-main" style={{ flex: 1 }}>
+            <TextField
+              label=""
+              value={renameValue}
+              onChange={(e) => setRenameValue(e.target.value)}
+              testId={`live-wallet-rename-input-${w.id}`}
+              autoComplete="off"
+              autoFocus
+            />
+          </span>
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={() => void commitRename()}
+            aria-label="Save name"
+            data-testid={`live-wallet-rename-save-${w.id}`}
+          >
+            <Check size={15} />
+          </button>
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={() => { setRenamingId(null); setRenameValue(''); }}
+            aria-label="Cancel rename"
+          >
+            <ChevronLeft size={15} />
+          </button>
+        </>
+      ) : (
+        <>
+          {/* The account's identicon, the same mark it carries in the Home
+              switcher and on the lock screen — so a row here is recognisable as
+              the same wallet without reading the address under it. */}
+          <AccountAvatar address={w.address} seed={w.id} size={16} />
+          <span className="row-main" style={{ flex: 1, minWidth: 0 }}>
+            <span
+              className="row-title"
+              style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}
+            >
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {label}
+              </span>
+              {w.id === activeWalletId && (
+                <span className="chip success" style={{ fontSize: 9, padding: '1px 5px' }}>active</span>
+              )}
+              {/* The seed is named once, by the group heading — repeating "Seed"
+                  on every account of it says nothing new. */}
+              {!nested && (
+                <span className="chip neutral" style={{ fontSize: 9, padding: '1px 5px' }}>
+                  {kindLabel(w.kind)}
+                </span>
+              )}
+              {w.passwordless && (
+                <span className="chip warning" style={{ fontSize: 9, padding: '1px 5px' }}>No password</span>
+              )}
+              {/* Which password opens it, once there is more than one answer.
+                  After a migration some wallets open with the app password and
+                  some still ask for their own; that state has to be readable
+                  here, not discovered at a lock screen. */}
+              {appPasswordSet && (
+                <span
+                  className="chip neutral"
+                  style={{ fontSize: 9, padding: '1px 5px' }}
+                  data-testid={`live-settings-wallet-pw-${w.id}`}
+                >
+                  {w.appProtected ? 'App password' : 'Own password'}
+                </span>
+              )}
+            </span>
+            {/* Chain name from the chain params — never the raw internal chain
+                id ("mainnet"). An account of a seed names its ADDRESS instead:
+                its siblings share the chain, so the chain does not tell them
+                apart and the address does. */}
+            <span className={nested && w.address ? 'row-desc mono' : 'row-desc'}>
+              {nested && w.address ? shortAccountAddress(w.address) : chainDisplayName(w.network)}
+            </span>
+          </span>
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={() => startRename(w.id, w.name)}
+            aria-label={`Rename ${w.name}`}
+            data-testid={`live-wallet-rename-${w.id}`}
+          >
+            <Pencil size={14} />
+          </button>
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm danger"
+            onClick={() => setRemoveId(w.id)}
+            aria-label={`Remove ${w.name}`}
+            data-testid={`live-wallet-remove-${w.id}`}
+            style={{ padding: '4px 8px', flexShrink: 0 }}
+          >
+            <Trash2 size={13} /> Remove
+          </button>
+        </>
+      )}
+    </div>
+  );
 
-  const openReveal = async (kind: RevealKind) => {
-    setRevealKind(kind);
-    setRevealPw('');
-    setRevealSecret(null);
-    setRevealError('');
-    setRevealBusy(false);
-    // A passwordless wallet has no password to ask for — reveal directly with ''.
-    if (isPasswordless) {
-      setRevealBusy(true);
-      const secret = kind === 'seed' ? await revealMnemonic('') : await revealPrivateKey('');
-      setRevealBusy(false);
-      if (secret == null) setRevealError('Could not reveal this secret.');
-      else setRevealSecret(secret);
-    }
-  };
-  const closeReveal = () => {
-    // Clear the plaintext secret from memory as the panel closes.
-    setRevealKind(null);
-    setRevealPw('');
-    setRevealSecret(null);
-    setRevealError('');
-    setRevealBusy(false);
-  };
-  const submitReveal = async (e: FormEvent) => {
-    e.preventDefault();
-    if (!revealKind || revealBusy) return;
-    setRevealError('');
-    setRevealBusy(true);
-    const secret =
-      revealKind === 'seed' ? await revealMnemonic(revealPw) : await revealPrivateKey(revealPw);
-    setRevealBusy(false);
-    if (secret == null) {
-      setRevealError('Incorrect password.');
-      return;
-    }
-    setRevealSecret(secret);
-    setRevealPw('');
-  };
+  // --- Reveal secret (recovery phrase / private key) ---
+  // The screen itself is RevealSecretModal, shared with the forced app-password
+  // setup so there is exactly one screen in this wallet that shows a secret.
+  // Only "which secret, and does it need a password" is decided here.
+  const [revealKind, setRevealKind] = useState<RevealKind | null>(null);
+  const openReveal = (kind: RevealKind) => setRevealKind(kind);
 
   const handleChangePassword = async () => {
     setPwError('');
@@ -463,10 +787,12 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
       }
     }
     setPwBusy(true);
-    const ok = await changePassword(isPasswordless ? '' : oldPw, makePasswordless ? '' : newPw);
+    const res = await changePassword(isPasswordless ? '' : oldPw, makePasswordless ? '' : newPw);
     setPwBusy(false);
-    if (!ok) {
-      setPwError('Current password is incorrect.');
+    if (!res.ok) {
+      // Same rule as the app-password form: only blame the password when the
+      // password is what failed.
+      setPwError(res.error ?? 'Current password is incorrect.');
       return;
     }
     setOldPw('');
@@ -485,7 +811,14 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
         <ConfirmModal
           title={`Remove "${removeTarget.name}"?`}
           description={
-            removingLast
+            /* Removing ONE account of a seed that has others is not removing the
+               seed: the words stay on this device in its siblings and bring this
+               address back, so the backup warning would be a false alarm here. */
+            removeSiblings.length > 0
+              ? `Removes ${removeTarget.name} only. The seed stays in its other ${
+                  removeSiblings.length === 1 ? 'account' : 'accounts'
+                } and the same recovery phrase restores this account again.`
+              : removingLast
               ? 'This is your LAST wallet. Removing it deletes its encrypted vault and returns you to onboarding. You will need its recovery phrase to restore access. This cannot be undone.'
               : 'This removes the wallet and its encrypted vault from this device. You will need its recovery phrase to restore access. This cannot be undone.'
           }
@@ -498,144 +831,178 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
       )}
 
       {revealKind && (
-        <Modal
-          title={revealKind === 'seed' ? 'Show recovery phrase' : 'Show private key'}
-          onClose={closeReveal}
-          testId="live-reveal-modal"
-        >
-          <div className="banner danger" style={{ marginBottom: 12, alignItems: 'flex-start' }}>
-            <AlertTriangle size={14} />
-            <span>Never share this. Anyone with it controls your funds.</span>
-          </div>
-
-          {revealSecret != null ? (
-            <div>
-              <div
-                className="mono"
-                data-testid="live-reveal-output"
-                style={{
-                  fontSize: 12.5,
-                  wordBreak: 'break-all',
-                  lineHeight: 1.6,
-                  background: 'var(--bg-elev)',
-                  border: '1px solid var(--border-strong)',
-                  borderRadius: 'var(--r-md)',
-                  padding: 12,
-                  marginBottom: 10,
-                }}
-              >
-                {revealSecret}
-              </div>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: 12 }}>
-                <CopyButton value={revealSecret} label="Copy secret" size={14} secret />
-                <span style={{ fontSize: 12, color: 'var(--text-dim)', marginLeft: 6 }}>Copy</span>
-              </div>
-              <Button block variant="secondary" onClick={closeReveal} data-testid="live-reveal-hide">
-                Hide
-              </Button>
-            </div>
-          ) : isPasswordless ? (
-            <div>
-              <p className="text-dim" style={{ fontSize: 12, marginBottom: 12, lineHeight: 1.5 }}>
-                {revealBusy
-                  ? 'Revealing…'
-                  : 'This wallet has no password, so the secret is revealed directly.'}
-              </p>
-              {revealError && (
-                <span
-                  role="alert"
-                  data-testid="live-reveal-error"
-                  style={{ fontSize: 11.5, color: 'var(--danger)', display: 'block', marginBottom: 8 }}
+        <RevealSecretModal
+          kind={revealKind}
+          noPassword={isPasswordless}
+          reveal={(pw) => (revealKind === 'seed' ? revealMnemonic(pw) : revealPrivateKey(pw))}
+          onClose={() => setRevealKind(null)}
+          notes={
+            <>
+              {/* A seed holds one key PER ACCOUNT, so "the private key" is
+                  ambiguous until it names which account it belongs to. */}
+              {revealKind === 'key' && activeWallet?.hdIndex != null && (
+                <p
+                  className="text-dim"
+                  style={{ fontSize: 12, margin: '0 0 10px', lineHeight: 1.5 }}
+                  data-testid="live-reveal-key-account"
                 >
-                  {revealError}
-                </span>
+                  Private key of Account {accountNumberOf(activeWallet)}.
+                </p>
               )}
-              <Button block variant="secondary" onClick={closeReveal}>
-                Close
-              </Button>
-            </div>
-          ) : (
-            <form onSubmit={submitReveal}>
-              <p className="text-dim" style={{ fontSize: 12, marginBottom: 10, lineHeight: 1.5 }}>
-                Enter your wallet password to reveal your{' '}
-                {revealKind === 'seed' ? 'recovery phrase' : 'private key'}.
-              </p>
-              <PasswordField
-                label="Wallet password"
-                showLabel="Show password"
-                hideLabel="Hide password"
-                value={revealPw}
-                onChange={(e) => {
-                  setRevealPw(e.target.value);
-                  setRevealError('');
-                }}
-                placeholder="Enter password"
-                autoFocus
-                testId="live-reveal-password"
-              />
-              {revealError && (
-                <span
-                  role="alert"
-                  data-testid="live-reveal-error"
-                  style={{ fontSize: 11.5, color: 'var(--danger)', display: 'block', marginTop: 2 }}
-                >
-                  {revealError}
-                </span>
+              {revealKind === 'seed' && isEvmSeedAccount(activeWallet) && (
+                <p className="text-dim" style={{ fontSize: 12, margin: '0 0 10px', lineHeight: 1.5 }}>
+                  These words restore every account of this wallet (Account 1, 2, ...).
+                </p>
               )}
-              <div style={{ display: 'flex', gap: 9, marginTop: 14 }}>
-                <Button type="button" variant="secondary" onClick={closeReveal}>
-                  Cancel
-                </Button>
-                <Button type="submit" block loading={revealBusy} data-testid="live-reveal-submit">
-                  Reveal
-                </Button>
-              </div>
-            </form>
-          )}
-        </Modal>
+            </>
+          }
+        />
       )}
     </>
   );
 
   // --- Root list: section rows -----------------------------------------------
   if (section === null) {
-    const sectionRow = (
-      testId: string,
-      icon: ReactNode,
-      title: string,
-      desc: string,
-      onClick: () => void,
-      iconClass?: string,
-    ) => (
-      <button type="button" className="list-row" onClick={onClick} data-testid={testId}>
-        <span className={iconClass ? `row-icon ${iconClass}` : 'row-icon'}>{icon}</span>
+    const sectionRow = (row: RootRow) => (
+      <button
+        type="button"
+        className="list-row"
+        onClick={row.onClick}
+        data-testid={row.testId}
+        key={row.testId}
+      >
+        <span className={row.iconClass ? `row-icon ${row.iconClass}` : 'row-icon'}>{row.icon}</span>
         <span className="row-main">
-          <span className="row-title">{title}</span>
-          <span className="row-desc">{desc}</span>
+          <span className="row-title">{row.title}</span>
+          <span className="row-desc">{row.desc}</span>
         </span>
         <ChevronRight size={16} className="text-faint" />
       </button>
     );
 
-    // A section row that simply is not rendered in basic mode. Filtering at the
-    // row keeps one list rather than two divergent ones.
-    const expertRow = (
-      id: SettingsSection,
-      testId: string,
-      icon: ReactNode,
-      title: string,
-      desc: string,
-      iconClass?: string,
-    ) =>
-      settingsMode === 'expert' || !EXPERT_ONLY.has(id)
-        ? sectionRow(testId, icon, title, desc, () => setSection(id), iconClass)
-        : null;
+    // EVERY ROW OF THE ROOT LIST, as data. It used to be ten hand-written JSX
+    // blocks in one flat column, which is why nothing could be grouped without
+    // rewriting all of them, and why two rows could drift into near-identical
+    // names without anyone seeing the pair.
+    const rootRows: Record<RootRowId, RootRow> = {
+      wallets: {
+        testId: 'live-settings-row-wallets',
+        icon: <Wallet size={17} />,
+        title: 'Wallets',
+        desc: `${wallets.length} wallet${wallets.length === 1 ? '' : 's'} · rename or remove`,
+        onClick: () => setSection('wallets'),
+      },
+      addresses: {
+        testId: 'live-settings-row-addresses',
+        icon: <List size={17} />,
+        title: 'Addresses',
+        desc: 'Receive addresses of this wallet',
+        onClick: () => setSection('addresses'),
+      },
+      addressBook: {
+        testId: 'live-address-book-btn',
+        icon: <BookUser size={17} />,
+        title: 'Address book',
+        desc: 'Saved recipients',
+        onClick: onOpenAddressBook,
+      },
+      transactions: {
+        testId: 'live-settings-row-transactions',
+        icon: <Download size={17} />,
+        title: SECTION_TITLES.transactions,
+        desc: 'Your transaction history as a CSV file',
+        onClick: () => setSection('transactions'),
+      },
+      security: {
+        testId: 'live-settings-row-security',
+        icon: <Shield size={17} />,
+        title: 'Security',
+        desc: 'Password, auto-lock, recovery phrase',
+        onClick: () => setSection('security'),
+        iconClass: 'success',
+      },
+      recovery: {
+        testId: 'live-settings-row-recovery',
+        icon: <LifeBuoy size={17} />,
+        title: 'Recovery',
+        desc: recoveryCodeSet
+          ? 'Recovery code is set · backup file'
+          : 'If you forget your password',
+        onClick: () => setSection('recovery'),
+      },
+      appearance: {
+        testId: 'live-settings-row-appearance',
+        icon: <Palette size={17} />,
+        title: 'Appearance',
+        desc: 'Theme and accent color',
+        onClick: () => setSection('appearance'),
+      },
+      notifications: {
+        testId: 'live-settings-row-notifications',
+        icon: <Bell size={17} />,
+        title: 'Notifications',
+        desc: 'Alerts when funds arrive',
+        onClick: () => setSection('notifications'),
+      },
+      networks: {
+        testId: 'live-settings-row-networks',
+        icon: <Layers size={17} />,
+        title: SECTION_TITLES.networks,
+        desc: 'Show or hide networks in the switcher',
+        onClick: () => setSection('networks'),
+      },
+      network: {
+        testId: 'live-settings-row-network',
+        icon: <Globe size={17} />,
+        title: SECTION_TITLES.network,
+        desc: 'Block explorer link and server status',
+        onClick: () => setSection('network'),
+      },
+      sites: {
+        testId: 'live-settings-row-sites',
+        icon: <Link2 size={17} />,
+        title: 'Connected sites',
+        desc:
+          connectedSites.length === 0
+            ? 'No dApps connected via window.evrmore'
+            : `${connectedSites.length} site${connectedSites.length === 1 ? '' : 's'} can read your address`,
+        onClick: () => setSection('sites'),
+      },
+      diagnostics: {
+        testId: 'live-settings-row-diagnostics',
+        icon: <Activity size={17} />,
+        title: 'Diagnostics',
+        desc: 'Storage use, cache and connection details',
+        onClick: () => setSection('diagnostics'),
+      },
+      about: {
+        testId: 'live-settings-row-about',
+        icon: <Info size={17} />,
+        title: 'About',
+        desc: 'Version, disclaimer, reset',
+        onClick: () => setSection('about'),
+        iconClass: 'neutral',
+      },
+    };
+
+    /** Basic mode simply does not render the expert rows (one list, not two
+     *  divergent ones). The address book is never expert-only. */
+    const visible = (id: RootRowId) =>
+      id === 'addressBook' || settingsMode === 'expert' || !EXPERT_ONLY.has(id as SettingsSection);
 
     return (
-      <Shell title="Settings" onBack={onBack} testId="live-settings" modals={modals}>
+      <Shell title="Settings" onBack={onBack} testId="live-settings" modals={modals} showSync={false}>
         {/* Mode switch first: it explains why the list below is short. */}
         <div className="field" style={{ marginBottom: 12 }}>
-          <label>Detail level</label>
+          {/* The connection pill rides on this label's row rather than a row of
+              its own, which would cost ~30 px of a 620 px popup. Settings is no
+              longer a screen where the wallet can silently go offline
+              (KNOWN_LIMITATIONS item 33); same pill, same derivation as the
+              Activity tab. */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+            <label>Detail level</label>
+            <SyncStatusPill />
+          </div>
           <Segmented<SettingsMode>
             options={[
               { value: 'basic', label: 'Basic' },
@@ -651,87 +1018,20 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
               : 'Everything, including settings that can break your connection if set wrong.'}
           </span>
         </div>
-        {sectionRow(
-          'live-settings-row-appearance',
-          <Palette size={17} />,
-          'Appearance',
-          'Theme and accent color',
-          () => setSection('appearance'),
-        )}
-        {sectionRow(
-          'live-settings-row-wallets',
-          <Wallet size={17} />,
-          'Wallets',
-          `${wallets.length} wallet${wallets.length === 1 ? '' : 's'} · rename or remove`,
-          () => setSection('wallets'),
-        )}
-        {expertRow(
-          'addresses',
-          'live-settings-row-addresses',
-          <List size={17} />,
-          'Addresses',
-          'Receive addresses of this wallet',
-        )}
-        {sectionRow(
-          'live-settings-row-security',
-          <Shield size={17} />,
-          'Security',
-          'Password, auto-lock, reveal secrets',
-          () => setSection('security'),
-          'success',
-        )}
-        {expertRow(
-          'network',
-          'live-settings-row-network',
-          <Globe size={17} />,
-          'Network & Explorer',
-          'Block explorer link and server status',
-        )}
-        {expertRow(
-          'networks',
-          'live-settings-row-networks',
-          <Layers size={17} />,
-          'Visible networks',
-          'Show or hide networks in the switcher',
-        )}
-        {expertRow(
-          'sites',
-          'live-settings-row-sites',
-          <Link2 size={17} />,
-          'Connected sites',
-          connectedSites.length === 0
-            ? 'No dApps connected via window.evrmore'
-            : `${connectedSites.length} site${connectedSites.length === 1 ? '' : 's'} can read your address`,
-        )}
-        {expertRow(
-          'transactions',
-          'live-settings-row-transactions',
-          <Download size={17} />,
-          'Transactions',
-          'Export your history as CSV',
-        )}
-        {expertRow(
-          'diagnostics',
-          'live-settings-row-diagnostics',
-          <Activity size={17} />,
-          'Diagnostics',
-          'Storage use, cache and connection details',
-        )}
-        {sectionRow(
-          'live-address-book-btn',
-          <BookUser size={17} />,
-          'Address Book',
-          'Saved recipients',
-          onOpenAddressBook,
-        )}
-        {sectionRow(
-          'live-settings-row-about',
-          <Info size={17} />,
-          'About',
-          'Version, disclaimer, reset',
-          () => setSection('about'),
-          'neutral',
-        )}
+        {SECTION_GROUPS.map((group, groupIndex) => {
+          const ids = group.sections.filter(visible);
+          // Basic mode can empty a group entirely. A heading over nothing is
+          // worse than no heading, so the group goes with its rows.
+          if (ids.length === 0) return null;
+          return (
+            <div key={group.title} data-testid={`live-settings-group-${group.title.toLowerCase()}`}>
+              <div className="section-label" style={groupIndex === 0 ? { marginTop: 0 } : undefined}>
+                {group.title}
+              </div>
+              {ids.map((id) => sectionRow(rootRows[id]))}
+            </div>
+          );
+        })}
       </Shell>
     );
   }
@@ -761,96 +1061,78 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
           <div style={{ padding: '2px 4px' }}>
             <AccentSwatches />
           </div>
+          <div className="section-label">Window</div>
+          <div className="list-row" data-testid="live-side-panel-row">
+            <span className="row-main">
+              <span className="row-title">Open as side panel</span>
+              <span className="row-desc">
+                The wallet docks in the browser side panel and stays open while you browse. This is how Chrome and
+                Edge open it by default; turn it off to use the toolbar popup, which closes as soon as you click
+                away. Firefox uses its own sidebar and starts with the popup. Takes effect the next time you open
+                the wallet.
+              </span>
+              {!sidePanel.supported && (
+                <span className="row-desc" data-testid="live-side-panel-unsupported" style={{ color: 'var(--warning)' }}>
+                  Not available here: this browser has no side panel or sidebar API for extensions, so the wallet
+                  opens in the toolbar popup. If the extension was just updated, reload it in the browser's
+                  extensions page and try again.
+                </span>
+              )}
+            </span>
+            <Toggle
+              checked={sidePanel.enabled}
+              onChange={(v) => void onSidePanelToggle(v)}
+              label="Open as side panel"
+              testId="live-side-panel-toggle"
+              disabled={!sidePanel.loaded || !sidePanel.supported}
+            />
+          </div>
+          {sidePanelNote && (
+            <div className="banner info" data-testid="live-side-panel-note" style={{ marginTop: 8 }}>
+              {sidePanelNote}
+            </div>
+          )}
         </>
       )}
 
       {section === 'wallets' && (
         <>
           <div className="stack" data-testid="live-wallets-list">
-            {wallets.map((w) => (
-              <div
-                key={w.id}
-                className="list-row"
-                data-testid={`live-settings-wallet-${w.id}`}
-                style={{ alignItems: 'center', gap: 8 }}
-              >
-                {renamingId === w.id ? (
-                  <>
-                    <span className="row-main" style={{ flex: 1 }}>
-                      <TextField
-                        label=""
-                        value={renameValue}
-                        onChange={(e) => setRenameValue(e.target.value)}
-                        testId={`live-wallet-rename-input-${w.id}`}
-                        autoComplete="off"
-                        autoFocus
-                      />
+            {walletNodes.map((node, ni) =>
+              node.kind === 'single' ? (
+                renderWalletRow(node.wallet, false)
+              ) : (
+                <div key={`group-${node.key}`}>
+                  {/* One seed, its accounts under it (the EVM accounts design notes).
+                      The heading names the seed; the rows below are its addresses. */}
+                  <div
+                    data-testid={`live-settings-group-${ni}`}
+                    style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 2px 2px', minWidth: 0 }}
+                  >
+                    <TokenIcon assetId="EVM" size={14} />
+                    <span
+                      className="text-faint"
+                      style={{
+                        flex: 1,
+                        minWidth: 0,
+                        fontSize: 10,
+                        letterSpacing: 0.3,
+                        textTransform: 'uppercase',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {node.title}
                     </span>
-                    <button
-                      type="button"
-                      className="icon-btn"
-                      onClick={() => void commitRename()}
-                      aria-label="Save name"
-                      data-testid={`live-wallet-rename-save-${w.id}`}
-                    >
-                      <Check size={15} />
-                    </button>
-                    <button
-                      type="button"
-                      className="icon-btn"
-                      onClick={() => { setRenamingId(null); setRenameValue(''); }}
-                      aria-label="Cancel rename"
-                    >
-                      <ChevronLeft size={15} />
-                    </button>
-                  </>
-                ) : (
-                  <>
-                    <span className="row-main" style={{ flex: 1, minWidth: 0 }}>
-                      <span
-                        className="row-title"
-                        style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}
-                      >
-                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          {w.name}
-                        </span>
-                        {w.id === activeWalletId && (
-                          <span className="chip success" style={{ fontSize: 9, padding: '1px 5px' }}>active</span>
-                        )}
-                        <span className="chip neutral" style={{ fontSize: 9, padding: '1px 5px' }}>
-                          {kindLabel(w.kind)}
-                        </span>
-                        {w.passwordless && (
-                          <span className="chip warning" style={{ fontSize: 9, padding: '1px 5px' }}>No password</span>
-                        )}
-                      </span>
-                      {/* Chain name from the chain params — never the raw
-                          internal chain id ("mainnet"). */}
-                      <span className="row-desc">{chainDisplayName(w.network)}</span>
+                    <span className="chip neutral" style={{ fontSize: 9, padding: '1px 5px', flexShrink: 0 }}>
+                      Seed
                     </span>
-                    <button
-                      type="button"
-                      className="icon-btn"
-                      onClick={() => startRename(w.id, w.name)}
-                      aria-label={`Rename ${w.name}`}
-                      data-testid={`live-wallet-rename-${w.id}`}
-                    >
-                      <Pencil size={14} />
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-ghost btn-sm danger"
-                      onClick={() => setRemoveId(w.id)}
-                      aria-label={`Remove ${w.name}`}
-                      data-testid={`live-wallet-remove-${w.id}`}
-                      style={{ padding: '4px 8px', flexShrink: 0 }}
-                    >
-                      <Trash2 size={13} /> Remove
-                    </button>
-                  </>
-                )}
-              </div>
-            ))}
+                  </div>
+                  {node.members.map((m) => renderWalletRow(m, true, memberLabel(m, node.title, node.members.length)))}
+                </div>
+              ),
+            )}
           </div>
           <p className="text-faint" style={{ fontSize: 11, margin: '8px 2px 4px', lineHeight: 1.5 }}>
             Removing a wallet deletes its encrypted vault from this device. Without its recovery
@@ -897,6 +1179,49 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
               >
                 New address
               </Button>
+              {/* Gap-limit scan (KNOWN_LIMITATIONS item 15). A seed used in another
+                  wallet may hold coins on addresses this one never derived, which
+                  is the usual reason an imported wallet looks emptier than it is.
+                  Import runs this automatically; the button is for wallets that
+                  predate the scan, and for a seed that got used elsewhere later. */}
+              <Button
+                variant="secondary"
+                size="sm"
+                block
+                icon={<Search size={14} />}
+                loading={addressScan.scanning}
+                onClick={() => void scanForUsedAddresses()}
+                data-testid="live-settings-scan-addresses"
+                style={{ marginTop: 8 }}
+              >
+                {addressScan.scanning ? 'Scanning…' : 'Scan for used addresses'}
+              </Button>
+              <p
+                className="text-faint"
+                style={{ fontSize: 11, margin: '6px 2px 0', lineHeight: 1.5 }}
+                data-testid="live-settings-scan-status"
+              >
+                {addressScan.scanning
+                  ? `Checking address ${addressScan.scanned}. This looks ahead for addresses of this same recovery phrase that already hold coins.`
+                  : addressScan.error
+                  ? addressScan.error
+                  : addressScan.result
+                  ? [
+                      addressScan.result.found > 0
+                        ? `Found ${addressScan.result.found} more used ${addressScan.result.found === 1 ? 'address' : 'addresses'}. Their balances are included now.`
+                        : 'No further used addresses found.',
+                      // A run that hit the ceiling or lost reads proved a LOWER
+                      // BOUND, so saying "none" flatly would overclaim.
+                      addressScan.result.complete
+                        ? ''
+                        : addressScan.result.failedReads > 0
+                        ? `${addressScan.result.failedReads} ${addressScan.result.failedReads === 1 ? 'address' : 'addresses'} could not be checked, so run this again when the connection is better.`
+                        : 'The scan stopped at its limit, so there may be more.',
+                    ]
+                      .filter(Boolean)
+                      .join(' ')
+                  : 'Looks ahead for addresses of this recovery phrase that already hold coins. Runs by itself after an import.'}
+              </p>
               {addrError && (
                 <span
                   role="alert"
@@ -918,8 +1243,12 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
         <>
           {/* Reveal secrets. A seed wallet exposes BOTH its recovery phrase and its
               private key; a Satori (pk) wallet has no seed, so only the key shows.
-              A passwordless wallet reveals directly (no password prompt). */}
-          <div className="section-label" style={{ marginTop: 0 }}>Backup</div>
+              A passwordless wallet reveals directly (no password prompt).
+
+              NOT called "Backup" any more: since the backup FILE exists
+              (the app-password design notes §13.7) one screen had two different
+              things under that word, and the two recover different things. */}
+          <div className="section-label" style={{ marginTop: 0 }}>Recovery phrase and private key</div>
           <div style={{ display: 'flex', gap: 9, marginBottom: 10 }}>
             {!isPkWallet && (
               <Button
@@ -927,7 +1256,7 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
                 size="sm"
                 block
                 icon={<Eye size={14} />}
-                onClick={() => void openReveal('seed')}
+                onClick={() => openReveal('seed')}
                 data-testid="live-reveal-seed"
               >
                 Show recovery phrase
@@ -938,12 +1267,24 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
               size="sm"
               block
               icon={<KeyRound size={14} />}
-              onClick={() => void openReveal('key')}
+              onClick={() => openReveal('key')}
               data-testid="live-reveal-key"
             >
               Show private key
             </Button>
           </div>
+          {/* One seed carries every account of this wallet, so the phrase behind
+              "Show recovery phrase" is not the phrase of THIS account only. Say
+              so where the button is, not only after the words are on screen. */}
+          {isEvmSeedAccount(activeWallet) && (
+            <p
+              className="text-faint"
+              style={{ fontSize: 11, margin: '0 2px 10px', lineHeight: 1.5 }}
+              data-testid="live-reveal-seed-accounts-note"
+            >
+              These words restore every account of this wallet (Account 1, 2, ...).
+            </p>
+          )}
           {isPkWallet && (
             <p className="text-faint" style={{ fontSize: 11, margin: '0 2px 10px', lineHeight: 1.5 }}>
               This is a Satori (single-key) wallet. It has a private key but no recovery phrase.
@@ -951,10 +1292,22 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
           )}
 
           <div className="section-label">Locking</div>
+          {/* This is the app-wide default. A single wallet can be exempt from it
+              (a wallet that opens with no password, or one that kept "do not ask
+              when sending" when it moved to the app password), and the send path
+              is `requirePasswordToSend && !exempt`. Two switches asking the same
+              question in two places read as a duplicate and hide that the
+              general one simply does not apply here (owner, 2026-08-26), so the
+              exemption is stated on the row it overrides, next to the setting it
+              overrides, rather than only in the wallet's own card. */}
           <div className="list-row">
             <span className="row-main">
               <span className="row-title">Require password to send</span>
-              <span className="row-desc">Ask for your wallet password before every broadcast.</span>
+              <span className="row-desc">
+                {sendPasswordExempt
+                  ? `On for your other wallets. ${activeWallet?.name ?? 'This wallet'} is set to send with nothing typed, so this does not apply to it.`
+                  : 'Ask for your password before every broadcast.'}
+              </span>
             </span>
             <Toggle
               checked={requirePasswordToSend}
@@ -984,20 +1337,335 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
             </select>
           </div>
 
-          <div className="section-label">Notifications</div>
-          <div className="list-row">
-            <span className="row-main">
-              <span className="row-title">Notify on incoming funds</span>
-              <span className="row-desc">Show a desktop notification when a coin or asset arrives in any wallet.</span>
-            </span>
-            <Toggle
-              checked={notifyDeposits}
-              onChange={setNotifyDeposits}
-              label="Notify on incoming funds"
-              testId="live-set-notify-deposits"
-            />
+          {/* ---- ONE PASSWORD FOR THE WHOLE WALLET (the app-password design notes)
+              Optional, and off until the user turns it on. Nothing here changes
+              anything about an existing wallet: setting it writes one record,
+              and each wallet moves over the next time it is opened with the
+              password it already has. */}
+          <div className="section-label">App password</div>
+          <div className="card" data-testid="live-app-password-card">
+            <div className="list-row" style={{ padding: 0, border: 'none' }}>
+              <span className="row-main">
+                <span className="row-title">
+                  {appPasswordSet ? 'One password for this wallet' : 'Use one password for this wallet'}
+                </span>
+              </span>
+              <span
+                className={`chip ${appPasswordSet ? 'success' : 'neutral'}`}
+                data-testid="live-app-password-chip"
+              >
+                {appPasswordSet ? 'On' : 'Off'}
+              </span>
+            </div>
+            {/* Deliberately NOT a `.row-desc`: that class clamps to two lines,
+                and this sentence IS the explanation of the feature. A clipped
+                "...its curre…" is exactly what a user must not be asked to
+                decide from. */}
+            <p
+              className="text-dim"
+              data-testid="live-app-password-state"
+              style={{ fontSize: 11.5, margin: '3px 0 0', lineHeight: 1.55 }}
+            >
+              {appPasswordSet
+                ? 'Set. It opens every wallet that has moved over.'
+                : 'One password opens the whole wallet. Each wallet moves over the next time you open it with its current password.'}
+            </p>
+
+            {!appFormOpen && (
+              <Button
+                block
+                variant={appPasswordSet ? 'secondary' : 'primary'}
+                size="sm"
+                icon={<KeyRound size={14} />}
+                onClick={() => {
+                  resetAppForm();
+                  setAppPwSuccess('');
+                  setAppFormOpen(true);
+                }}
+                data-testid="live-app-password-open"
+                style={{ marginTop: 10 }}
+              >
+                {appPasswordSet ? 'Change app password' : 'Set an app password'}
+              </Button>
+            )}
+
+            {appFormOpen && (
+              <div style={{ marginTop: 10 }}>
+                {appPasswordSet ? (
+                  <PasswordField
+                    label="Current app password"
+                    showLabel="Show password"
+                    hideLabel="Hide password"
+                    value={appCurrentPw}
+                    onChange={(e) => onAppFieldChange(setAppCurrentPw)(e.target.value)}
+                    testId="live-app-pw-current"
+                  />
+                ) : (
+                  <>
+                    {/* Said BEFORE the password is set, not after: there is no
+                        recovery for it, and the recovery phrase of each wallet
+                        is the backup, as the wallet has always said. */}
+                    <div
+                      className="banner warning"
+                      data-testid="live-app-password-warning"
+                      style={{ marginBottom: 10, alignItems: 'flex-start' }}
+                    >
+                      <AlertTriangle size={14} />
+                      <span>
+                        If you lose this password, the wallets it protects can only be restored from
+                        their recovery phrases.
+                      </span>
+                    </div>
+                    <p
+                      className="text-faint"
+                      style={{ fontSize: 11, margin: '0 2px 10px', lineHeight: 1.5 }}
+                      data-testid="live-app-password-no-removal"
+                    >
+                      Removing the app password is not supported in this release. You can change it at
+                      any time.
+                    </p>
+                  </>
+                )}
+                <PasswordField
+                  label={appPasswordSet ? 'New app password' : 'App password'}
+                  showLabel="Show password"
+                  hideLabel="Hide password"
+                  value={appNewPw}
+                  onChange={(e) => onAppFieldChange(setAppNewPw)(e.target.value)}
+                  testId="live-app-pw-new"
+                />
+                <PasswordStrengthBar password={appNewPw} />
+                <PasswordField
+                  label="Confirm app password"
+                  showLabel="Show password"
+                  hideLabel="Hide password"
+                  value={appConfirmPw}
+                  onChange={(e) => onAppFieldChange(setAppConfirmPw)(e.target.value)}
+                  testId="live-app-pw-confirm"
+                />
+                {appPasswordSet && (
+                  <p className="text-faint" style={{ fontSize: 11, margin: '6px 2px 0', lineHeight: 1.5 }}>
+                    Changing it locks the wallet, so you will sign in again with the new password.
+                    Wallets that have not moved over keep their own passwords.
+                  </p>
+                )}
+                {appPwError && (
+                  <span
+                    role="alert"
+                    data-testid="live-app-pw-error"
+                    style={{ fontSize: 11.5, color: 'var(--danger)', display: 'block', marginTop: 4 }}
+                  >
+                    {appPwError}
+                  </span>
+                )}
+                <div style={{ display: 'flex', gap: 9, marginTop: 12 }}>
+                  <Button
+                    block
+                    loading={appPwBusy}
+                    onClick={() => void handleAppPassword()}
+                    data-testid="live-app-pw-submit"
+                  >
+                    {appPasswordSet ? 'Update app password' : 'Set app password'}
+                  </Button>
+                  <Button
+                    block
+                    variant="ghost"
+                    onClick={() => {
+                      resetAppForm();
+                      setAppFormOpen(false);
+                    }}
+                    data-testid="live-app-pw-cancel"
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            {appPwSuccess && !appFormOpen && (
+              <span
+                data-testid="live-app-pw-success"
+                style={{ fontSize: 11.5, color: 'var(--success)', display: 'block', marginTop: 8, lineHeight: 1.5 }}
+              >
+                {appPwSuccess}
+              </span>
+            )}
           </div>
 
+          {/* Recovery moved to a screen of its own (2026-08-26). It lived here,
+              at the bottom of the longest screen in Settings, which is the
+              worst place for the one thing a user goes looking for when they
+              have lost their password. A pointer stays, because this IS where
+              they will look first. */}
+          <button
+            type="button"
+            className="list-row"
+            onClick={() => setSection('recovery')}
+            data-testid="live-security-to-recovery"
+          >
+            <span className="row-main">
+              <span className="row-title">Forgot your password?</span>
+              <span className="row-desc">
+                {recoveryCodeSet
+                  ? 'A recovery code is set. You can also save a backup file.'
+                  : 'Make a recovery code, or save a backup file.'}
+              </span>
+            </span>
+            <ChevronRight size={16} className="text-faint" />
+          </button>
+
+          {isAppProtected ? (
+            <div className="card" style={{ marginTop: 10 }} data-testid="live-wallet-pw-app-managed">
+              <div className="section-label" style={{ marginTop: 0 }}>Wallet password</div>
+              <p className="text-dim" style={{ fontSize: 11.5, margin: 0, lineHeight: 1.5 }}>
+                This wallet is opened by your app password. It no longer has a password of its own.
+              </p>
+              {/* §6's convenience half, made visible and reversible. A wallet
+                  that was passwordless before it moved to the app password
+                  keeps "do not ask when sending", and that used to be a
+                  permanent, invisible property: the old badge belonged to the
+                  flag the migration clears, and nothing anywhere could turn it
+                  off. It decides whether money can leave with nothing typed, so
+                  it says so and it has a switch. */}
+              <div
+                className="list-row"
+                style={{ padding: '10px 0 0', border: 'none', marginTop: 8, borderTop: '1px solid var(--border)' }}
+              >
+                <span className="row-main">
+                  <span className="row-title">Ask for the password when sending</span>
+                  <span className="text-dim" style={{ fontSize: 10.5, display: 'block', marginTop: 1 }}>
+                    For this wallet only. It overrides Require password to send above.
+                  </span>
+                  <span className="text-dim" style={{ fontSize: 11, display: 'block', marginTop: 2, lineHeight: 1.5 }}>
+                    {noSendPassword
+                      ? 'Off. Sends from this wallet go through with nothing typed.'
+                      : 'On. Your app password is required before a send is broadcast.'}
+                  </span>
+                </span>
+                <Toggle
+                  checked={!noSendPassword}
+                  onChange={(v) => {
+                    setSendPwError('');
+                    if (v) {
+                      // Back ON: this only ADDS the check, so nothing to prove.
+                      closeSendPwForm();
+                      void setNoSendPassword(false);
+                    } else {
+                      // OFF: the switch does not move until the form below is
+                      // answered, so it never shows a state that is not real.
+                      setSendPwValue('');
+                      setSendPwAck(false);
+                      setSendPwFormOpen(true);
+                    }
+                  }}
+                  label="Ask for the password when sending"
+                  testId="live-set-send-password"
+                />
+              </div>
+              {sendPwFormOpen && !noSendPassword && (
+                <div style={{ marginTop: 10 }} data-testid="live-send-password-form">
+                  <div
+                    className="banner danger"
+                    style={{ marginBottom: 10, alignItems: 'flex-start' }}
+                    data-testid="live-send-password-warning"
+                  >
+                    <AlertTriangle size={14} />
+                    <span>
+                      Sends from this wallet will go through with nothing typed. Anyone who can open
+                      this wallet on this computer could take these funds.
+                    </span>
+                  </div>
+                  <PasswordField
+                    label="Current app password"
+                    showLabel="Show password"
+                    hideLabel="Hide password"
+                    value={sendPwValue}
+                    onChange={(e) => {
+                      setSendPwValue(e.target.value);
+                      setSendPwError('');
+                    }}
+                    testId="live-send-password-current"
+                  />
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 10,
+                      background: 'var(--card)',
+                      borderRadius: 'var(--r-md)',
+                      border: '1px solid var(--border)',
+                      padding: '10px 12px',
+                      margin: '10px 0 4px',
+                      cursor: 'pointer',
+                    }}
+                    onClick={() => {
+                      setSendPwAck((v) => !v);
+                      setSendPwError('');
+                    }}
+                    role="checkbox"
+                    aria-checked={sendPwAck}
+                    tabIndex={0}
+                    onKeyDown={(e) => {
+                      if (e.key === ' ' || e.key === 'Enter') {
+                        e.preventDefault();
+                        setSendPwAck((v) => !v);
+                        setSendPwError('');
+                      }
+                    }}
+                    data-testid="live-send-password-ack"
+                  >
+                    <div
+                      style={{
+                        width: 18,
+                        height: 18,
+                        borderRadius: 5,
+                        border: `2px solid ${sendPwAck ? 'var(--success)' : 'var(--border-strong)'}`,
+                        background: sendPwAck ? 'var(--success-bg)' : 'transparent',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        flexShrink: 0,
+                        transition: 'all 0.15s',
+                      }}
+                    >
+                      {sendPwAck && (
+                        <span style={{ color: 'var(--success)', fontSize: 11, fontWeight: 700 }}>✓</span>
+                      )}
+                    </div>
+                    <span style={{ fontSize: 12.5, fontWeight: 600 }}>I understand the risk</span>
+                  </div>
+                  {sendPwError && (
+                    <span
+                      role="alert"
+                      data-testid="live-send-password-error"
+                      style={{ fontSize: 11.5, color: 'var(--danger)', display: 'block', marginTop: 6 }}
+                    >
+                      {sendPwError}
+                    </span>
+                  )}
+                  <div style={{ display: 'flex', gap: 9, marginTop: 12 }}>
+                    <Button
+                      block
+                      variant="danger"
+                      loading={sendPwBusy}
+                      onClick={() => void handleStopAskingWhenSending()}
+                      data-testid="live-send-password-submit"
+                    >
+                      Stop asking
+                    </Button>
+                    <Button
+                      block
+                      variant="ghost"
+                      onClick={closeSendPwForm}
+                      data-testid="live-send-password-cancel"
+                    >
+                      Cancel
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : (
           <div className="card" style={{ marginTop: 10 }}>
             <div className="section-label" style={{ marginTop: 0 }}>
               {isPasswordless ? 'Set a password' : 'Change password'}
@@ -1171,10 +1839,110 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
               {isPasswordless ? 'Set password' : makePasswordless ? 'Remove password' : 'Update password'}
             </Button>
           </div>
+          )}
         </>
       )}
 
-      {section === 'network' && (
+      {section === 'recovery' && <RecoverySettings />}
+
+      {section === 'notifications' && (
+        <>
+          <div className="list-row">
+            <span className="row-main">
+              <span className="row-title">Notify on incoming funds</span>
+              <span className="row-desc">Show a desktop notification when a coin or asset arrives in any wallet.</span>
+            </span>
+            <Toggle
+              checked={notifyDeposits}
+              onChange={setNotifyDeposits}
+              label="Notify on incoming funds"
+              testId="live-set-notify-deposits"
+            />
+          </div>
+          <p className="text-faint" style={{ fontSize: 11, margin: '10px 2px 0', lineHeight: 1.5 }}>
+            Checked in the background every few minutes, across every wallet on this device, not
+            only the one that is open.
+          </p>
+        </>
+      )}
+
+      {section === 'network' && activeEvmChain && (
+        <>
+          {/* An EVM chain has no Electrum pool: everything it reads goes through
+              the Satori GO gateway (one host, the provider key stays on the
+              server). That endpoint is shown, never edited: removing it would
+              leave the chain with nothing to talk to. (Owner, 2026-08-20: "Epix
+              has no Electrum server, it has our gateway, and that must not be
+              editable".) */}
+          <p
+            className="text-faint"
+            data-testid="live-network-chain-caption"
+            style={{ fontSize: 11, margin: '0 2px 10px', lineHeight: 1.5 }}
+          >
+            Servers for: {activeEvmChain.displayName}
+          </p>
+          <TextField
+            label="Block explorer URL"
+            placeholder="https://example.com/tx/{txid}"
+            value={explorerUrlTemplate}
+            onChange={(e) => setExplorerUrlTemplate(e.target.value)}
+            testId="live-explorer-input"
+            hint="Use {txid} where the transaction id should go."
+          />
+          <div className="card solid" style={{ marginTop: 8 }}>
+            <div className="summary-table">
+              <div className="sum-row">
+                <span className="sum-key">Chain id</span>
+                <span className="sum-val mono" style={{ fontSize: 11 }}>{activeEvmChain.chainId}</span>
+              </div>
+              <div className="sum-row">
+                <span className="sum-key">Block height</span>
+                <span className="sum-val">{network ? network.blockHeight.toLocaleString('en-US') : 'n/a'}</span>
+              </div>
+              <div className="sum-row">
+                <span className="sum-key">History source</span>
+                <span className="sum-val" style={{ fontSize: 11 }}>
+                  {evmGateway
+                    ? activeEvmChain.alchemy
+                      ? 'Provider API via the gateway'
+                      : activeEvmChain.indexer
+                        ? 'Chain explorer via the gateway'
+                        : 'None (local sends only)'
+                    : activeEvmChain.indexer
+                      ? activeEvmChain.indexer.baseUrl.replace(/^https?:\/\//, '')
+                      : 'None (local sends only)'}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div className="section-label">Endpoints</div>
+          <div className="stack" data-testid="live-evm-endpoints">
+            {evmEndpoints.map((ep) => (
+              <div className="list-row" key={ep.url} data-testid={`live-evm-endpoint-${ep.kind}`}>
+                <span className="row-main" style={{ minWidth: 0 }}>
+                  <span className="row-title" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span className="mono" style={{ fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {ep.url}
+                    </span>
+                    {ep.required && (
+                      <span className="chip neutral" style={{ fontSize: 8.5, padding: '1px 4px', flexShrink: 0 }}>Required</span>
+                    )}
+                  </span>
+                  <span className="row-desc" style={{ fontSize: 10 }}>{ep.label}</span>
+                </span>
+              </div>
+            ))}
+          </div>
+          <p className="text-faint" style={{ fontSize: 11, margin: '8px 2px 4px', lineHeight: 1.5 }} data-testid="live-evm-endpoints-note">
+            {evmGateway
+              ? 'EVM chains read through the Satori GO gateway, which keeps the provider key on the server and carries every EVM chain. The gateway endpoint cannot be removed or replaced here; custom RPC endpoints for EVM chains are not offered yet.'
+              : 'This development build reads EVM chains from their public endpoints directly. Release builds go through the Satori GO gateway.'}
+          </p>
+        </>
+      )}
+
+      {section === 'network' && !activeEvmChain && (
         <>
           <p
             className="text-faint"
@@ -1225,6 +1993,12 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
           <div className="stack" data-testid="live-servers-list">
             {electrumServers.map((url, i) => {
               const st = serverStatus[url];
+              // The Satori GO gateway bridge. Shown as the gateway and marked
+              // Required, exactly like the EVM endpoint rows above: on
+              // Ravencoin it is the only server there is, and on Evrmore it is
+              // the only way to the owner's node, so it has no Remove button.
+              // Servers the user adds are ordinary rows and stay removable.
+              const isBridge = isGatewayElectrumUrl(url);
               const dotColor =
                 st?.status === 'online'
                   ? 'var(--success)'
@@ -1244,6 +2018,7 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
                 key={url}
                 className="list-row"
                 data-testid={`live-server-${i}`}
+                data-gateway={isBridge ? 'true' : 'false'}
                 style={{ alignItems: 'center', gap: 8 }}
               >
                 <span
@@ -1265,21 +2040,35 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
                       put the full URL in the tooltip. display:block overrides
                       .row-title's flex so text-overflow can actually apply. */}
                   <span
-                    className="row-title mono"
-                    title={url}
-                    style={{
-                      fontSize: 11.5,
-                      display: 'block',
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                    }}
+                    className="row-title"
+                    style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}
                   >
-                    {url}
+                    <span
+                      className="mono"
+                      title={url}
+                      style={{
+                        fontSize: 11.5,
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {url}
+                    </span>
+                    {isBridge && (
+                      <span
+                        className="chip neutral"
+                        style={{ fontSize: 8.5, padding: '1px 4px', flexShrink: 0 }}
+                      >
+                        Required
+                      </span>
+                    )}
                   </span>
-                  <span className="row-desc" style={{ fontSize: 10 }}>{statusText}</span>
+                  <span className="row-desc" style={{ fontSize: 10 }}>
+                    {isBridge ? `Satori GO gateway · ${statusText}` : statusText}
+                  </span>
                 </span>
-                {electrumServers.length > 1 && (
+                {!isBridge && electrumServers.length > 1 && (
                   <button
                     type="button"
                     className="btn btn-ghost btn-sm danger"
@@ -1348,6 +2137,18 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
             Reset to defaults
           </Button>
 
+          {electrumServers.some((u) => isGatewayElectrumUrl(u)) && (
+            <p
+              className="text-faint"
+              data-testid="live-server-gateway-note"
+              style={{ fontSize: 11, margin: '8px 2px 0', lineHeight: 1.5 }}
+            >
+              The row marked Required is the Satori GO gateway: the wallet reaches this chain
+              through one host of ours. It cannot be removed. Anything listed below it is a
+              fallback, tried in order when the gateway cannot be reached, including servers you
+              add yourself.
+            </p>
+          )}
           <p className="text-faint" style={{ fontSize: 11, margin: '8px 2px 4px', lineHeight: 1.5 }}>
             The wallet tries servers top-to-bottom and uses the first that connects. A browser can
             only use a server with a VALID TLS certificate. A self-signed certificate won't work.
@@ -1482,6 +2283,40 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
                   disabled={blocked !== null}
                   testId={`live-settings-chain-${net.chainId}`}
                   label={`Show ${net.displayName}`}
+                />
+              </div>
+            );
+          })}
+          {/* EVM chains (an --evm build): one row per chain, hideable like the
+              UTXO ones except the one in use. Hiding a chain hides it from the
+              switcher and the create/import picker; the account itself exists
+              on every EVM chain regardless, so nothing is lost. */}
+          {evmChainsForSettings.map((c) => {
+            const target = `evm:${c.key}`;
+            const blocked = chainHideBlockedReason(target, activeChainTarget());
+            const hidden = hiddenChains.includes(target);
+            const evmWalletCount = wallets.filter((w) => w.family === 'evm').length;
+            return (
+              <div className="list-row" key={target}>
+                <span className="row-icon">
+                  <TokenIcon assetId={target} size={17} />
+                </span>
+                <span className="row-main">
+                  <span className="row-title">{c.displayName}</span>
+                  <span className="row-desc">
+                    {blocked
+                      ? blocked
+                      : evmWalletCount > 0
+                        ? `${evmWalletCount} EVM account${evmWalletCount === 1 ? '' : 's'} (every EVM account is on this network)`
+                        : 'No EVM account yet'}
+                  </span>
+                </span>
+                <Toggle
+                  checked={!hidden}
+                  onChange={(on) => setChainHidden(target, !on)}
+                  disabled={blocked !== null}
+                  testId={`live-settings-chain-${target}`}
+                  label={`Show ${c.displayName}`}
                 />
               </div>
             );
@@ -1744,6 +2579,27 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
             To remove a single wallet, open the Wallets section. Each wallet has its own Remove
             action (guarded by a confirmation). Make sure you have its recovery phrase or private
             key first.
+          </p>
+
+          {/* Price attribution. CoinGecko's free API asks for a visible credit,
+              and naming the gateway is the honest description of the path: the
+              wallet asks network.satorigo.app, which asks them. */}
+          <p
+            className="text-faint"
+            data-testid="live-about-prices"
+            style={{ fontSize: 11, margin: '8px 2px 4px', lineHeight: 1.5 }}
+          >
+            Prices powered by{' '}
+            <a
+              href="https://www.coingecko.com"
+              target="_blank"
+              rel="noopener noreferrer"
+              data-testid="live-about-prices-coingecko"
+              style={{ color: 'inherit' }}
+            >
+              CoinGecko
+            </a>{' '}
+            and SafeTrade (via the Satori GO gateway).
           </p>
 
           {/* Website + author credit. lucide-react has no X-brand mark, so the

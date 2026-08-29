@@ -5,10 +5,13 @@
 
 import { ArrowDownLeft, ArrowUpRight, ChevronLeft, Clock, ExternalLink, XCircle } from 'lucide-react';
 import { Button } from '../../components/Button';
+import { SyncStatusPill } from '../../components/SyncStatusPill';
 import { CopyButton } from '../../components/CopyButton';
 import { EmptyState } from '../../components/EmptyState';
-import { useLiveStore, nativeTickerFor } from '../../store/liveStore';
+import { useLiveStore, nativeTickerFor, activeEvmChain } from '../../store/liveStore';
 import { LiveNav } from './LiveNav';
+import { stakingRowLabel, validatorName } from './stakingRowLabel';
+import { displaySymbol } from '../../services/displaySymbol';
 
 interface LiveTxDetailProps {
   txid: string;
@@ -45,6 +48,25 @@ export function LiveTxDetail({ txid, onBack }: LiveTxDetailProps) {
   const explorerUrlTemplate = useLiveStore((s) => s.explorerUrlTemplate);
   // The fee is always paid in the active chain's native coin (EVR or RVN).
   const nativeTicker = nativeTickerFor();
+  // Native staking (Epix and any future cosmos/evm chain). Null for every other
+  // transaction, and everything below then renders exactly as it did before.
+  const evm = useLiveStore((s) => s.evm);
+  const stakeSnapshot = useLiveStore((s) => s.evmStaking.snapshot);
+  const stakeChain = activeEvmChain({ evm });
+  const monikerOf = (valoper: string) =>
+    stakeSnapshot?.validators.find((v) => v.valoper === valoper)?.moniker || undefined;
+  // The asset as it is DRAWN: on an EVM chain `tx.asset` is a symbol its own
+  // author chose (services/displaySymbol.ts).
+  const shownAsset = displaySymbol(tx?.asset ?? '');
+  const stakingInfo = tx?.staking;
+  const staking =
+    stakingInfo && stakeChain
+      ? stakingRowLabel(stakingInfo, {
+          ticker: stakeChain.nativeTicker,
+          decimals: stakeChain.nativeDecimals,
+          monikerOf,
+        })
+      : null;
 
   const header = (
     <div className="sub-header">
@@ -52,7 +74,9 @@ export function LiveTxDetail({ txid, onBack }: LiveTxDetailProps) {
         <ChevronLeft size={20} />
       </button>
       <h2>Transaction</h2>
-      <span />
+      {/* Connection state, same dot-only indicator as the rest of the wallet
+          (KNOWN_LIMITATIONS item 33). */}
+      <SyncStatusPill compact />
     </div>
   );
 
@@ -75,11 +99,16 @@ export function LiveTxDetail({ txid, onBack }: LiveTxDetailProps) {
   }
 
   const incoming = tx.direction === 'in';
+  // A staking transaction is the user's own bookkeeping, never a payment from a
+  // stranger: neutral tone both ways, with the arrow saying which direction the
+  // coins moved (out to the module, back for a claim).
+  const arrowIn = staking ? staking.incoming : incoming;
   const statusChip = tx.status === 'confirmed' ? 'success' : 'warning';
+  const heroTone = statusChip === 'success' ? (staking ? 'neutral' : incoming ? 'success' : 'neutral') : statusChip;
   const icon =
     tx.status === 'pending' ? (
       <Clock size={26} />
-    ) : incoming ? (
+    ) : arrowIn ? (
       <ArrowDownLeft size={26} />
     ) : (
       <ArrowUpRight size={26} />
@@ -101,14 +130,15 @@ export function LiveTxDetail({ txid, onBack }: LiveTxDetailProps) {
       <div className="app-content" data-testid="live-tx-detail">
         {/* Hero: direction icon + signed amount + status */}
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '8px 0 16px' }}>
-          <span
-            className={`row-icon ${statusChip === 'success' ? (incoming ? 'success' : 'neutral') : statusChip}`}
-            style={{ width: 54, height: 54, borderRadius: 18 }}
-          >
+          <span className={`row-icon ${heroTone}`} style={{ width: 54, height: 54, borderRadius: 18 }}>
             {icon}
           </span>
           <div className="hero-value tnum" style={{ fontSize: 24, marginTop: 10 }} data-testid="live-tx-amount">
-            {incoming ? '+' : '−'}{fmtAmount(tx.amount)} {tx.asset}
+            {staking
+              ? staking.amountText === ''
+                ? staking.title
+                : staking.amountText
+              : `${incoming ? '+' : '−'}${fmtAmount(tx.amount)} ${shownAsset}`}
           </div>
           <span className={`chip ${statusChip}`} style={{ marginTop: 9 }} data-testid="live-tx-status">
             {tx.status}
@@ -118,17 +148,56 @@ export function LiveTxDetail({ txid, onBack }: LiveTxDetailProps) {
         <div className="card">
           <div className="summary-table">
             <div className="sum-row">
-              <span className="sum-key">Direction</span>
-              <span className="sum-val">{incoming ? 'Received' : 'Sent'}</span>
+              <span className="sum-key">{staking ? 'Action' : 'Direction'}</span>
+              <span className="sum-val" data-testid={staking ? `live-tx-staking-${tx.txid}` : undefined}>
+                {staking ? staking.title : incoming ? 'Received' : 'Sent'}
+              </span>
             </div>
             <div className="sum-row">
               <span className="sum-key">Asset</span>
-              <span className="sum-val">{tx.asset}</span>
+              <span className="sum-val">{shownAsset}</span>
             </div>
-            <div className="sum-row">
-              <span className="sum-key">Amount</span>
-              <span className="sum-val tnum">{fmtAmount(tx.amount)} {tx.asset}</span>
-            </div>
+            {/* A claim carries no amount: the chain pays whatever accrued, so
+                the row is absent rather than showing a 0 that is not true. */}
+            {(!staking || staking.amountText !== '') && (
+              <div className="sum-row">
+                <span className="sum-key">Amount</span>
+                <span className="sum-val tnum">
+                  {staking ? staking.amountText : `${fmtAmount(tx.amount)} ${shownAsset}`}
+                </span>
+              </div>
+            )}
+            {/* The FULL operator address, never only the moniker: a moniker is a
+                name the validator chose for itself and two can share one, the
+                address cannot be spoofed. Same rule as the review step. */}
+            {stakingInfo && (
+              <div className="sum-row">
+                <span className="sum-key">{stakingInfo.validatorDst ? 'From validator' : 'Validator'}</span>
+                <span
+                  className="sum-val mono"
+                  data-testid="live-tx-staking-validator"
+                  style={{ fontSize: 11, wordBreak: 'break-all', textAlign: 'right' }}
+                >
+                  {validatorName(stakingInfo.validator, monikerOf)}
+                  <br />
+                  {stakingInfo.validator}
+                </span>
+              </div>
+            )}
+            {stakingInfo?.validatorDst && (
+              <div className="sum-row">
+                <span className="sum-key">To validator</span>
+                <span
+                  className="sum-val mono"
+                  data-testid="live-tx-staking-validator-dst"
+                  style={{ fontSize: 11, wordBreak: 'break-all', textAlign: 'right' }}
+                >
+                  {validatorName(stakingInfo.validatorDst, monikerOf)}
+                  <br />
+                  {stakingInfo.validatorDst}
+                </span>
+              </div>
+            )}
             <div className="sum-row">
               <span className="sum-key">Date</span>
               <span className="sum-val">

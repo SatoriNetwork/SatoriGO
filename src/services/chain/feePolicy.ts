@@ -79,9 +79,18 @@ export interface FeeEstimate {
  * overflows to Infinity (a hostile ~1e308 — a merely-huge finite value like
  * 1e9 coin/kB converts fine and is then bounded by clampFeeRate's ceiling).
  */
-export function serverEstimateToSatPerByte(coinPerKb: unknown): bigint | null {
+export function serverEstimateToSatPerByte(
+  coinPerKb: unknown,
+  /** The chain's scale (base units per coin = 10**decimals). Every chain that
+   *  speaks this protocol is 8, which is why it was hardcoded; it is a
+   *  parameter now so the assumption is visible rather than buried. Optional
+   *  because this is ELECTRUM-ONLY arithmetic: `blockchain.estimatefee` quotes
+   *  coin/kB and no non-UTXO chain ever reaches this function. Production
+   *  callers pass the active chain's value. */
+  decimals = 8,
+): bigint | null {
   if (typeof coinPerKb !== 'number' || !Number.isFinite(coinPerKb) || coinPerKb <= 0) return null;
-  const satPerByte = (coinPerKb * 1e8) / 1000;
+  const satPerByte = (coinPerKb * 10 ** decimals) / 1000;
   if (!Number.isFinite(satPerByte)) return null; // overflowed on a hostile magnitude
   return BigInt(Math.max(1, Math.ceil(satPerByte)));
 }

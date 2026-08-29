@@ -2,17 +2,21 @@
 // Mounted directly by App.tsx once display settings + branding have loaded.
 
 import { useEffect, useState } from 'react';
-import { useLiveStore, computeDisplayedAssets, stakingSupported } from '../../store/liveStore';
+import { useLiveStore, computeDisplayedAssets, stakingSupported, evmStakingSupported, nativeTickerFor } from '../../store/liveStore';
 import { LiveOnboarding } from './LiveOnboarding';
 import { LiveLock } from './LiveLock';
+import { LiveAppLock } from './LiveAppLock';
+import { LiveForceAppPassword } from './LiveForceAppPassword';
 import { LiveHome } from './LiveHome';
 import { LiveReceive } from './LiveReceive';
 import { LiveSend } from './LiveSend';
+import { LiveSendEvm } from './LiveSendEvm';
 import { LiveAssetDetail } from './LiveAssetDetail';
 import { LiveSettings } from './LiveSettings';
 import { LiveTxDetail } from './LiveTxDetail';
 import { LiveAddressBook } from './LiveAddressBook';
 import { LiveStaking } from './LiveStaking';
+import { LiveStakeEvm } from './LiveStakeEvm';
 import { NavProvider, type HomeTab, type NavSection } from './LiveNav';
 
 // Discriminated subview. `receive`/`send` carry the asset they were opened from
@@ -25,7 +29,10 @@ type LiveSubView =
   | { name: 'send'; asset?: string }
   | { name: 'settings' }
   | { name: 'addressbook' }
-  | { name: 'staking' }
+  // `from` only decides where Back lands: the staking screen itself is one
+  // screen on one route, reached from the asset detail and (on a chain with
+  // native staking) from the Home action row.
+  | { name: 'staking'; from?: 'home' }
   | { name: 'tx'; txid: string };
 
 export function LiveApp() {
@@ -52,8 +59,14 @@ export function LiveApp() {
   // A passwordless wallet has no password to re-enter, so auto-locking it would
   // just auto-unlock again on the next boot — pointless. Skip the idle timer for
   // it. Derived to a boolean so the effect below only re-runs when it flips.
+  //
+  // ONCE AN APP PASSWORD EXISTS this stops being true even for a passwordless
+  // wallet: locking then returns to the APP lock screen, which is a real gate
+  // and does have something to re-enter. So the skip is conditioned on there
+  // being no app password at all.
+  const appPasswordSet = useLiveStore((s) => s.appPasswordSet);
   const activePasswordless =
-    wallets.find((w) => w.id === activeWalletId)?.passwordless ?? false;
+    !appPasswordSet && (wallets.find((w) => w.id === activeWalletId)?.passwordless ?? false);
 
   // Initialize on mount.
   useEffect(() => {
@@ -97,13 +110,24 @@ export function LiveApp() {
     };
   }, [phase, refresh, startAutoRefresh, stopAutoRefresh]);
 
-  // Auto-lock after inactivity: while the wallet is ready, track user activity
-  // and lock() once `autoLockMinutes` of idle time elapse. Skipped for a
-  // passwordless wallet (nothing to re-enter) and when the timeout is 0 (never).
-  // Activity resets on pointer/keyboard input and on regaining tab visibility.
+  // Auto-lock after inactivity: track user activity and lock() once
+  // `autoLockMinutes` of idle time elapse. Skipped for a passwordless wallet
+  // (nothing to re-enter) and when the timeout is 0 (never). Activity resets on
+  // pointer/keyboard input and on regaining tab visibility.
+  //
+  // THE GATE IS "IS THERE A KEY IN MEMORY", NOT "IS A WALLET ON SCREEN". It used
+  // to be `phase !== 'ready'`, which missed the state the app password creates:
+  // after the app lock screen is passed, a wallet still on its own password
+  // leaves the app UNLOCKED at phase 'locked'. The master key sat in page memory
+  // behind a screen headed "Wallet Locked" with no timer running at all, so it
+  // stayed there until the page was closed. `appUnlocked` is exactly "the master
+  // key is in memory", so it arms the timer wherever that is true.
+  const appUnlocked = useLiveStore((s) => s.appUnlocked);
   useEffect(() => {
-    if (phase !== 'ready') return;
-    if (activePasswordless) return;
+    if (phase !== 'ready' && !appUnlocked) return;
+    // A passwordless wallet has nothing to re-enter, but an unlocked APP does:
+    // locking returns to the app lock screen, which is a real gate.
+    if (activePasswordless && !appUnlocked) return;
     if (autoLockMinutes <= 0) return;
     if (typeof document === 'undefined') return; // non-DOM env guard (jsdom-safe)
 
@@ -139,7 +163,7 @@ export function LiveApp() {
       document.removeEventListener('visibilitychange', onVisible);
       clearInterval(interval);
     };
-  }, [phase, activePasswordless, autoLockMinutes, lock]);
+  }, [phase, appUnlocked, activePasswordless, autoLockMinutes, lock]);
 
   // Every screen is wrapped in `.live-scope` so global.css can trim the
   // wallet-surface font sizes without touching the base type scale.
@@ -177,6 +201,24 @@ export function LiveApp() {
     );
   }
 
+  // THE FORCED APP-PASSWORD SETUP, and it comes before every other screen on
+  // purpose (the app-password design notes §12).
+  //
+  // This user has a wallet whose seed is at rest under an EMPTY passphrase and
+  // no app password to protect it with. The owner's decision is that this must
+  // stop being a state the wallet can be opened in, so the screen REPLACES the
+  // whole app: there is no wallet behind it, no nav, no switcher, no settings,
+  // and no branch below can render while the phase holds. It is entered only by
+  // init(), so closing the window and opening it again lands right back here,
+  // and it is left only by setting the password.
+  //
+  // It sits above `syncing === 'switching'` as well: that loading screen belongs
+  // to a wallet switch, which is unreachable from here, and a phase this
+  // absolute must not be something a stale `syncing` value can cover up.
+  if (phase === 'force-app-password') {
+    return wrap(<LiveForceAppPassword />);
+  }
+
   // Wallet switch in progress: a full-frame loading screen instead of the
   // intermediate lock/empty-home flash while the target wallet spins up.
   if (syncing === 'switching') {
@@ -195,6 +237,11 @@ export function LiveApp() {
     return wrap(<LiveOnboarding />);
   }
 
+  // The APP lock screen: only reachable once an app password has been set.
+  if (phase === 'app-locked') {
+    return wrap(<LiveAppLock />);
+  }
+
   if (phase === 'locked') {
     return wrap(<LiveLock />);
   }
@@ -206,6 +253,11 @@ export function LiveApp() {
       onSend={() => setSubView({ name: 'send' })}
       onSelectAsset={(name) => setSubView({ name: 'asset', asset: name })}
       onSelectTx={(txid) => setSubView({ name: 'tx', txid })}
+      // The route is the same one the asset detail uses; LiveHome offers the
+      // action only on a chain that has native staking (its own capability
+      // check), and this route degrades to home on a chain that has neither
+      // kind of staking, so a stale navigation cannot dead-end.
+      onStake={() => setSubView({ name: 'staking', from: 'home' })}
     />
   );
 
@@ -221,8 +273,10 @@ export function LiveApp() {
 
   if (subView.name === 'send') {
     const asset = subView.asset;
+    const isEvmActive = wallets.find((w) => w.id === activeWalletId)?.family === 'evm';
+    const SendScreen = isEvmActive ? LiveSendEvm : LiveSend;
     return wrap(
-      <LiveSend
+      <SendScreen
         asset={asset}
         onBack={() => setSubView(asset ? { name: 'asset', asset } : { name: 'home' })}
         onDone={() => setSubView({ name: 'home' })}
@@ -244,11 +298,32 @@ export function LiveApp() {
   }
 
   if (subView.name === 'staking') {
-    // Cheap guard: staking is Evrmore-only (SATORIEVR). A stale/forced navigation
-    // to this route on a Ravencoin wallet (the Stake action itself is never shown
-    // there) degrades to home instead of rendering a broken/inert screen.
+    // TWO staking screens, one route, chosen by what the ACTIVE CHAIN actually
+    // has. Neither is a chain-name check:
+    //   - stakingSupported()    Satori POOL staking (SATORIEVR on Evrmore), the
+    //                           HTTP registration flow in LiveStaking.
+    //   - evmStakingSupported() NATIVE staking on an EVM chain whose registry
+    //                           row carries `staking` (Epix, cosmos/evm
+    //                           precompiles), the transaction flow here.
+    // A chain with neither degrades to home rather than rendering an inert
+    // screen, exactly as before: the Stake action is never offered there, so
+    // reaching this route means a stale navigation.
+    // Back returns where the user came FROM: home when the Home action row
+    // opened it, otherwise the asset detail that did.
+    const fromHome = subView.from === 'home';
+    if (evmStakingSupported()) {
+      return wrap(
+        <LiveStakeEvm
+          onBack={() => setSubView(fromHome ? { name: 'home' } : { name: 'asset', asset: nativeTickerFor() })}
+        />,
+      );
+    }
     if (!stakingSupported()) return wrap(home);
-    return wrap(<LiveStaking onBack={() => setSubView({ name: 'asset', asset: 'SATORIEVR' })} />);
+    return wrap(
+      <LiveStaking
+        onBack={() => setSubView(fromHome ? { name: 'home' } : { name: 'asset', asset: 'SATORIEVR' })}
+      />,
+    );
   }
 
   if (subView.name === 'tx') {
@@ -260,10 +335,16 @@ export function LiveApp() {
     const selected = displayAssets.find((a) => a.name === subView.asset);
     // If the asset is gone (e.g. removed while viewing), fall back to home.
     if (!selected) return wrap(home);
-    // Staking is offered ONLY for SATORIEVR, and only on a chain where staking
-    // applies at all (Evrmore; SATORIEVR does not exist on Ravencoin). Uses the
-    // store's own chain check so this can never drift from the store's refusal.
-    const canStake = selected.name === 'SATORIEVR' && stakingSupported();
+    // Which asset carries a Stake action depends on WHICH staking the chain
+    // has, and the two answers differ:
+    //   - Satori pool staking is a SATORIEVR affordance (Evrmore only);
+    //   - native staking stakes the chain's own coin, so it belongs on the
+    //     native asset (EPIX on Epix), never on a token row.
+    // Both go through the store's own chain checks, so this can never drift
+    // from the store's refusal, and a chain with neither shows no Stake button.
+    const canStake = evmStakingSupported()
+      ? selected.isNative && selected.name === nativeTickerFor()
+      : selected.name === 'SATORIEVR' && stakingSupported();
     return wrap(
       <LiveAssetDetail
         asset={selected}

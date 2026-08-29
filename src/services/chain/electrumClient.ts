@@ -151,7 +151,7 @@ export class WssElectrumClient implements ElectrumClient {
     for (const server of servers) {
       const url = electrumWssUrl(server);
       try {
-        await this.connectTo(url);
+        await this.connectTo(url, server.protocols);
         this.url = url;
         return;
       } catch (err) {
@@ -163,13 +163,24 @@ export class WssElectrumClient implements ElectrumClient {
     throw new Error(`All Electrum servers failed. ${errors.join('; ')}`);
   }
 
-  /** Open one socket, wire handlers, run the server.version handshake. */
-  private connectTo(url: string): Promise<void> {
+  /** Open one socket, wire handlers, run the server.version handshake.
+   *
+   *  `protocols` is passed to the WebSocket constructor ONLY when the endpoint
+   *  carries some, which today means only the Satori GO gateway bridge (its
+   *  ['satori-v1', <clientToken>] pair is how the gateway authenticates the
+   *  socket). A plain public ElectrumX node must be opened with NO subprotocol:
+   *  it would not echo one back, and a server that does not select a requested
+   *  subprotocol makes the BROWSER fail the handshake. So this is not a
+   *  cosmetic distinction, offering the pair to everything would break every
+   *  public node in the pool. */
+  private connectTo(url: string, protocols?: string[]): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       let settled = false;
       let ws: WebSocket;
       try {
-        ws = new this.WebSocketImpl(url);
+        ws = protocols && protocols.length > 0
+          ? new this.WebSocketImpl(url, protocols)
+          : new this.WebSocketImpl(url);
       } catch (err) {
         reject(new Error(`WebSocket construction failed: ${(err as Error).message}`));
         return;

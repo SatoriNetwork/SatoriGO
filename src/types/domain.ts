@@ -19,7 +19,12 @@ export interface Asset {
 
 export interface AssetBalance {
   assetId: AssetId;
-  amount: number;
+  /** Balance in BASE UNITS (bigint), with `scale` decimals. Exact: a balance
+   *  arrives from the chain as an integer count, so nothing is lost carrying it
+   *  as one. */
+  amountBase: bigint;
+  /** Decimals `amountBase` is scaled by. */
+  scale: number;
 }
 
 export type TxStatus = 'pending' | 'confirmed' | 'failed';

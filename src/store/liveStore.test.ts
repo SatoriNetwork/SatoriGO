@@ -21,8 +21,16 @@ const LTC = 'litecoin-mainnet';
 const WJK = 'wojakcoin-mainnet';
 const BTC = 'bitcoin-mainnet';
 
+/** `amount` stays in WHOLE units here because that is what makes these cases
+ *  readable; the base-unit conversion is the fixture's job, not the reader's. */
 const asset = (name: string, amount = 0, isNative = false): LiveAssetBalance =>
-  ({ name, amount, decimals: 8, isNative }) as LiveAssetBalance;
+  ({
+    name,
+    amountBase: BigInt(Math.round(amount * 1e8)),
+    scale: 8,
+    decimals: 8,
+    isNative,
+  }) as LiveAssetBalance;
 
 describe('isRemovableAsset', () => {
   it('protects EVR and SATORIEVR', () => {
@@ -80,14 +88,14 @@ describe('computeDisplayedAssets', () => {
   it('shows SATORIEVR at zero on a brand-new wallet holding only EVR', () => {
     const displayed = computeDisplayedAssets([asset('EVR', 1.5, true)], applyDefaultPins([]), []);
     expect(displayed.map((a) => a.name)).toEqual(['EVR', 'SATORIEVR']);
-    expect(displayed[1].amount).toBe(0);
+    expect(displayed[1].amountBase).toBe(0n);
   });
 
   it('shows the real balance once SATORIEVR is held, with no duplicate row', () => {
     const held = [asset('EVR', 1.5, true), asset('SATORIEVR', 42)];
     const displayed = computeDisplayedAssets(held, applyDefaultPins([]), []);
     expect(displayed.map((a) => a.name)).toEqual(['EVR', 'SATORIEVR']);
-    expect(displayed[1].amount).toBe(42);
+    expect(displayed[1].amountBase).toBe(4200000000n);
   });
 
   it('refuses to hide a protected asset even if the hide-list names one', () => {
@@ -131,7 +139,7 @@ describe('per-chain protected assets (Ravencoin)', () => {
     const held = [asset('RVN', 3, true)];
     const displayed = computeDisplayedAssets(held, applyDefaultPins([], RVN), [], RVN);
     expect(displayed.map((a) => a.name)).toEqual(['RVN']);
-    expect(displayed[0].amount).toBe(3);
+    expect(displayed[0].amountBase).toBe(300000000n);
   });
 
   it('Evrmore default is unchanged when no chain id is passed', () => {
@@ -173,7 +181,7 @@ describe('per-chain protected assets (Bitcoin Gold, no asset protocol)', () => {
     const held = [asset('BTGS', 2.5, true)];
     const displayed = computeDisplayedAssets(held, applyDefaultPins([], BTGS), [], BTGS);
     expect(displayed.map((a) => a.name)).toEqual(['BTGS']);
-    expect(displayed[0].amount).toBe(2.5);
+    expect(displayed[0].amountBase).toBe(250000000n);
   });
 });
 
@@ -211,7 +219,7 @@ describe('per-chain protected assets (Litecoin, no asset protocol)', () => {
     const held = [asset('LTC', 1.25, true)];
     const displayed = computeDisplayedAssets(held, applyDefaultPins([], LTC), [], LTC);
     expect(displayed.map((a) => a.name)).toEqual(['LTC']);
-    expect(displayed[0].amount).toBe(1.25);
+    expect(displayed[0].amountBase).toBe(125000000n);
   });
 });
 
@@ -250,7 +258,7 @@ describe('per-chain protected assets (WojakCoin, no asset protocol)', () => {
     const held = [asset('WJK', 4.5, true)];
     const displayed = computeDisplayedAssets(held, applyDefaultPins([], WJK), [], WJK);
     expect(displayed.map((a) => a.name)).toEqual(['WJK']);
-    expect(displayed[0].amount).toBe(4.5);
+    expect(displayed[0].amountBase).toBe(450000000n);
   });
 });
 
@@ -290,6 +298,6 @@ describe('per-chain protected assets (Bitcoin, no asset protocol)', () => {
     const held = [asset('BTC', 0.5, true)];
     const displayed = computeDisplayedAssets(held, applyDefaultPins([], BTC), [], BTC);
     expect(displayed.map((a) => a.name)).toEqual(['BTC']);
-    expect(displayed[0].amount).toBe(0.5);
+    expect(displayed[0].amountBase).toBe(50000000n);
   });
 });

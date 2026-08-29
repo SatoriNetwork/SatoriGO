@@ -6,3 +6,6 @@ release/
 /store/
 # local-only docs (owner's decision: not published to the public repo)
 /docs/
+
+# Local secrets (never committed): API keys injected into DEV builds only.
+*.local.json

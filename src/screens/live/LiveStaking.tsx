@@ -13,6 +13,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { ChevronLeft, Landmark, Info, AlertTriangle, RefreshCw, Search } from 'lucide-react';
 import { Button } from '../../components/Button';
+import { SyncStatusPill } from '../../components/SyncStatusPill';
+import { amountToNumber } from '../../services/chain/amounts';
 import { Modal } from '../../components/Modal';
 import { CopyButton } from '../../components/CopyButton';
 import { EmptyState } from '../../components/EmptyState';
@@ -55,7 +57,8 @@ export function LiveStaking({ onBack }: LiveStakingProps) {
   // Total SATORIEVR balance across the wallet — joining is impossible at 0 (the
   // user has nothing to delegate); leaving stays possible regardless (they may
   // have spent it after joining and still want to unregister).
-  const satoriBalance = assets.find((a) => a.name === 'SATORIEVR')?.amount ?? 0;
+  const satoriRow = assets.find((a) => a.name === 'SATORIEVR');
+  const satoriBalance = satoriRow ? amountToNumber(satoriRow.amountBase, satoriRow.scale) : 0;
   const canJoin = satoriBalance > 0;
 
   // Distinct pool addresses our held addresses are currently registered with.
@@ -156,20 +159,27 @@ export function LiveStaking({ onBack }: LiveStakingProps) {
 
   return (
     <div className="app-frame screen-enter">
-      <div className="sub-header">
+      {/* The only sub-header carrying a control AND the connection dot, so it
+          opts into the wider (symmetric) side slots. Staking is the screen
+          where a dead connection is easiest to misread: the pool figures come
+          from a server, and stale ones look exactly like fresh ones. */}
+      <div className="sub-header sub-header-wide">
         <button type="button" className="icon-btn" onClick={onBack} aria-label="Back">
           <ChevronLeft size={20} />
         </button>
         <h2>Stake SATORIEVR</h2>
-        <button
-          type="button"
-          className="icon-btn"
-          onClick={() => void refreshStaking()}
-          aria-label="Refresh"
-          disabled={loading || submitting}
-        >
-          <RefreshCw size={16} />
-        </button>
+        <span className="header-slot">
+          <SyncStatusPill compact />
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={() => void refreshStaking()}
+            aria-label="Refresh"
+            disabled={loading || submitting}
+          >
+            <RefreshCw size={16} />
+          </button>
+        </span>
       </div>
 
       <div className="app-content" data-testid="live-staking">

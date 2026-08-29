@@ -98,7 +98,18 @@ export function LiveNetwork() {
       )}
 
       <p className="text-faint" style={{ fontSize: 11, marginTop: 12, textAlign: 'center' }}>
-        Live figures from satorinet.io. A neuron stake is 250 SATORIEVR.
+        Live figures from{' '}
+        <a
+          href="https://satorinet.io"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-dim"
+          style={{ textDecoration: 'underline', textUnderlineOffset: 2 }}
+          data-testid="live-network-homepage"
+        >
+          satorinet.io
+        </a>
+        . A neuron stake is 250 SATORIEVR.
       </p>
     </div>
   );

@@ -7,7 +7,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { deriveSyncStatus, formatSyncBannerText, type SyncStatusInput } from './LiveHome';
+import { deriveSyncStatus, formatSyncBannerText, type SyncStatusInput } from './syncStatus';
 import type { NetworkStatus } from '../../types/domain';
 
 const NETWORK: NetworkStatus = {

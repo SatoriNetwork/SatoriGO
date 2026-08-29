@@ -94,6 +94,7 @@ function summary(over: Partial<WalletSummary> & { id: string; network: string })
     kind: 'seed',
     address: '',
     passwordless: false,
+    family: 'utxo',
     ...over,
   };
 }
@@ -215,6 +216,48 @@ describe('walletOnChain', () => {
 });
 
 // --- switchChain ------------------------------------------------------------
+
+describe('wallet family (EVM engine seam, family absent = utxo)', () => {
+  // An EVM account is ONE address across every EVM chain and has no UTXO
+  // `network`. networkFor() maps ANY unknown id to Evrmore mainnet, so without a
+  // family-first guard an EVM wallet would masquerade as an Evrmore wallet in
+  // every chain-scoped helper. These pin that it never reaches the UTXO registry.
+  const evm = () => summary({ id: 'evm-1', network: '', family: 'evm', address: '0x' + '1'.repeat(40) });
+
+  it('an EVM wallet enables NO utxo chain (not even Evrmore via the networkFor default)', () => {
+    expect(mod.chainsWithWallets([evm()]).size).toBe(0);
+    const set = mod.chainsWithWallets([evm(), summary({ id: 'r', network: 'ravencoin-mainnet' })]);
+    expect(set.has('ravencoin-mainnet')).toBe(true);
+    expect(set.has('mainnet')).toBe(false);
+    expect(set.has('evrmore-mainnet')).toBe(false);
+  });
+
+  it('walletsOnChain never lists an EVM wallet on a utxo chain', () => {
+    const wallets = [evm(), summary({ id: 'a', network: 'mainnet' })];
+    expect(mod.walletsOnChain(wallets, 'mainnet').map((w) => w.id)).toEqual(['a']);
+    expect(mod.walletsOnChain(wallets, 'evrmore-mainnet').map((w) => w.id)).toEqual(['a']);
+    expect(mod.walletsOnChain([evm()], 'mainnet')).toEqual([]);
+  });
+
+  it('walletOnChain skips an ACTIVE EVM wallet when picking a sibling, and never returns it', () => {
+    const wallets = [
+      summary({ ...evm(), active: true }),
+      summary({ id: 'x', name: 'Other (Ravencoin)', network: 'ravencoin-mainnet' }),
+      summary({ id: 'y', name: 'Mine (Ravencoin)', network: 'ravencoin-mainnet' }),
+    ];
+    // No utxo sibling can exist for an EVM account: FIRST wins, deterministically.
+    expect(mod.walletOnChain(wallets, 'ravencoin-mainnet')?.id).toBe('x');
+    expect(mod.walletOnChain([summary({ ...evm(), active: true })], 'mainnet')).toBe(null);
+  });
+
+  it('a summary WITHOUT family is utxo: existing wallets behave exactly as before', () => {
+    const legacy = { ...summary({ id: 'l', network: 'mainnet' }) } as Partial<WalletSummary>;
+    delete legacy.family;
+    const set = mod.chainsWithWallets([legacy as WalletSummary]);
+    expect(set.has('mainnet')).toBe(true);
+    expect(mod.walletsOnChain([legacy as WalletSummary], 'mainnet')).toHaveLength(1);
+  });
+});
 
 describe('switchChain', () => {
   it('switches the active wallet to the one on the requested chain', async () => {

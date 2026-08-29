@@ -1,0 +1,5 @@
+{
+  "_comment": "The Satori GO EVM gateway (one host for RPC, Alchemy Transfers/Token APIs, token lists and token marks; the Alchemy key stays server-side). When gatewayUrl is set, scripts/build.mjs --evm injects ONLY this host into host_permissions and the client routes everything EVM through it; the per-host dev fallbacks in evm-host-permissions.json are used only when it is empty. Env EVM_GATEWAY_URL overrides (empty string forces the dev hosts). clientToken is sent as X-Satori-Client on every gateway request so the gateway can gate GET requests (no Origin header) and Firefox (per-install moz-extension uuid) uniformly with POST; it MUST equal the gateway CLIENT_TOKENS. It is NOT a secret (the extension bundle is public), and is committed here so builds from source (AMO reviewers) are reproducible; env EVM_CLIENT_TOKEN or platforms/evm-secrets.local.json.clientToken override it for rotation. Owner decision 2026-08-19: network.satorigo.app (Cloudflare Tunnel); gateway live 2026-08-20.",
+  "gatewayUrl": "https://network.satorigo.app",
+  "clientToken": "sgw_fXqEptFVmmt_KhuVX2HQk02NeCWt6hNJ"
+}

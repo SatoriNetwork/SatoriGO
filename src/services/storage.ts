@@ -124,8 +124,22 @@ export class LocalStorageAdapter implements KeyValueStorage {
 export class MemoryStorageAdapter implements KeyValueStorage {
   private map = new Map<string, unknown>();
 
+  /**
+   * CLONES ON READ, exactly like the two adapters above it.
+   *
+   * `chrome.storage.local` serializes across the extension IPC boundary and
+   * `localStorage` re-parses JSON, so neither can EVER hand two readers the same
+   * object. This double used to hand back the stored reference, which quietly
+   * gave two service instances in one test shared object identity: a mutation in
+   * one appeared in the other with no write, and every cross-page race (two
+   * pages, one storage) was invisible. An adversarial review of the app password
+   * found four defects that this unfaithfulness had hidden, one of which
+   * permanently lost a wallet's seed. Read fidelity is what makes those tests
+   * able to fail.
+   */
   async get<T>(key: string): Promise<T | undefined> {
-    return this.map.get(key) as T | undefined;
+    const value = this.map.get(key);
+    return value === undefined ? undefined : (structuredClone(value) as T);
   }
 
   async set(key: string, value: unknown): Promise<void> {

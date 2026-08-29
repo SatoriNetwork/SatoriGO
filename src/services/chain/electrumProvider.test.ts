@@ -172,8 +172,8 @@ describe('ElectrumWalletDataProvider', () => {
       const evr = balances.find((b) => b.assetId === 'EVR');
       const satori = balances.find((b) => b.assetId === 'SATORI');
 
-      expect(evr?.amount).toBeCloseTo(2481.74, 5);
-      expect(satori?.amount).toBeCloseTo(12584.22, 5);
+      expect(evr?.amountBase).toBe(248174000000n);
+      expect(satori?.amountBase).toBe(1258422000000n);
     });
 
     it('includes unconfirmed in the total', async () => {
@@ -192,7 +192,7 @@ describe('ElectrumWalletDataProvider', () => {
       const balances = await provider.getBalances(OUR_ADDRESS);
 
       const evr = balances.find((b) => b.assetId === 'EVR');
-      expect(evr?.amount).toBeCloseTo(1.5, 5);
+      expect(evr?.amountBase).toBe(150000000n);
     });
   });
 
@@ -536,17 +536,17 @@ describe('ElectrumWalletDataProvider', () => {
 
       // EVR first (native), then assets alphabetically.
       expect(balances[0]).toMatchObject({ name: 'EVR', decimals: 8, isNative: true });
-      expect(balances[0].amount).toBeCloseTo(1.5, 8);
+      expect(balances[0].amountBase).toBe(150000000n);
 
       const satori = balances.find((b) => b.name === 'SATORI');
       expect(satori).toBeDefined();
       expect(satori?.isNative).toBe(false);
       expect(satori?.decimals).toBe(8);
-      expect(satori?.amount).toBeCloseTo(410.9589041, 8);
+      expect(satori?.amountBase).toBe(41095890410n);
 
       const usdx = balances.find((b) => b.name === 'USDX');
       expect(usdx?.decimals).toBe(2);
-      expect(usdx?.amount).toBeCloseTo(123.45, 8);
+      expect(usdx?.amountBase).toBe(12345000000n);
 
       // Exactly three assets detected: EVR, SATORI, USDX.
       expect(balances).toHaveLength(3);
@@ -569,7 +569,7 @@ describe('ElectrumWalletDataProvider', () => {
       const evr = balances.find((b) => b.name === 'EVR');
       expect(evr).toBeDefined();
       expect(evr?.isNative).toBe(true);
-      expect(evr?.amount).toBe(0);
+      expect(evr?.amountBase).toBe(0n);
       expect(balances.some((b) => b.name === 'SATORI')).toBe(true);
     });
 
@@ -584,7 +584,7 @@ describe('ElectrumWalletDataProvider', () => {
       const balances = await provider.getAllAssetBalances(OUR_ADDRESS);
 
       expect(balances).toHaveLength(1);
-      expect(balances[0]).toMatchObject({ name: 'EVR', amount: 0, decimals: 8, isNative: true });
+      expect(balances[0]).toMatchObject({ name: 'EVR', amountBase: 0n, scale: 8, decimals: 8, isNative: true });
     });
 
     it('treats "rvn"/"" asset fields as native EVR (defensive)', async () => {
@@ -603,7 +603,7 @@ describe('ElectrumWalletDataProvider', () => {
 
       expect(balances).toHaveLength(1);
       expect(balances[0].name).toBe('EVR');
-      expect(balances[0].amount).toBeCloseTo(1.5, 8);
+      expect(balances[0].amountBase).toBe(150000000n);
     });
 
     it('caches get_meta so a repeated asset is only fetched once', async () => {
@@ -647,7 +647,7 @@ describe('ElectrumWalletDataProvider', () => {
       const balances = await provider.getAllAssetBalances(OUR_ADDRESS);
       const cc = balances.find((b) => b.name === 'CHUPPA_CHUB');
       expect(cc?.decimals).toBe(0);
-      expect(cc?.amount).toBe(1);
+      expect(cc?.amountBase).toBe(100000000n);
     });
   });
 
@@ -941,7 +941,7 @@ describe('ElectrumWalletDataProvider', () => {
 
       expect(balances).toHaveLength(1);
       expect(balances[0]).toMatchObject({ assetId: 'RVN' });
-      expect(balances[0].amount).toBeCloseTo(2481.74, 5);
+      expect(balances[0].amountBase).toBe(248174000000n);
       // Exactly one get_balance call, WITHOUT an asset arg (never [sh,'SATORI']).
       expect(seenParams).toHaveLength(1);
       expect(seenParams[0]).toHaveLength(1);
@@ -961,7 +961,7 @@ describe('ElectrumWalletDataProvider', () => {
 
       expect(balances).toHaveLength(1);
       expect(balances[0]).toMatchObject({ name: 'RVN', isNative: true });
-      expect(balances[0].amount).toBeCloseTo(1.5, 8);
+      expect(balances[0].amountBase).toBe(150000000n);
     });
 
     it('setNetwork retargets a shared provider from EVR to RVN', async () => {
@@ -1026,7 +1026,7 @@ describe('ElectrumWalletDataProvider', () => {
 
       expect(balances).toHaveLength(1);
       expect(balances[0]).toMatchObject({ assetId: 'BTGS' });
-      expect(balances[0].amount).toBeCloseTo(2.5, 8);
+      expect(balances[0].amountBase).toBe(250000000n);
 
       const balanceCalls = callsTo(calls, ELECTRUM_METHODS.getBalance);
       expect(balanceCalls).toHaveLength(1);
@@ -1051,7 +1051,7 @@ describe('ElectrumWalletDataProvider', () => {
 
       expect(balances).toHaveLength(1);
       expect(balances[0]).toMatchObject({ name: 'BTGS', decimals: 8, isNative: true });
-      expect(balances[0].amount).toBeCloseTo(1.5, 8);
+      expect(balances[0].amountBase).toBe(150000000n);
 
       const utxoCalls = callsTo(calls, ELECTRUM_METHODS.listUnspent);
       expect(utxoCalls).toHaveLength(1);
@@ -1076,7 +1076,7 @@ describe('ElectrumWalletDataProvider', () => {
 
       expect(balances).toHaveLength(1);
       expect(balances[0].name).toBe('BTGS');
-      expect(balances[0].amount).toBeCloseTo(0.2, 8);
+      expect(balances[0].amountBase).toBe(20000000n);
       expect(callsTo(calls, ELECTRUM_METHODS.assetGetMeta)).toHaveLength(0);
     });
 
@@ -1124,7 +1124,7 @@ describe('ElectrumWalletDataProvider', () => {
 
       expect(BTGS_SEGWIT_ADDRESS.startsWith('bcg1')).toBe(true);
       expect(balances).toHaveLength(1);
-      expect(balances[0].amount).toBeCloseTo(1.0, 8);
+      expect(balances[0].amountBase).toBe(100000000n);
       // The scripthash is the bech32 address's REAL script (keys.ts), and still
       // only one argument goes with it.
       expect(calls[0].params).toEqual([addressToElectrumScripthash(BTGS_SEGWIT_ADDRESS)]);

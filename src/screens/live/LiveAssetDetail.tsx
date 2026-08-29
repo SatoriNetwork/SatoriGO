@@ -2,14 +2,21 @@
 // Displays one asset's logo, name and balance, and offers Receive / Send.
 // Sending is enabled for EVR and every issued asset (asset transfers pay an EVR fee).
 
+import { useMemo, useState } from 'react';
 import { ArrowDownLeft, ArrowUpRight, ChevronLeft, Info, Landmark, Trash2 } from 'lucide-react';
+import { ActivityPager } from '../../components/ActivityPager';
 import { TokenIcon } from '../../components/BrandLogo';
+import { UntrustedTokenBanner } from '../../components/UntrustedTokenBadge';
+import { SyncStatusPill } from '../../components/SyncStatusPill';
+import { formatAmount } from '../../services/chain/amounts';
 import { EmptyState } from '../../components/EmptyState';
 import { useLiveStore, isRemovableAsset, nativeTickerFor, chainDisplayName } from '../../store/liveStore';
 import { isLegacyAsset, getAssetNote } from '../../services/assetNotes';
+import { displaySymbol } from '../../services/displaySymbol';
+import { ACTIVITY_PER_PAGE, paginate } from '../../services/activityFeed';
 import type { LiveAssetBalance, LiveTransaction } from '../../services/chain/electrumProvider';
 import { LiveNav } from './LiveNav';
-import type { NativeTicker } from '../../services/chain/chainParams';
+import { stakingRowLabel } from './stakingRowLabel';
 
 interface LiveAssetDetailProps {
   asset: LiveAssetBalance;
@@ -17,18 +24,18 @@ interface LiveAssetDetailProps {
   onReceive(): void;
   onSend(): void;
   onSelectTx(txid: string): void;
-  /** Open the Satori staking screen. Provided ONLY for the SATORIEVR asset on
-   *  mainnet; when absent, the Stake action is not shown. */
+  /** Open the staking screen for this chain. Provided ONLY for the asset that
+   *  can be staked on the ACTIVE chain (SATORIEVR for Satori pool staking on
+   *  Evrmore; the native coin on a chain with native staking, e.g. EPIX), and
+   *  LiveApp is what decides which. When absent, the Stake action is not
+   *  shown, and its absence is the whole gate. */
   onStake?(): void;
 }
-
-/** SATORIEVR is the only asset eligible for Satori pool staking. */
-const STAKING_ASSET = 'SATORIEVR';
 
 /** Human sub-label for an asset row. The chain's own displayName is used rather
  *  than a per-chain ternary, which used to fall through to "EVRmore asset" on
  *  every chain added after Ravencoin. */
-function assetSubLabel(asset: LiveAssetBalance, nativeTicker: NativeTicker, chainName: string): string {
+function assetSubLabel(asset: LiveAssetBalance, nativeTicker: string, chainName: string): string {
   if (asset.name === nativeTicker) return chainName;
   if (asset.name.includes('SATORI')) return 'Satori Network';
   return `${chainName} asset`;
@@ -46,12 +53,23 @@ function AssetTxRow({
   tx,
   decimals,
   onOpen,
+  monikerOf,
 }: {
   tx: LiveTransaction;
   decimals: number;
   onOpen(txid: string): void;
+  monikerOf?: (valoper: string) => string | undefined;
 }) {
   const isIn = tx.direction === 'in';
+  // The ticker as it is DRAWN: on an EVM chain `tx.asset` is the token's own
+  // symbol, so it is sanitised before it reaches the screen, including where it
+  // is laundered through stakingRowLabel's amountText.
+  const shownAsset = displaySymbol(tx.asset);
+  // Native staking: this asset's own list would otherwise show a delegation as
+  // "Sent 0 EPIX", which is the one reading that is actively wrong.
+  const staking = tx.staking ? stakingRowLabel(tx.staking, { ticker: shownAsset, decimals, monikerOf }) : null;
+  const positiveTone = staking ? false : isIn;
+  const arrowIn = staking ? staking.incoming : isIn;
   return (
     <div
       role="button"
@@ -84,22 +102,27 @@ function AssetTxRow({
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          background: isIn ? 'var(--success-bg)' : 'var(--card)',
-          color: isIn ? 'var(--success)' : 'var(--text-dim)',
+          background: positiveTone ? 'var(--success-bg)' : 'var(--card)',
+          color: positiveTone ? 'var(--success)' : 'var(--text-dim)',
           flexShrink: 0,
         }}
       >
-        {isIn ? <ArrowDownLeft size={15} /> : <ArrowUpRight size={15} />}
+        {arrowIn ? <ArrowDownLeft size={15} /> : <ArrowUpRight size={15} />}
       </div>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontSize: 12.5, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6 }}>
-          {isIn ? 'Received' : 'Sent'}
+          <span {...(staking ? { 'data-testid': `live-tx-staking-${tx.txid}` } : {})}>
+            {staking ? staking.title : isIn ? 'Received' : 'Sent'}
+          </span>
           {tx.status === 'pending' && (
             <span className="chip warning" style={{ fontSize: 9, padding: '1px 5px' }}>pending</span>
           )}
         </div>
-        <div className="text-dim" style={{ fontSize: 10.5, marginTop: 1 }}>
-          {new Date(tx.timestamp).toLocaleDateString()}
+        <div
+          className="text-dim"
+          style={{ fontSize: 10.5, marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+        >
+          {staking ? staking.subtitle : new Date(tx.timestamp).toLocaleDateString()}
         </div>
       </div>
       <div
@@ -107,10 +130,12 @@ function AssetTxRow({
           fontSize: 12.5,
           fontWeight: 600,
           flexShrink: 0,
-          color: isIn ? 'var(--success)' : 'var(--text)',
+          color: positiveTone ? 'var(--success)' : 'var(--text)',
         }}
       >
-        {isIn ? '+' : '-'}{fmtWithDecimals(tx.amount, decimals)} {tx.asset}
+        {staking
+          ? staking.amountText
+          : `${isIn ? '+' : '-'}${fmtWithDecimals(tx.amount, decimals)} ${shownAsset}`}
       </div>
     </div>
   );
@@ -120,15 +145,34 @@ export function LiveAssetDetail({ asset, onBack, onReceive, onSend, onSelectTx, 
   const removeAsset = useLiveStore((s) => s.removeAsset);
   const txs = useLiveStore((s) => s.txs);
   const stakingStatuses = useLiveStore((s) => s.staking.addressStatuses);
+  // Validator names for a native-staking row below, from the same cache the
+  // Stake screen fills. Undefined on every chain without it, and a row then
+  // names the validator by its shortened operator address.
+  const stakeValidators = useLiveStore((s) => s.evmStaking.snapshot?.validators);
+  const monikerOf = (valoper: string) => stakeValidators?.find((v) => v.valoper === valoper)?.moniker || undefined;
   const nativeTicker = nativeTickerFor();
-  const canStake = asset.name === STAKING_ASSET && !!onStake;
+  // The caller decides WHICH asset can be staked on this chain (see onStake):
+  // re-checking the asset name here would hardcode Satori pool staking and hide
+  // the action on every other kind, which is exactly what it used to do.
+  const canStake = !!onStake;
   // "Staked" header chip when any SATORIEVR-holding address is registered with a
   // pool. Nice-to-have; only meaningful once the staking screen has fetched status.
   const isStaked = canStake && stakingStatuses.some((s) => s.poolAddress);
 
-  // This asset's transactions only (case-insensitive on the on-chain name).
+  // This asset's transactions only (case-insensitive on the on-chain name),
+  // then one page of them. `paginate` clamps the page itself, so a page that
+  // has gone out of range (the list shrank, or a chain switch emptied it)
+  // resolves to a valid one rather than rendering blank.
   const assetName = asset.name.toUpperCase();
-  const assetTxs = txs.filter((t) => t.asset.toUpperCase() === assetName);
+  // The asset as it is DRAWN. `asset.name` stays raw for the filter above, the
+  // removal call, the data-testid and the icon lookup.
+  const shownName = displaySymbol(asset.name);
+  const assetTxs = useMemo(
+    () => txs.filter((t) => t.asset.toUpperCase() === assetName),
+    [txs, assetName],
+  );
+  const [page, setPage] = useState(1);
+  const pageOfTxs = useMemo(() => paginate(assetTxs, page, ACTIVITY_PER_PAGE), [assetTxs, page]);
 
   const handleRemove = () => {
     removeAsset(asset.name);
@@ -141,11 +185,14 @@ export function LiveAssetDetail({ asset, onBack, onReceive, onSend, onSelectTx, 
         <button type="button" className="icon-btn" onClick={onBack} aria-label="Back">
           <ChevronLeft size={20} />
         </button>
-        <h2>{asset.name}</h2>
-        <span />
+        <h2>{shownName}</h2>
+        {/* Connection state, same dot-only indicator as the rest of the wallet
+            (KNOWN_LIMITATIONS item 33). */}
+        <SyncStatusPill compact />
       </div>
 
       <div className="app-content" data-testid="live-asset-detail">
+        {!asset.isNative && <UntrustedTokenBanner symbol={asset.name} />}
         {isLegacyAsset(asset.name, nativeTicker) && (
           <div
             className="banner info"
@@ -184,7 +231,7 @@ export function LiveAssetDetail({ asset, onBack, onReceive, onSend, onSelectTx, 
               textAlign: 'center',
             }}
           >
-            {asset.name}
+            {shownName}
             {isStaked && (
               <span className="chip" data-testid="live-asset-staked-chip" style={{ fontSize: 10 }}>
                 Staked
@@ -197,9 +244,14 @@ export function LiveAssetDetail({ asset, onBack, onReceive, onSend, onSelectTx, 
             data-testid={`live-asset-detail-balance-${asset.name}`}
             style={{ marginTop: 4, maxWidth: '100%', textAlign: 'center', wordBreak: 'break-word' }}
           >
-            {fmtWithDecimals(asset.amount, asset.decimals)}
+            {formatAmount(asset.amountBase, asset.scale, {
+              grouping: true,
+              // The asset's OWN divisions cap what is shown; `scale` is what the
+              // number is stored in. They differ for an asset with divisions < 8.
+              maxFractionDigits: Math.max(0, Math.min(asset.decimals, asset.scale)),
+            })}
             <span style={{ fontSize: 15, fontWeight: 500, marginLeft: 8, color: 'var(--text-dim)' }}>
-              {asset.name}
+              {shownName}
             </span>
           </div>
         </div>
@@ -257,27 +309,39 @@ export function LiveAssetDetail({ asset, onBack, onReceive, onSend, onSelectTx, 
           </button>
         )}
 
-        {/* This asset's activity */}
+        {/* This asset's activity. PAGED, exactly like the main Activity tab
+            (owner, live testing 2026-08-25: "there is no pagination in
+            activities, I checked for USDT on EVM BNB" — this screen was the
+            one that had none, and simply rendered every matching row in one
+            unbroken scroll). Same page size, same controls, same "Load older"
+            on the last page, because it is the same component. */}
         <div className="section-label" style={{ marginTop: 18 }}>Activity</div>
         <div data-testid="live-asset-activity">
           {assetTxs.length === 0 ? (
             <EmptyState
               icon={<ArrowDownLeft size={20} />}
-              title={`No ${asset.name} activity yet`}
-              description={`Transactions involving ${asset.name} will appear here.`}
+              title={`No ${shownName} activity yet`}
+              description={`Transactions involving ${shownName} will appear here.`}
             />
           ) : (
             <div>
-              {assetTxs.map((tx) => (
+              {pageOfTxs.items.map((tx) => (
                 <AssetTxRow
                   key={tx.txid}
                   tx={tx}
                   decimals={asset.decimals}
                   onOpen={onSelectTx}
+                  monikerOf={monikerOf}
                 />
               ))}
             </div>
           )}
+          <ActivityPager
+            page={pageOfTxs.page}
+            totalPages={pageOfTxs.totalPages}
+            onPage={setPage}
+            idPrefix="asset-activity"
+          />
         </div>
       </div>
       <LiveNav />

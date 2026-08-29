@@ -18,12 +18,15 @@ import { LiveWalletService, type LiveSendPlan, type LiveNetworkId } from '../../
 import { createElectrumClient, ELECTRUM_CLOSED, ELECTRUM_NOT_CONNECTED } from '../../services/chain/electrumClient';
 import { applyAllStoredElectrumServers } from '../../services/chain/network';
 import { isSpendableAddress } from '../../services/chain/keys';
+import { toBaseUnits, formatAmount } from '../../services/chain/amounts';
+import { displaySymbol } from '../../services/displaySymbol';
 import { networkFor } from '../../services/chain/chainParams';
 import type { NativeTicker } from '../../services/chain/chainParams';
 
-/** Format sats (bigint) as a decimal EVR/asset amount. */
-function fmtSats(sats: bigint): string {
-  return (Number(sats) / 1e8).toLocaleString('en-US', { maximumFractionDigits: 8 });
+/** Base units -> display text at the chain's own scale. Exact: the digits come
+ *  from the bigint, not from a division through a double. */
+function fmtSats(sats: bigint, decimals: number): string {
+  return formatAmount(sats, decimals, { grouping: true });
 }
 
 const PENDING_PREFIX = 'dappPending:';
@@ -40,6 +43,12 @@ interface PublicWalletInfo {
   name: string;
   address: string;
   passwordless: boolean;
+  /** True when this wallet's vault is app-key protected (VaultRecord v2). Read
+   *  from the record's VERSION, never from a secret. The password this page then
+   *  needs is the APP password, and a formerly-passwordless wallet needs one
+   *  again: nothing here holds the master key, so it must be derived from what
+   *  the user types (the app-password design notes §6). */
+  appProtected: boolean;
   /** Chain id ('mainnet'|'testnet'|'ravencoin-mainnet'); drives every chain-aware
    *  label below (fee unit, chain name in copy). Defaults to 'mainnet' (Evrmore)
    *  for a legacy entry with no stored network. */
@@ -48,8 +57,43 @@ interface PublicWalletInfo {
 
 /** Public subset of the persisted `liveWallets` record (no vault is read). */
 interface PublicWalletsRecord {
-  wallets: { id: string; name?: string; address?: string; passwordless?: boolean; network?: string }[];
+  wallets: {
+    id: string;
+    name?: string;
+    address?: string;
+    passwordless?: boolean;
+    network?: string;
+    /** Version only. The vault's ciphertext is never read on this page. */
+    vault?: { version?: number };
+  }[];
   activeId: string;
+  /** PRESENCE ONLY: is an app password configured on this device? It holds no
+   *  key material (a salt, KDF params and a check blob), and nothing here reads
+   *  inside it. See the setup-required refusal below. */
+  appKey?: unknown;
+}
+
+/**
+ * IS THE FORCED APP-PASSWORD SETUP OWED (the app-password design notes §12)?
+ *
+ * The same question LiveWalletService.appPasswordRequired() asks, asked here of
+ * the raw record because this page deliberately boots without the wallet store.
+ * The two must agree, which is why it is the same two conditions and the same
+ * damaged-state clause.
+ */
+function setupRequired(record: PublicWalletsRecord | null | undefined): boolean {
+  const wallets = record?.wallets;
+  if (!Array.isArray(wallets) || wallets.length === 0) return false;
+  if (record?.appKey) return false;
+  if (wallets.some((w) => w.vault?.version === 2)) return false;
+  return wallets.some((w) => w.passwordless === true);
+}
+
+/** What to hand LiveWalletService.unlock() for this wallet: the empty passphrase
+ *  for a still-v1 passwordless wallet, and otherwise whatever the user typed
+ *  (its own password on v1, the app password on v2). */
+function walletUnlockSecret(wallet: PublicWalletInfo | null, typed: string): string {
+  return wallet?.passwordless && !wallet.appProtected ? '' : typed;
 }
 
 function shortAddress(addr: string): string {
@@ -59,7 +103,11 @@ function shortAddress(addr: string): string {
 /** Map raw build/broadcast error codes to human messages (mirrors LiveSend).
  *  `native` is the connected wallet's chain ticker and `chainName` its display
  *  name, both from the chain params, so a message never names the wrong chain. */
-function friendlyError(msg: string, assetName: string, native: NativeTicker, chainName: string): string {
+function friendlyError(msg: string, rawAssetName: string, native: NativeTicker, chainName: string): string {
+  // The asset name in these sentences came from the WEBSITE, so it is drawn
+  // through the display sanitiser: this is the wallet's voice, and a page must
+  // not be able to put a check mark or a text-direction override into it.
+  const assetName = displaySymbol(rawAssetName);
   switch (msg) {
     case 'insufficient-funds':
       return `Insufficient ${native} balance for this transaction (amount + network fee).`;
@@ -95,6 +143,9 @@ export function DappApproval({ requestId }: { requestId: string }) {
   const [wallet, setWallet] = useState<PublicWalletInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
+  /** True when the wallet UI is currently BLOCKED on the forced app-password
+   *  setup. This window then decides nothing; see the refusal below. */
+  const [needsSetup, setNeedsSetup] = useState(false);
   const [password, setPassword] = useState('');
   const [actionError, setActionError] = useState('');
   const [working, setWorking] = useState(false);
@@ -136,11 +187,13 @@ export function DappApproval({ requestId }: { requestId: string }) {
         } else {
           setPending(req);
         }
+        setNeedsSetup(setupRequired(record));
         if (entry) {
           setWallet({
             name: entry.name || 'Wallet',
             address: entry.address || '',
             passwordless: entry.passwordless ?? false,
+            appProtected: entry.vault?.version === 2,
             network: entry.network || 'mainnet',
           });
         }
@@ -178,8 +231,13 @@ export function DappApproval({ requestId }: { requestId: string }) {
   useEffect(() => {
     const onPageHide = () => {
       // Zero any unlocked in-memory secret before the window is torn down.
+      // lockApp(), not lock(): this page may have derived the app MASTER KEY
+      // from the password the user typed (an app-key wallet has no password of
+      // its own), and that key is a secret of exactly the same class as the
+      // seed. lock() zeroes the seed alone, because a wallet SWITCH must keep
+      // the master key; a page teardown must not.
       if (reviewRef.current) {
-        reviewRef.current.service.lock();
+        reviewRef.current.service.lockApp();
         reviewRef.current.client.close();
       }
       if (settled.current) return;
@@ -200,7 +258,7 @@ export function DappApproval({ requestId }: { requestId: string }) {
 
   const reject = () => {
     if (review) {
-      review.service.lock();
+      review.service.lockApp();
       review.client.close();
     }
     void settle({ error: 'user-rejected' });
@@ -236,7 +294,7 @@ export function DappApproval({ requestId }: { requestId: string }) {
     const service = new LiveWalletService(client);
     let unlocked = false;
     try {
-      const ok = await service.unlock(wallet?.passwordless ? '' : password);
+      const ok = await service.unlock(walletUnlockSecret(wallet, password));
       if (!ok) {
         setActionError('Incorrect password.');
         return;
@@ -254,7 +312,10 @@ export function DappApproval({ requestId }: { requestId: string }) {
         return;
       }
       await client.connect();
-      const amountSats = BigInt(Math.round(amount * 1e8));
+      // Shared with the wallet's own send path (services/chain/amounts):
+      // a bare Math.round here silently produced the WRONG base-unit count
+      // above 2^53, on the one path where the amount comes from a website.
+      const amountSats = toBaseUnits(amount, net.decimals);
       const plan =
         pending.method === 'sendAsset'
           ? await service.buildAssetSend(to, assetName, amountSats)
@@ -267,7 +328,7 @@ export function DappApproval({ requestId }: { requestId: string }) {
       setActionError(friendlyError(raw, assetName || walletNativeTicker, networkFor(service.network()).ticker, networkFor(service.network()).displayName));
     } finally {
       if (unlocked) {
-        service.lock();
+        service.lockApp();
         client.close();
       }
       setWorking(false);
@@ -287,7 +348,7 @@ export function DappApproval({ requestId }: { requestId: string }) {
       const raw = err instanceof Error ? err.message : String(err);
       setActionError(friendlyError(raw, review.plan.assetName || walletNativeTicker, walletNativeTicker, walletChainName));
     } finally {
-      review.service.lock();
+      review.service.lockApp();
       review.client.close();
       setReview(null);
       setWorking(false);
@@ -310,7 +371,7 @@ export function DappApproval({ requestId }: { requestId: string }) {
     const client = createElectrumClient();
     const service = new LiveWalletService(client);
     try {
-      const ok = await service.unlock(wallet?.passwordless ? '' : password);
+      const ok = await service.unlock(walletUnlockSecret(wallet, password));
       if (!ok) {
         setActionError('Incorrect password.');
         return;
@@ -320,7 +381,9 @@ export function DappApproval({ requestId }: { requestId: string }) {
     } catch (err) {
       setActionError(err instanceof Error ? err.message : String(err));
     } finally {
-      service.lock();
+      // lockApp(): this service is finished with, and it may hold the app master
+      // key it derived from the typed password as well as the signing key.
+      service.lockApp();
       client.close();
       setWorking(false);
     }
@@ -351,6 +414,54 @@ export function DappApproval({ requestId }: { requestId: string }) {
     );
   }
 
+  // THE FORCED APP-PASSWORD SETUP, SEEN FROM THE ONE WINDOW THAT IS NOT THE APP
+  // (the app-password design notes §12).
+  //
+  // This page is opened by the worker for ONE pending site request and bypasses
+  // LiveApp entirely, so the blocking setup screen the rest of the wallet is
+  // showing never reaches it. That is deliberate on both counts: a setup screen
+  // HERE would be a password field in a window a website caused to open, which
+  // is the exact shape of a phishing prompt, and it would ask for the password
+  // that protects every wallet on the device in the least trustworthy frame the
+  // wallet has. So this window sets nothing up.
+  //
+  // WHAT IT DOES INSTEAD IS REFUSE, and say why. Approving would be the route
+  // around the screen: the active wallet in this state can be one whose vault
+  // opens under the EMPTY passphrase, so a send would be built, signed and
+  // broadcast with NOTHING typed by anyone, from a window a page asked for,
+  // while the wallet's own UI is refusing to open at all. Failing closed is the
+  // house rule for the send path, and this is the send path.
+  //
+  // IT IS THE SAME PREDICATE AS THE SCREEN, device-wide, not "is the active
+  // wallet the passwordless one". One condition means there is no combination
+  // where one surface demands a password and another spends without one, and the
+  // cost of the wider rule is only that a user who is already being asked to set
+  // a password at every launch is asked to do it before a site can be answered.
+  // A refusal cannot lose money; a wrong approval can.
+  if (needsSetup) {
+    return (
+      <div className="app-frame" data-testid="dapp-approval">
+        <div className="app-content">
+          <div className="banner warning" style={{ marginTop: 16, alignItems: 'flex-start' }} data-testid="dapp-setup-required">
+            <span>
+              Satori GO needs an app password before it can answer this site. Open the extension,
+              set one, and try again from the site. Nothing was approved and nothing was sent.
+            </span>
+          </div>
+          <Button
+            block
+            variant="secondary"
+            style={{ marginTop: 14 }}
+            data-testid="dapp-reject"
+            onClick={() => void settle({ error: 'wallet-setup-required' })}
+          >
+            Close
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
   // The connected wallet's chain ticker: drives every chain-aware label below
   // (fee unit, "sending X" wording, default asset name for a native send).
   const walletNet = networkFor((wallet?.network as LiveNetworkId | undefined) ?? 'mainnet');
@@ -362,13 +473,21 @@ export function DappApproval({ requestId }: { requestId: string }) {
   const isSend = pending.method === 'sendEvr' || pending.method === 'sendAsset';
   const isSign = pending.method === 'signMessage';
   const signMessageText = typeof pending.params?.message === 'string' ? pending.params.message : '';
-  const sendAssetName =
+  // DISPLAY only. The name the SITE asked to send is drawn on the one screen
+  // that stands between a page and real money, so it is sanitised here; the
+  // send itself is built from `pending.params.asset` at :224, untouched.
+  const sendAssetName = displaySymbol(
     pending.method === 'sendAsset' && typeof pending.params?.asset === 'string'
       ? pending.params.asset.trim().toUpperCase()
-      : walletNativeTicker;
+      : walletNativeTicker,
+  );
   const sendAmount = Number(pending.params?.amount);
   const sendTo = typeof pending.params?.to === 'string' ? pending.params.to : '';
-  const needPassword = !(wallet?.passwordless ?? false);
+  // An app-key wallet ALWAYS asks here, even one that skips the password on the
+  // wallet's own send screen: this page builds a fresh LiveWalletService that
+  // holds no master key, so there is nothing to open the vault with but the app
+  // password the user types.
+  const needPassword = (wallet?.appProtected ?? false) || !(wallet?.passwordless ?? false);
 
   return (
     <div className="app-frame screen-enter" data-testid="dapp-approval">
@@ -527,14 +646,16 @@ export function DappApproval({ requestId }: { requestId: string }) {
                 <div className="sum-row" data-testid="dapp-send-fee">
                   <span className="sum-key">Network fee</span>
                   <span className="sum-val">
-                    {review ? `${fmtSats(review.plan.feeSats)} ${walletNativeTicker}` : 'shown after review'}
+                    {review
+                      ? `${fmtSats(review.plan.feeSats, walletNet.decimals)} ${walletNativeTicker}`
+                      : 'shown after review'}
                   </span>
                 </div>
                 {review && review.plan.assetName === undefined && (
                   <div className="sum-row">
                     <span className="sum-key">Total debited</span>
                     <span className="sum-val">
-                      {fmtSats(review.plan.amountSats + review.plan.feeSats)} {walletNativeTicker}
+                      {fmtSats(review.plan.amountSats + review.plan.feeSats, walletNet.decimals)} {walletNativeTicker}
                     </span>
                   </div>
                 )}

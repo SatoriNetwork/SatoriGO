@@ -11,6 +11,7 @@ import {
   PUBLIC_WJK_ELECTRUM_SERVERS,
   PUBLIC_BTC_ELECTRUM_SERVERS,
   PUBLIC_DOGE_ELECTRUM_SERVERS,
+  PUBLIC_NEOX_ELECTRUM_SERVERS,
   DEFAULT_ELECTRUM_SERVER_URLS,
   DEFAULT_RVN_ELECTRUM_SERVER_URLS,
   DEFAULT_BTGS_ELECTRUM_SERVER_URLS,
@@ -18,15 +19,27 @@ import {
   DEFAULT_WJK_ELECTRUM_SERVER_URLS,
   DEFAULT_BTC_ELECTRUM_SERVER_URLS,
   DEFAULT_DOGE_ELECTRUM_SERVER_URLS,
+  DEFAULT_NEOX_ELECTRUM_SERVER_URLS,
   ELECTRUM_SERVERS_STORAGE_KEY,
   electrumServersStorageKey,
+  buildEvrElectrumPool,
+  buildRvnElectrumPool,
+  buildBtgsElectrumPool,
+  buildLtcElectrumPool,
+  buildWjkElectrumPool,
+  buildBtcElectrumPool,
+  buildDogeElectrumPool,
+  buildNeoxElectrumPool,
   defaultServerUrlsFor,
+  electrumWssUrl,
   getElectrumServerPool,
+  isGatewayElectrumUrl,
   setElectrumServers,
   parseServerUrl,
+  withGatewayBridgeUrls,
 } from './network';
 
-// The module keeps per-chain pool state; reset all seven chains after each test
+// The module keeps per-chain pool state; reset all eight chains after each test
 // so nothing leaks between cases (or into other suites sharing the module).
 afterEach(() => {
   setElectrumServers(null);
@@ -36,6 +49,7 @@ afterEach(() => {
   setElectrumServers(null, 'wojakcoin-mainnet');
   setElectrumServers(null, 'bitcoin-mainnet');
   setElectrumServers(null, 'dogecoin-mainnet');
+  setElectrumServers(null, 'neoxa-mainnet');
 });
 
 describe('per-chain default pools', () => {
@@ -44,6 +58,96 @@ describe('per-chain default pools', () => {
     expect(getElectrumServerPool('evrmore-mainnet')).toEqual(PUBLIC_ELECTRUM_SERVERS);
     // Legacy id resolves to Evrmore too.
     expect(getElectrumServerPool('mainnet')).toEqual(PUBLIC_ELECTRUM_SERVERS);
+  });
+
+  // This suite runs in the DEVELOPMENT shape (no gateway define, see
+  // vitest.config.ts), so the lists here are the ones a dev build talks to
+  // directly. The gateway shape is pinned by network.gateway.test.ts.
+  it('with no gateway configured, nothing goes through a bridge: no chain carries a wss URL override or subprotocols', () => {
+    const everyPool = [
+      PUBLIC_ELECTRUM_SERVERS,
+      PUBLIC_RVN_ELECTRUM_SERVERS,
+      PUBLIC_BTGS_ELECTRUM_SERVERS,
+      PUBLIC_LTC_ELECTRUM_SERVERS,
+      PUBLIC_WJK_ELECTRUM_SERVERS,
+      PUBLIC_BTC_ELECTRUM_SERVERS,
+      PUBLIC_DOGE_ELECTRUM_SERVERS,
+    ].flat();
+    for (const ep of everyPool) {
+      expect(ep.gateway).toBeUndefined();
+      expect(ep.wssUrl).toBeUndefined();
+      expect(ep.protocols).toBeUndefined();
+    }
+    // The owner's own nodes are reached DIRECTLY here, which is exactly what a
+    // gateway build must not do.
+    expect(PUBLIC_ELECTRUM_SERVERS[0].host).toBe('electrumx1.satorinet.io');
+    expect(buildEvrElectrumPool()).toEqual(PUBLIC_ELECTRUM_SERVERS);
+    expect(buildRvnElectrumPool()).toEqual(PUBLIC_RVN_ELECTRUM_SERVERS);
+    expect(isGatewayElectrumUrl('wss://network.satorigo.app/electrum/evr')).toBe(false);
+    expect(withGatewayBridgeUrls(DEFAULT_ELECTRUM_SERVER_URLS)).toEqual(
+      DEFAULT_ELECTRUM_SERVER_URLS,
+    );
+  });
+
+  it('the pool builders still produce the gateway shape when handed a gateway', () => {
+    // The build defines are empty here; the arguments are what a store build
+    // passes. Proves the two shapes come from ONE code path.
+    const evr = buildEvrElectrumPool('https://gw.test', 'tok');
+    expect(evr.map(electrumWssUrl)).toEqual([
+      'wss://gw.test/electrum/evr',
+      'wss://electrum1-mainnet.evrmorecoin.org:50004',
+      'wss://electrum2-mainnet.evrmorecoin.org:50004',
+    ]);
+    expect(evr[0].protocols).toEqual(['satori-v1', 'tok']);
+    const rvn = buildRvnElectrumPool('https://gw.test', 'tok');
+    expect(rvn.map(electrumWssUrl)).toEqual(['wss://gw.test/electrum/rvn']);
+  });
+
+  it('every remaining UTXO chain builds "bridge first, public pool behind it" when handed a gateway, and its public list alone without one', () => {
+    // The 1.4.0 change, in the ONE code path both build shapes come from. Each
+    // pair pins: (a) the dev shape is byte-for-byte the public list it always
+    // was, and (b) the gateway shape is that same list with the chain's own
+    // bridge prepended, in that order, subprotocols on the bridge only.
+    const cases = [
+      { build: buildBtgsElectrumPool, key: 'btgs', pub: DEFAULT_BTGS_ELECTRUM_SERVER_URLS },
+      { build: buildLtcElectrumPool, key: 'ltc', pub: DEFAULT_LTC_ELECTRUM_SERVER_URLS },
+      { build: buildWjkElectrumPool, key: 'wjk', pub: DEFAULT_WJK_ELECTRUM_SERVER_URLS },
+      { build: buildBtcElectrumPool, key: 'btc', pub: DEFAULT_BTC_ELECTRUM_SERVER_URLS },
+      { build: buildDogeElectrumPool, key: 'doge', pub: DEFAULT_DOGE_ELECTRUM_SERVER_URLS },
+    ] as const;
+    for (const { build, key, pub } of cases) {
+      // Development build: unchanged, no bridge, no subprotocols anywhere.
+      const dev = build('', '');
+      expect(dev.map(electrumWssUrl)).toEqual([...pub]);
+      expect(dev.every((ep) => ep.protocols === undefined && ep.gateway === undefined)).toBe(true);
+
+      // Gateway build: the bridge first, the SAME public list behind it.
+      const gw = build('https://gw.test', 'tok');
+      expect(gw.map(electrumWssUrl)).toEqual([`wss://gw.test/electrum/${key}`, ...pub]);
+      expect(gw[0].protocols).toEqual(['satori-v1', 'tok']);
+      expect(gw[0].gateway).toBe(true);
+      // The public entries stay PLAIN: a public ElectrumX that is offered a
+      // subprotocol it does not echo back makes the browser fail the handshake.
+      expect(gw.slice(1).every((ep) => ep.protocols === undefined && ep.wssUrl === undefined)).toBe(
+        true,
+      );
+    }
+  });
+
+  it('pins the cipig TLS ports: BTC 20000 and LTC 20063 (corrected 2026-08-25), DOGE 20060', () => {
+    // cipig's scheme is 10xxx PLAIN TCP / 20xxx TLS / 30xxx WebSocket. BTC was
+    // listed as 10000 (the PLAINTEXT port: a TLS handshake there fails with
+    // ERR_SSL_WRONG_VERSION_NUMBER) and LTC as 50002 (not open, connection
+    // refused). Both were verified live from the gateway VM on 2026-08-25 with
+    // a real server.version handshake: BTC ElectrumX 2.0.0 at tip 964002, LTC
+    // ElectrumX 2.0.0 at tip 3166195. The wallet itself only ever opens the wss
+    // port, so nothing was visibly broken; the field was simply untrue.
+    expect(PUBLIC_BTC_ELECTRUM_SERVERS.map((s) => s.sslPort)).toEqual([20000, 20000]);
+    expect(PUBLIC_LTC_ELECTRUM_SERVERS.map((s) => s.sslPort)).toEqual([20063, 20063]);
+    expect(PUBLIC_DOGE_ELECTRUM_SERVERS.map((s) => s.sslPort)).toEqual([20060, 20060]);
+    // Not cipig, and unchanged: verified correct as listed.
+    expect(PUBLIC_BTGS_ELECTRUM_SERVERS.map((s) => s.sslPort)).toEqual([50002, 50002]);
+    expect(PUBLIC_WJK_ELECTRUM_SERVERS.map((s) => s.sslPort)).toEqual([50102, 50002]);
   });
 
   it('Ravencoin default pool is EXACTLY ONE endpoint: rvnx.satorinet.io:443 (Cloudflare/443)', () => {
@@ -78,6 +182,7 @@ describe('per-chain default pools', () => {
     expect(PUBLIC_LTC_ELECTRUM_SERVERS[0]).toMatchObject({
       host: 'ltc.electrum1.cipig.net',
       wssPort: 30063,
+      sslPort: 20063,
     });
     // electrum3 used to sit here but fails the wss handshake (probed dead
     // 2026-08-14); its verified sibling electrum2 replaced it so one host
@@ -116,6 +221,7 @@ describe('per-chain default pools', () => {
     expect(PUBLIC_BTC_ELECTRUM_SERVERS[0]).toMatchObject({
       host: 'btc.electrum1.cipig.net',
       wssPort: 30000,
+      sslPort: 20000,
     });
     expect(PUBLIC_BTC_ELECTRUM_SERVERS[1]).toMatchObject({
       host: 'btc.electrum2.cipig.net',
@@ -354,5 +460,84 @@ describe('setElectrumServers is isolated per chain', () => {
     // The same-operator overrides still stand: three cipig pools, three slots.
     expect(getElectrumServerPool('litecoin-mainnet')).toEqual(ltcOverride);
     expect(getElectrumServerPool('bitcoin-mainnet')).toEqual(btcOverride);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Neoxa: bridge-only like Ravencoin, and isolated from every other chain.
+//
+// This suite runs in the DEVELOPMENT shape (no gateway define, see
+// vitest.config.ts), where Neoxa has no direct node to list yet — the owner's is
+// being stood up — so its pool is empty here. The gateway shape, where it is the
+// bridge and nothing else, is covered in network.gateway.test.ts.
+//
+// The failure mode being guarded against is not a Neoxa that cannot connect (a
+// chain whose server is down is an ordinary state, proven to degrade honestly in
+// electrumClient.test.ts) but a Neoxa that quietly borrows SOMEBODY ELSE'S
+// servers: poolKey() falls back to 'evrmore' for any id it does not recognise,
+// and Evrmore's nodes speak the same asset dialect Neoxa does, so a missing pool
+// key would hand a Neoxa client a working connection to the WRONG CHAIN whose
+// replies have exactly the right shape.
+// ---------------------------------------------------------------------------
+describe('Neoxa pool (bridge-only; empty in a development build)', () => {
+  it('has no direct node in the development shape', () => {
+    expect(PUBLIC_NEOX_ELECTRUM_SERVERS).toEqual([]);
+    expect(buildNeoxElectrumPool()).toEqual([]);
+    expect(DEFAULT_NEOX_ELECTRUM_SERVER_URLS).toEqual([]);
+    expect(getElectrumServerPool('neoxa-mainnet')).toEqual([]);
+    expect(defaultServerUrlsFor('neoxa-mainnet')).toEqual([]);
+  });
+
+  it('does NOT fall back to the Evrmore pool (the whole point of its own pool key)', () => {
+    // If 'neoxa-mainnet' ever stopped resolving to its own key, THIS is what
+    // would happen instead, and it would look like it worked.
+    expect(getElectrumServerPool('neoxa-mainnet')).not.toEqual(PUBLIC_ELECTRUM_SERVERS);
+    expect(getElectrumServerPool('neoxa-mainnet')).not.toEqual(PUBLIC_RVN_ELECTRUM_SERVERS);
+    expect(PUBLIC_ELECTRUM_SERVERS.length > 0).toBe(true); // the comparison is meaningful
+  });
+
+  it('keeps its own storage key, so a stored pool can never leak between chains', () => {
+    expect(electrumServersStorageKey('neoxa-mainnet')).toBe(
+      `${ELECTRUM_SERVERS_STORAGE_KEY}:neoxa-mainnet`,
+    );
+    expect(electrumServersStorageKey('neoxa-mainnet')).not.toBe(ELECTRUM_SERVERS_STORAGE_KEY);
+    expect(electrumServersStorageKey('neoxa-mainnet')).not.toBe(
+      electrumServersStorageKey('ravencoin-mainnet'),
+    );
+  });
+
+  it('has NO public fallback, the Ravencoin shape (single dialect)', () => {
+    // Asserted as a DECISION, not as an accident of the current data. Neoxa
+    // carries the Ravencoin asset protocol, so a plain public ElectrumX would
+    // answer server.version and then throw on every asset call; adding one as a
+    // "fallback" would break asset balances silently instead of failing. If a
+    // future edit puts a public host in this list, this is what should stop it.
+    expect(buildNeoxElectrumPool('', '')).toEqual([]);
+    expect(buildNeoxElectrumPool('https://gw.example', 'tok')).toHaveLength(1);
+    expect(buildNeoxElectrumPool('https://gw.example', 'tok')[0].gateway).toBe(true);
+    // Ravencoin, the chain this shape was copied from, is the same length.
+    expect(buildRvnElectrumPool('https://gw.example', 'tok')).toHaveLength(1);
+  });
+
+  it('is included in applyAllStoredElectrumServers, which derives its list from CHAIN_FEE_POLICIES', async () => {
+    // The chain set comes from the fee-policy Record, never a hand-written call
+    // list, so a new chain cannot be forgotten here. Assert that Neoxa really is
+    // in that set, and that applying an empty store leaves it empty.
+    setStorageForTests(new MemoryStorageAdapter());
+    expect((Object.keys(CHAIN_FEE_POLICIES) as ChainId[])).toContain('neoxa-mainnet');
+    await applyAllStoredElectrumServers();
+    expect(getElectrumServerPool('neoxa-mainnet')).toEqual([]);
+  });
+
+  it('a user-configured Neoxa server stays scoped to Neoxa', () => {
+    // Nothing offers this in the UI today, but the pool machinery is live, and
+    // the isolation property must hold before it is reachable rather than after.
+    const neoxOverride = [parseServerUrl('wss://my-neox.example:50004')!];
+    setElectrumServers(neoxOverride, 'neoxa-mainnet');
+    expect(getElectrumServerPool('neoxa-mainnet')).toEqual(neoxOverride);
+    expect(getElectrumServerPool()).toEqual(PUBLIC_ELECTRUM_SERVERS);
+    expect(getElectrumServerPool('ravencoin-mainnet')).toEqual(PUBLIC_RVN_ELECTRUM_SERVERS);
+    setElectrumServers(null, 'neoxa-mainnet');
+    expect(getElectrumServerPool('neoxa-mainnet')).toEqual([]);
   });
 });

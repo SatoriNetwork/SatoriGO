@@ -21,6 +21,12 @@ const hoisted = vi.hoisted(() => ({
 vi.mock('../services/chain/liveWallet', () => {
   class BroadcastGatedError extends Error {}
   class LiveWalletService {
+    activeWalletFamily() {
+      return 'utxo';
+    }
+    evmChainKey() {
+      return null;
+    }
     allowBroadcast = false;
     getProvider() {
       return hoisted.provider;
@@ -131,7 +137,7 @@ describe('liveStore.refresh — balance-first + background tx sync', () => {
 
     hoisted.provider.getNetworkStatus.mockResolvedValue(netConnected);
     hoisted.provider.getAllAssetBalances.mockResolvedValue([
-      { name: 'EVR', amount: 12.5, decimals: 8, isNative: true },
+      { name: 'EVR', amountBase: 1250000000n, scale: 8, decimals: 8, isNative: true },
     ]);
     hoisted.provider.getAddressHistory.mockResolvedValue([{ tx_hash: 't1', height: 100 }]);
     const d = deferred<LiveTransaction | null>();
@@ -142,7 +148,7 @@ describe('liveStore.refresh — balance-first + background tx sync', () => {
     // Balance is on screen the moment refresh() resolves — the (slow) tx sync is
     // still pending, so txs are empty and lastSyncAt is unset.
     const s1 = useLiveStore.getState();
-    expect(s1.assets.find((a) => a.name === 'EVR')?.amount).toBe(12.5);
+    expect(s1.assets.find((a) => a.name === 'EVR')?.amountBase).toBe(1_250_000_000n);
     expect(s1.loadingRefresh).toBe(false);
     expect(s1.offline).toBe(false);
     expect(s1.txs).toEqual([]);
@@ -180,7 +186,7 @@ describe('liveStore.refresh — balance-first + background tx sync', () => {
 
     hoisted.provider.getNetworkStatus.mockResolvedValue(netConnected);
     hoisted.provider.getAllAssetBalances.mockResolvedValue([
-      { name: 'EVR', amount: 1, decimals: 8, isNative: true },
+      { name: 'EVR', amountBase: 100000000n, scale: 8, decimals: 8, isNative: true },
     ]);
     hoisted.provider.getAddressHistory.mockResolvedValue([{ tx_hash: 't1', height: 100 }]);
     const d = deferred<LiveTransaction | null>();
@@ -226,7 +232,7 @@ describe('liveStore.refresh — balance-first + background tx sync', () => {
 
     hoisted.provider.getNetworkStatus.mockResolvedValue(netConnected);
     hoisted.provider.getAllAssetBalances.mockResolvedValue([
-      { name: 'EVR', amount: 3, decimals: 8, isNative: true },
+      { name: 'EVR', amountBase: 300000000n, scale: 8, decimals: 8, isNative: true },
     ]);
     // The tx history fetch fails — this must NOT mark the wallet offline.
     hoisted.provider.getAddressHistory.mockRejectedValue(new Error('history offline (fake)'));
@@ -261,7 +267,7 @@ describe('liveStore.refresh — balance-first + background tx sync', () => {
 
     hoisted.provider.getNetworkStatus.mockResolvedValue(netConnected);
     hoisted.provider.getAllAssetBalances.mockResolvedValue([
-      { name: 'EVR', amount: 1, decimals: 8, isNative: true },
+      { name: 'EVR', amountBase: 100000000n, scale: 8, decimals: 8, isNative: true },
     ]);
     hoisted.provider.getAddressHistory.mockResolvedValue([{ tx_hash: 't1', height: 100 }]);
     const d = deferred<LiveTransaction | null>();
@@ -307,7 +313,7 @@ describe('liveStore.refresh - a refused address history is surfaced', () => {
     });
     hoisted.provider.getNetworkStatus.mockResolvedValue(netConnected);
     hoisted.provider.getAllAssetBalances.mockResolvedValue([
-      { name: 'EVR', amount: 4, decimals: 8, isNative: true },
+      { name: 'EVR', amountBase: 400000000n, scale: 8, decimals: 8, isNative: true },
     ]);
   }
 
@@ -385,7 +391,7 @@ describe('liveStore.markActivitySeen - sticks across refreshes on a large wallet
     });
     hoisted.provider.getNetworkStatus.mockResolvedValue(netConnected);
     hoisted.provider.getAllAssetBalances.mockResolvedValue([
-      { name: 'EVR', amount: 1, decimals: 8, isNative: true },
+      { name: 'EVR', amountBase: 100000000n, scale: 8, decimals: 8, isNative: true },
     ]);
     const history = Array.from({ length: TX_COUNT }, (_, i) => ({
       tx_hash: `big${i}`,
@@ -470,7 +476,7 @@ describe('liveStore.broadcast - the just-sent tx appears without waiting for the
     });
     hoisted.provider.getNetworkStatus.mockResolvedValue(netConnected);
     hoisted.provider.getAllAssetBalances.mockResolvedValue([
-      { name: 'EVR', amount: 10, decimals: 8, isNative: true },
+      { name: 'EVR', amountBase: 1000000000n, scale: 8, decimals: 8, isNative: true },
     ]);
     hoisted.provider.getAddressHistory.mockResolvedValue([{ tx_hash: 'old', height: 100 }]);
     const d = deferred<LiveTransaction | null>();

@@ -20,6 +20,7 @@ const hoisted = vi.hoisted(() => ({
     kind: 'seed' | 'pk';
     address: string;
     passwordless: boolean;
+    family: 'utxo' | 'evm';
   }>,
   activeId: null as string | null,
   resetCalls: 0,
@@ -28,6 +29,12 @@ const hoisted = vi.hoisted(() => ({
 vi.mock('../services/chain/liveWallet', () => {
   class BroadcastGatedError extends Error {}
   class LiveWalletService {
+    activeWalletFamily() {
+      return 'utxo';
+    }
+    evmChainKey() {
+      return null;
+    }
     async listWallets() {
       return hoisted.wallets.map((w) => ({ ...w, active: w.id === hoisted.activeId }));
     }
@@ -101,9 +108,9 @@ beforeEach(async () => {
   setStorageForTests(storage);
   hoisted.resetCalls = 0;
   hoisted.wallets = [
-    { id: 'w1', name: 'One', network: 'mainnet', createdAt: 1, active: true, kind: 'seed', address: A1, passwordless: false },
-    { id: 'w2', name: 'Two', network: 'mainnet', createdAt: 2, active: false, kind: 'seed', address: B1, passwordless: false },
-    { id: 'w3', name: 'Three', network: 'ravencoin-mainnet', createdAt: 3, active: false, kind: 'seed', address: R1, passwordless: false },
+    { id: 'w1', name: 'One', network: 'mainnet', createdAt: 1, active: true, kind: 'seed', address: A1, passwordless: false, family: 'utxo' },
+    { id: 'w2', name: 'Two', network: 'mainnet', createdAt: 2, active: false, kind: 'seed', address: B1, passwordless: false, family: 'utxo' },
+    { id: 'w3', name: 'Three', network: 'ravencoin-mainnet', createdAt: 3, active: false, kind: 'seed', address: R1, passwordless: false, family: 'utxo' },
   ];
   hoisted.activeId = 'w1';
   await seedCache('mainnet', A1);

@@ -455,6 +455,9 @@ describe('LiveWalletService', () => {
      *  needing a real wallet/UTXO set (broadcast() never touches those). */
     function outcomeClient(opts: {
       broadcastError?: Error;
+      /** What the server ANSWERS on a successful broadcast. Omit for an honest
+       *  server (the txid it computed from the bytes we sent it). */
+      broadcastAnswer?: unknown;
       /** How many leading txGet calls throw "not found" before it succeeds.
        *  Omit to always throw (never confirms). */
       txGetSucceedsOnCall?: number;
@@ -472,6 +475,7 @@ describe('LiveWalletService', () => {
           if (method === ELECTRUM_METHODS.txBroadcast) {
             broadcastCalls.push(params[0] as string);
             if (opts.broadcastError) throw opts.broadcastError;
+            if ('broadcastAnswer' in opts) return opts.broadcastAnswer as never;
             return computeTxid(params[0] as string) as never;
           }
           if (method === ELECTRUM_METHODS.txGet) {
@@ -548,6 +552,63 @@ describe('LiveWalletService', () => {
       svc.allowBroadcast = true;
       const txid = await svc.broadcast(RAW_HEX);
       expect(txid).toBe(EXPECTED_TXID);
+    });
+
+    // The server's ANSWER is not evidence either. A hostile (or buggy) server
+    // can swallow the transaction and reply with a plausible-looking txid; the
+    // user would then see a "sent" transaction and an id that is not theirs.
+    // The answer is therefore only ever a shortcut for "no check needed" — it
+    // is never what gets returned.
+    describe('the answer must name the transaction we signed', () => {
+      /** A well-formed txid that is NOT ours: the local one with its first two
+       *  characters swapped for a value they cannot already be. */
+      const OTHER_TXID = (EXPECTED_TXID[0] === 'a' ? 'b' : 'a') + EXPECTED_TXID.slice(1);
+
+      it('(f) an honest answer returns the local txid with NO polling', async () => {
+        const client = outcomeClient({});
+        const svc = new LiveWalletService(client, { broadcastPollDelaysMs: [1, 1, 1] });
+        svc.allowBroadcast = true;
+        expect(await svc.broadcast(RAW_HEX)).toBe(EXPECTED_TXID);
+        expect(client.txGetCalls).toHaveLength(0);
+      });
+
+      it('(g) an honest answer in a different case, or padded, is still a match', async () => {
+        const client = outcomeClient({ broadcastAnswer: `  ${EXPECTED_TXID.toUpperCase()}\n` });
+        const svc = new LiveWalletService(client, { broadcastPollDelaysMs: [1, 1, 1] });
+        svc.allowBroadcast = true;
+        expect(await svc.broadcast(RAW_HEX)).toBe(EXPECTED_TXID);
+        expect(client.txGetCalls).toHaveLength(0);
+      });
+
+      it('(h) a DIFFERENT txid is checked on chain, and the LOCAL txid is what comes back', async () => {
+        const client = outcomeClient({ broadcastAnswer: OTHER_TXID, txGetSucceedsOnCall: 1 });
+        const svc = new LiveWalletService(client, { broadcastPollDelaysMs: [1, 1, 1] });
+        svc.allowBroadcast = true;
+        const txid = await svc.broadcast(RAW_HEX);
+        expect(txid).toBe(EXPECTED_TXID);
+        expect(txid).not.toBe(OTHER_TXID);
+        // It looked up OUR transaction, never the one the server named.
+        expect(client.txGetCalls).toEqual([EXPECTED_TXID]);
+      });
+
+      it('(i) a DIFFERENT txid whose tx never appears throws broadcast-unconfirmed', async () => {
+        const delays = [1, 1, 1];
+        const client = outcomeClient({ broadcastAnswer: OTHER_TXID });
+        const svc = new LiveWalletService(client, { broadcastPollDelaysMs: delays });
+        svc.allowBroadcast = true;
+        await expect(svc.broadcast(RAW_HEX)).rejects.toThrow('broadcast-unconfirmed');
+        expect(client.txGetCalls).toHaveLength(delays.length);
+      });
+
+      it('(j) an answer that is not a txid at all is a mismatch too', async () => {
+        for (const answer of ['ok', '', 'success', EXPECTED_TXID.slice(0, 63), 42, null]) {
+          const client = outcomeClient({ broadcastAnswer: answer, txGetSucceedsOnCall: 1 });
+          const svc = new LiveWalletService(client, { broadcastPollDelaysMs: [1] });
+          svc.allowBroadcast = true;
+          expect(await svc.broadcast(RAW_HEX)).toBe(EXPECTED_TXID);
+          expect(client.txGetCalls).toEqual([EXPECTED_TXID]);
+        }
+      });
     });
   });
 
@@ -859,8 +920,10 @@ describe('LiveWalletService', () => {
     expect(list.find((w) => w.id === id1)?.name).toBe('Wallet 1');
     // No secret material ever leaks through the summary (only public metadata).
     expect(Object.keys(list[0]).sort()).toEqual(
-      ['active', 'address', 'createdAt', 'id', 'kind', 'name', 'network', 'passwordless'].sort(),
+      ['active', 'address', 'createdAt', 'family', 'id', 'kind', 'name', 'network', 'passwordless'].sort(),
     );
+    // `family` is resolved, never absent, and a UTXO summary carries no evmChainKey.
+    expect(list[0].family).toBe('utxo');
     expect(list[0]).not.toHaveProperty('vault');
 
     // Switching locks the newly-active wallet; it needs its OWN password.
@@ -1249,11 +1312,11 @@ describe('BIP39 passphrase', () => {
     });
 
     it('round-trips a passphrase without corrupting either half', () => {
-      const encoded = encodeSeedSecret(VECTOR_MNEMONIC, 'p a s s"\phrase');
+      const encoded = encodeSeedSecret(VECTOR_MNEMONIC, 'p a s s"phrase');
       expect(encoded.startsWith('{')).toBe(true);
       expect(decodeSeedSecret(encoded)).toEqual({
         mnemonic: VECTOR_MNEMONIC,
-        passphrase: 'p a s s"\phrase',
+        passphrase: 'p a s s"phrase',
       });
     });
 

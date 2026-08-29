@@ -8,7 +8,50 @@
 import { useState } from 'react';
 import { afterEach, describe, expect, it } from 'vitest';
 import { render, screen, fireEvent, cleanup } from '@testing-library/react';
-import { ChainPicker, CHAIN_OPTIONS, type ChainChoice } from './ChainPicker';
+import { ChainPicker, CHAIN_OPTIONS, chainOptionsFor, type ChainChoice } from './ChainPicker';
+import type { EvmChainInfo } from '../../store/evmChains';
+import { NEOXA_MAINNET, chainsShareDerivation, networkFor } from '../../services/chain/chainParams';
+
+/** Minimal EVM chain fixtures, shaped like the store's plain-data mirror
+ *  (EvmChainInfo). Only the fields ChainPicker actually reads matter here. */
+const EVM_CHAINS: EvmChainInfo[] = [
+  {
+    key: 'base',
+    chainId: 8453,
+    displayName: 'Base',
+    nativeTicker: 'ETH',
+    nativeDecimals: 18,
+    explorerTxUrl: 'https://basescan.org/tx/{txid}',
+    homepage: 'https://example.test',
+    young: false,
+    recentlyAdded: false,
+    feeModel: 'eip1559',
+    l1DataFee: true,
+    indexer: null,
+    alchemy: false,
+    trustWalletChain: null,
+    tokenListSlug: null,
+    defaultTokens: [],
+  },
+  {
+    key: 'bsc',
+    chainId: 56,
+    displayName: 'BNB Smart Chain',
+    nativeTicker: 'BNB',
+    nativeDecimals: 18,
+    explorerTxUrl: 'https://bscscan.com/tx/{txid}',
+    homepage: 'https://example.test',
+    young: false,
+    recentlyAdded: false,
+    feeModel: 'legacy',
+    l1DataFee: false,
+    indexer: null,
+    alchemy: false,
+    trustWalletChain: null,
+    tokenListSlug: null,
+    defaultTokens: [],
+  },
+];
 
 // This project's vitest setup does not auto-run Testing Library's cleanup, and
 // several `it`s below render the same testids — without this, later tests would
@@ -21,16 +64,26 @@ afterEach(cleanup);
 function Harness({
   initial = 'mainnet',
   secretKind = 'phrase',
+  evmChains,
 }: {
   initial?: ChainChoice;
   secretKind?: 'phrase' | 'key';
+  evmChains?: readonly EvmChainInfo[];
 }) {
   const [value, setValue] = useState<ChainChoice>(initial);
-  return <ChainPicker value={value} onChange={setValue} testIdPrefix="test-chain" secretKind={secretKind} />;
+  return (
+    <ChainPicker
+      value={value}
+      onChange={setValue}
+      testIdPrefix="test-chain"
+      secretKind={secretKind}
+      evmChains={evmChains}
+    />
+  );
 }
 
 describe('ChainPicker', () => {
-  it('renders all seven chain options, Evrmore preselected', () => {
+  it('renders all eight chain options, Evrmore preselected', () => {
     render(<Harness />);
     const evrOption = screen.getByTestId('test-chain-mainnet');
     const rvnOption = screen.getByTestId('test-chain-ravencoin-mainnet');
@@ -39,6 +92,7 @@ describe('ChainPicker', () => {
     const wjkOption = screen.getByTestId('test-chain-wojakcoin-mainnet');
     const btcOption = screen.getByTestId('test-chain-bitcoin-mainnet');
     const dogeOption = screen.getByTestId('test-chain-dogecoin-mainnet');
+    const neoxOption = screen.getByTestId('test-chain-neoxa-mainnet');
     expect(evrOption).toHaveTextContent('Evrmore');
     expect(rvnOption).toHaveTextContent('Ravencoin');
     expect(btgsOption).toHaveTextContent('BitcoinGold');
@@ -46,6 +100,7 @@ describe('ChainPicker', () => {
     expect(wjkOption).toHaveTextContent('WojakCoin');
     expect(btcOption).toHaveTextContent('Bitcoin');
     expect(dogeOption).toHaveTextContent('Dogecoin');
+    expect(neoxOption).toHaveTextContent('Neoxa');
     expect(evrOption.getAttribute('aria-pressed')).toBe('true');
     expect(rvnOption.getAttribute('aria-pressed')).toBe('false');
     expect(btgsOption.getAttribute('aria-pressed')).toBe('false');
@@ -53,6 +108,26 @@ describe('ChainPicker', () => {
     expect(wjkOption.getAttribute('aria-pressed')).toBe('false');
     expect(btcOption.getAttribute('aria-pressed')).toBe('false');
     expect(dogeOption.getAttribute('aria-pressed')).toBe('false');
+    expect(neoxOption.getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('offers Neoxa, and carries NO privacy note despite being a Ravencoin fork', () => {
+    // Neoxa is offered like any other chain. The interesting assertion is the
+    // second one: Ravencoin surfaces a shared-derivation warning, and Neoxa is a
+    // RAVENCOIN FORK that carries Ravencoin's asset protocol and P2SH prefix, so
+    // "it must warn too" is the natural wrong guess. Its coin type is its own
+    // (1668 vs 175), so one phrase derives unrelated keys on the two chains and
+    // the note would be false. The note is driven by chainsShareDerivation(),
+    // which reads the params, so this is asserted rather than assumed.
+    render(<Harness />);
+    const neoxOption = screen.getByTestId('test-chain-neoxa-mainnet');
+    expect(neoxOption).toHaveTextContent('Neoxa');
+    expect(neoxOption.getAttribute('aria-pressed')).toBe('false');
+    expect(NEOXA_MAINNET.chainId).toBe('neoxa-mainnet');
+    expect(networkFor('neoxa-mainnet')).toBe(NEOXA_MAINNET);
+    expect(chainsShareDerivation('neoxa-mainnet', 'ravencoin-mainnet')).toBe(false);
+    fireEvent.click(neoxOption);
+    expect(screen.queryByTestId('test-chain-privacy-note')).toBeNull();
   });
 
   it('keeps the OWNER-SPECIFIED display order (the header switcher reads this same array)', () => {
@@ -66,6 +141,7 @@ describe('ChainPicker', () => {
       'ravencoin-mainnet',
       'bitcoingold-mainnet',
       'wojakcoin-mainnet',
+      'neoxa-mainnet',
     ]);
   });
 
@@ -171,6 +247,68 @@ describe('hidden networks', () => {
     render(
       <ChainPicker value="mainnet" onChange={() => {}} testIdPrefix="test-chain" secretKind="phrase" />,
     );
-    expect(screen.getAllByTestId(/^test-chain-/).length).toBe(7);
+    expect(screen.getAllByTestId(/^test-chain-/).length).toBe(8);
+  });
+});
+
+describe('EVM chains', () => {
+  it('chainOptionsFor appends one row per EVM chain, after the UTXO rows, only when the list is non-empty', () => {
+    expect(chainOptionsFor().map((o) => o.value)).toEqual(CHAIN_OPTIONS.map((o) => o.value));
+    expect(chainOptionsFor([]).map((o) => o.value)).toEqual(CHAIN_OPTIONS.map((o) => o.value));
+    const withEvm = chainOptionsFor(EVM_CHAINS);
+    expect(withEvm.map((o) => o.value)).toEqual([...CHAIN_OPTIONS.map((o) => o.value), 'evm:base', 'evm:bsc']);
+    expect(withEvm.find((o) => o.value === 'evm:base')?.label).toBe('Base');
+  });
+
+  it('renders no EVM rows and no EVM note when evmChains is empty or omitted (a build without the EVM engine)', () => {
+    render(<Harness />);
+    expect(screen.queryByTestId('test-chain-evm:base')).toBeNull();
+    expect(screen.queryByTestId('test-chain-evm-note')).toBeNull();
+    cleanup();
+
+    render(<Harness evmChains={[]} />);
+    expect(screen.queryByTestId('test-chain-evm:base')).toBeNull();
+    expect(screen.getAllByTestId(/^test-chain-/).length).toBe(8);
+  });
+
+  it('offers a row per EVM chain when evmChains is non-empty, and selecting one emits its evm:<key> target', () => {
+    render(<Harness evmChains={EVM_CHAINS} />);
+    const base = screen.getByTestId('test-chain-evm:base');
+    const bsc = screen.getByTestId('test-chain-evm:bsc');
+    expect(base).toHaveTextContent('Base');
+    expect(bsc).toHaveTextContent('BNB Smart Chain');
+
+    fireEvent.click(base);
+    expect(screen.getByTestId('test-chain-evm:base').getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('shows the one-EVM-account note only once an EVM row is selected', () => {
+    render(<Harness evmChains={EVM_CHAINS} />);
+    expect(screen.queryByTestId('test-chain-evm-note')).toBeNull();
+
+    fireEvent.click(screen.getByTestId('test-chain-evm:base'));
+    const note = screen.getByTestId('test-chain-evm-note');
+    expect(note.textContent).toMatch(/one evm account works on every evm chain/i);
+    expect(note.textContent).not.toContain('—');
+
+    // Switching back to a UTXO chain drops the note.
+    fireEvent.click(screen.getByTestId('test-chain-mainnet'));
+    expect(screen.queryByTestId('test-chain-evm-note')).toBeNull();
+  });
+
+  it('never filters an EVM row out of the hidden list (hidden is UTXO-only)', () => {
+    render(
+      <ChainPicker
+        hidden={['bitcoin-mainnet', 'litecoin-mainnet']}
+        evmChains={EVM_CHAINS}
+        value="evm:base"
+        onChange={() => {}}
+        testIdPrefix="test-chain"
+        secretKind="phrase"
+      />,
+    );
+    expect(screen.queryByTestId('test-chain-bitcoin-mainnet')).toBeNull();
+    expect(screen.getByTestId('test-chain-evm:base')).toBeTruthy();
+    expect(screen.getByTestId('test-chain-evm:bsc')).toBeTruthy();
   });
 });

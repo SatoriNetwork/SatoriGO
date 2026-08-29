@@ -36,6 +36,12 @@ const h = vi.hoisted(() => ({
 vi.mock('../../services/chain/liveWallet', () => {
   class BroadcastGatedError extends Error {}
   class LiveWalletService {
+    activeWalletFamily() {
+      return 'utxo';
+    }
+    evmChainKey() {
+      return null;
+    }
     allowBroadcast = false;
     network() {
       return h.network;
@@ -103,10 +109,11 @@ function walletState(network: string, ticker: string) {
         kind: 'seed' as const,
         address: '',
         passwordless: true,
+        family: 'utxo' as const,
       },
     ],
     activeWalletId: 'w1',
-    assets: [{ name: ticker, amount: 5, decimals: 8, isNative: true }],
+    assets: [{ name: ticker, amountBase: 500000000n, scale: 8, decimals: 8, isNative: true }],
     pinnedAssets: [],
     hiddenAssets: [],
     addressBook: [],
@@ -342,6 +349,72 @@ describe('LiveSend fee choice — estimate failure', () => {
     await waitFor(() => expect(h.builds).toHaveLength(1));
     expect(h.builds[0].opts?.feeRateSatPerByte).toBe(1650n);
     expect(await screen.findByTestId('live-send-review')).toBeInTheDocument();
+  });
+});
+
+// Recipient risk warnings on the UTXO form (services/recipientRisk.ts). This is
+// the only LiveSend test that renders the real form, so the first-time case
+// lives here rather than in a file of its own. There is no contract warning on
+// a UTXO chain: these chains have no contracts to send to.
+describe('LiveSend recipient risk', () => {
+  /** A poisoning counterparty as it would sit in history: the first four and
+   *  last four characters of a real address, a different middle. History
+   *  counterparties are never re-validated, which is exactly why an attacker
+   *  can put a string like this in front of the user. */
+  const POISON_IN_HISTORY = `${EVR_RECIPIENT.slice(0, 4)}${'z'.repeat(EVR_RECIPIENT.length - 8)}${EVR_RECIPIENT.slice(-4)}`;
+
+  function historyTx(counterparty: string) {
+    return {
+      txid: 'cd'.repeat(32),
+      asset: 'EVR',
+      direction: 'out' as const,
+      amount: 1,
+      feeEvr: 0,
+      status: 'confirmed' as const,
+      timestamp: 1,
+      counterparty,
+    };
+  }
+
+  beforeEach(() => {
+    h.network = 'mainnet'; // Evrmore
+    h.feeEstimate = flatEstimate('evrmore-mainnet', 1650n, 1000n, 10_000n);
+    useLiveStore.setState({ ...walletState('mainnet', 'EVR'), txs: [], addresses: [], address: '' });
+  });
+
+  it('warns on the first send to an address, and repeats it on the review', async () => {
+    render(<LiveSend onBack={() => {}} />);
+    await screen.findByTestId('live-fee-amount');
+    expect(screen.queryByTestId('live-send-first-time')).toBeNull();
+
+    fireEvent.change(screen.getByTestId('live-send-to'), { target: { value: EVR_RECIPIENT } });
+    expect(screen.getByTestId('live-send-first-time')).toHaveTextContent(
+      'First time sending to this address',
+    );
+
+    fireEvent.change(screen.getByTestId('live-send-amount'), { target: { value: '1' } });
+    fireEvent.click(screen.getByRole('button', { name: /Review transaction/i }));
+    const review = await screen.findByTestId('live-send-review');
+    expect(review).toContainElement(screen.getByTestId('live-send-first-time'));
+  });
+
+  it('says nothing about an address already in the address book', async () => {
+    useLiveStore.setState({ addressBook: [{ label: 'Cold storage', address: EVR_RECIPIENT }] });
+    render(<LiveSend onBack={() => {}} />);
+    await screen.findByTestId('live-fee-amount');
+    fireEvent.change(screen.getByTestId('live-send-to'), { target: { value: EVR_RECIPIENT } });
+    expect(screen.queryByTestId('live-send-first-time')).toBeNull();
+    expect(screen.queryByTestId('live-send-lookalike')).toBeNull();
+  });
+
+  it('flags an address whose ends match a counterparty already in history', async () => {
+    useLiveStore.setState({ txs: [historyTx(POISON_IN_HISTORY)] });
+    render(<LiveSend onBack={() => {}} />);
+    await screen.findByTestId('live-fee-amount');
+    fireEvent.change(screen.getByTestId('live-send-to'), { target: { value: EVR_RECIPIENT } });
+    const banner = screen.getByTestId('live-send-lookalike');
+    expect(banner).toHaveTextContent('looks like one you have used before');
+    expect(banner).toHaveTextContent('compare every character before you send');
   });
 });
 

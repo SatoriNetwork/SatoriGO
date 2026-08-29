@@ -6,7 +6,17 @@
 import { getStorage } from './storage';
 import { MAX_LOGO_BYTES } from './constants';
 
-export type LogoSlot = 'header' | 'evr' | 'satori' | 'rvn' | 'btgs' | 'ltc' | 'wjk' | 'btc' | 'doge';
+export type LogoSlot =
+  | 'header'
+  | 'evr'
+  | 'satori'
+  | 'rvn'
+  | 'btgs'
+  | 'ltc'
+  | 'wjk'
+  | 'btc'
+  | 'doge'
+  | 'neox';
 export type LogoSize = 'sm' | 'md' | 'lg';
 export type LogoStyle = 'circle' | 'rounded' | 'square';
 

@@ -1,0 +1,15 @@
+{
+  "_comment": "EVM RPC hosts, injected into host_permissions ONLY by `scripts/build.mjs --evm`. Never copy these into platforms/<target>/manifest.json: a store package built without --evm must stay permission-identical to 1.3.x. Owner decision 2026-08-18: build and test against these two public endpoints; replace them with ONE aggregator host before the release that carries EVM is submitted to any store. Every origin in src/services/chain/evm/chains.ts `rpc[]` and `indexer.baseUrl` must be covered here (evm/hosts.test.ts pins that). base.blockscout.com is the phase-4 history indexer for Base (keyless Etherscan-shaped API); BNB Chain has no keyless indexer, its history is local-only until the owner decides. raw.githubusercontent.com serves the Trust Wallet token marks (tokenLogos.ts); tokens.coingecko.com serves the per-chain token list that lets Add token search by name or symbol (tokenSearch.ts), keyless, one GET per chain per day. evmrpc.epix.zone and scan.epix.zone are EpixChain's own public RPC and its Blockscout Etherscan-shaped API (phase 6, the first chain Alchemy does not serve): a GATEWAY build reaches both through the single gateway host instead, so these two entries exist only for a dev build. api.epix.zone is the same chain's Cosmos REST (LCD), added 2026-08-24 for native staking (the validator, delegation, unbonding and reward LISTS the precompiles cannot answer cheaply); a gateway build reaches it as <gateway>/evm/epix/rest/... instead, so it too is dev-only.",
+  "host_permissions": [
+    "https://mainnet.base.org/*",
+    "https://bsc-dataseed.bnbchain.org/*",
+    "https://ethereum-rpc.publicnode.com/*",
+    "https://evmrpc.epix.zone/*",
+    "https://api.epix.zone/*",
+    "https://base.blockscout.com/*",
+    "https://scan.epix.zone/*",
+    "https://*.g.alchemy.com/*",
+    "https://raw.githubusercontent.com/*",
+    "https://tokens.coingecko.com/*"
+  ]
+}

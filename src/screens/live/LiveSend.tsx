@@ -1,10 +1,20 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronLeft, AlertTriangle, CheckCircle, BookUser, Check, Wallet } from 'lucide-react';
 import { Button } from '../../components/Button';
+import { RecipientRiskBanners } from '../../components/RecipientRiskBanners';
+import { SyncStatusPill } from '../../components/SyncStatusPill';
 import { TextField, PasswordField } from '../../components/TextField';
 import { TokenIcon } from '../../components/BrandLogo';
 import { useLiveStore, computeDisplayedAssets, walletsOnChain } from '../../store/liveStore';
 import { isValidAddress, isSpendableAddress } from '../../services/chain/keys';
+import { assessRecipient, type RecipientRisk } from '../../services/recipientRisk';
+import {
+  parseAmount,
+  formatAmount,
+  amountToNumber,
+  floorToPrecision,
+} from '../../services/chain/amounts';
+import { displaySymbol } from '../../services/displaySymbol';
 import { supportsSegwit } from '../../services/chain/chainParams';
 import { networkFor } from '../../services/chain/chainParams';
 import { distinctFeeOptions } from '../../services/chain/feePolicy';
@@ -22,6 +32,9 @@ interface LiveSendProps {
   /** Asset being sent — the native coin when absent or 'EVR'. */
   asset?: string;
 }
+
+/** Up to this many own wallets are offered as chips; more become a dropdown. */
+const MY_WALLETS_CHIPS_MAX = 4;
 
 /** How long the success screen lingers before auto-returning home. */
 const SUCCESS_AUTO_RETURN_MS = 4_000;
@@ -54,26 +67,26 @@ function speedMetaFor(targetBlocks: number): { key: string; label: string } {
   return SPEED_META[targetBlocks] ?? { key: `t${targetBlocks}`, label: `${targetBlocks} blocks` };
 }
 
-function fmtSats(sats: bigint): string {
-  const val = Number(sats) / 1e8;
-  return val.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 8 });
+/** Base units -> display text at the chain's own scale. Exact: the digits come
+ *  from the bigint, never from a division through a double. */
+function fmtSats(sats: bigint, decimals: number): string {
+  return formatAmount(sats, decimals, { grouping: true });
 }
 
 function fmtShort(txid: string): string {
   return `${txid.slice(0, 8)}...${txid.slice(-8)}`;
 }
 
-/** Floor a whole-unit value to `decimals` (max 8) places so a % / balance chip
- *  can never fill an amount that exceeds the actual balance. */
-function floorToDecimals(value: number, decimals: number): number {
-  const f = 10 ** Math.min(Math.max(decimals, 0), 8);
-  return Math.floor(value * f) / f;
+/** The short address form this wallet uses everywhere a base58 address has to
+ *  fit on one line (same 8 + 6 shape as the home screen's own address line). */
+function fmtShortAddress(address: string): string {
+  return address.length <= 16 ? address : `${address.slice(0, 8)}…${address.slice(-6)}`;
 }
 
 /** Format a whole-unit amount with up to `decimals` (max 8) dp, trailing zeros
  *  (and a bare trailing dot) trimmed. Used for the "Available" line + chip fills. */
 function fmtBalance(amount: number, decimals: number): string {
-  const dp = Math.min(Math.max(decimals, 0), 8);
+  const dp = Math.max(decimals, 0);
   const s = amount.toFixed(dp);
   return dp === 0 ? s : s.replace(/\.?0+$/, '');
 }
@@ -81,7 +94,11 @@ function fmtBalance(amount: number, decimals: number): string {
 /** Turn a raw build/broadcast error code into a clear, human message.
  *  `native` is the active chain's ticker and `chainName` its display name, both
  *  looked up from the chain params, so a message never names the wrong chain. */
-function friendlyError(msg: string, assetId: string, native: NativeTicker, chainName: string): string {
+function friendlyError(msg: string, rawAssetId: string, native: NativeTicker, chainName: string): string {
+  // Drawn, so sanitised. An Evrmore/Ravencoin asset name is chain-validated and
+  // comes through unchanged; going through the one helper is what keeps that
+  // true if this screen ever renders a free-text symbol.
+  const assetId = displaySymbol(rawAssetId);
   switch (msg) {
     case 'insufficient-asset':
       return `Insufficient ${assetId} balance for this transfer.`;
@@ -131,11 +148,18 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
   const hiddenAssets = useLiveStore((s) => s.hiddenAssets);
   const estimateMaxEvr = useLiveStore((s) => s.estimateMaxEvr);
   const estimateFeeOptions = useLiveStore((s) => s.estimateFeeOptions);
+  const txs = useLiveStore((s) => s.txs);
+  const myAddress = useLiveStore((s) => s.address);
+  const myAddresses = useLiveStore((s) => s.addresses);
 
   // A passwordless wallet has no password to confirm — skip the whole password
   // step (no `live-send-password` field). Otherwise honour the user setting.
   const activeWallet = wallets.find((w) => w.id === activeWalletId);
-  const isPasswordless = activeWallet?.passwordless ?? false;
+  // `noSendPassword` is the §6 successor of `passwordless`: once a wallet moves
+  // to the app password its seed IS protected (so `passwordless` is false), but
+  // the "do not ask when sending" convenience the user chose survives as a
+  // property of its own and must go on answering here.
+  const isPasswordless = (activeWallet?.passwordless ?? false) || (activeWallet?.noSendPassword ?? false);
   const requirePassword = requirePasswordToSend && !isPasswordless;
 
   // The active wallet's chain (defaults to Evrmore mainnet, same as the store's
@@ -147,6 +171,9 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
   // native coin (EVR on Evrmore, RVN on Ravencoin).
   const assetId = asset && asset.toUpperCase() !== nativeTicker ? asset.toUpperCase() : nativeTicker;
   const isAsset = assetId !== nativeTicker;
+  // `assetId` is the IDENTITY (it is what buildSend is given and what the
+  // balance is looked up by); `shownAsset` is the same name made safe to draw.
+  const shownAsset = displaySymbol(assetId);
 
   // Displayed (spendable) balance for the selected asset — the same list the
   // home screen shows. The native coin is always present; an asset falls back to
@@ -154,7 +181,10 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
   const displayedAssets = computeDisplayedAssets(assets, pinnedAssets, hiddenAssets);
   const balanceRow =
     displayedAssets.find((a) => a.name === assetId) ?? assets.find((a) => a.name === assetId);
-  const availableBalance = balanceRow?.amount ?? 0;
+  // Base units, so the percentage buttons and the Max fill are exact rather
+  // than a percentage of a rounded figure.
+  const availableBase = balanceRow?.amountBase ?? 0n;
+  const balanceScale = balanceRow?.scale ?? 8;
   const assetDecimals = balanceRow?.decimals ?? 8;
 
   // Every asset transfer pays its network fee exclusively from the chain's native
@@ -164,8 +194,8 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
   // native balance from) and block the send before the user hits the build-time
   // error. Nonzero-but-insufficient native balance still flows to the existing
   // build-time error, since the exact fee isn't known until build.
-  const evrBalance = assets.find((a) => a.isNative || a.name === nativeTicker)?.amount ?? 0;
-  const noEvrForGas = isAsset && evrBalance === 0;
+  const evrBase = assets.find((a) => a.isNative || a.name === nativeTicker)?.amountBase ?? 0n;
+  const noEvrForGas = isAsset && evrBase === 0n;
 
   // Other wallets you own (skip the active one + any with no known address) so
   // funds can be moved between your wallets in one tap. Scoped to the ACTIVE
@@ -222,6 +252,37 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
   const [contactLabel, setContactLabel] = useState('');
   const [contactError, setContactError] = useState('');
   const [contactSaved, setContactSaved] = useState(false);
+
+  // --- recipient risk -------------------------------------------------------
+  // Two warnings, both answered offline from what the wallet already knows
+  // (services/recipientRisk.ts): a recipient never paid before, and one that
+  // merely imitates the ends of an address that HAS been used (address
+  // poisoning). There is no contract check on a UTXO chain: these chains have
+  // no contracts to send to. Neither warning ever blocks the send.
+  const recipientRisk = useMemo<RecipientRisk>(() => {
+    const typed = to.trim();
+    // Only a decodable address of THIS chain is worth assessing; a half-typed
+    // one would flash a warning at every character.
+    if (!typed || !isValidAddress(typed)) return { firstTime: false, lookalikeOf: null };
+    return assessRecipient(typed, {
+      // My own addresses: every wallet on this chain, plus this wallet's own
+      // derived receive addresses (change and gap-scan discoveries included).
+      mine: [
+        myAddress,
+        ...myAddresses.map((a) => a.address),
+        ...walletsOnChain(wallets, activeWallet?.network).map((w) => w.address),
+      ],
+      contacts: addressBook.map((c) => c.address),
+      history: txs.map((t) => t.counterparty),
+      // Base58 is case-SENSITIVE: two addresses differing only in case are two
+      // different addresses, and one of them is almost certainly a typo.
+      caseInsensitive: false,
+    });
+  }, [to, myAddress, myAddresses, wallets, activeWallet?.network, addressBook, txs]);
+
+  /** The warnings as the FORM showed them, snapshotted when the plan was built
+   *  so the review repeats exactly what the user already saw. */
+  const [planRisk, setPlanRisk] = useState<RecipientRisk | null>(null);
 
   // Leaving the success screen always returns to the live HOME (never a dead
   // end) and kicks a refresh so the new pending tx shows in Activity right away.
@@ -303,7 +364,8 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
   // size. These are UTXO chains: the exact fee follows the built transaction's
   // size, so the form previews and the review states the exact number.
   const typicalTxBytes = isAsset ? TYPICAL_ASSET_TX_BYTES : TYPICAL_SEND_TX_BYTES;
-  const feePreviewDecimal = (rate: bigint): number => Number(rate * BigInt(typicalTxBytes)) / 1e8;
+  const feePreviewDecimal = (rate: bigint): number =>
+    amountToNumber(rate * BigInt(typicalTxBytes), activeNet.decimals);
 
   // Honest label for where the headline rate comes from: a degraded probe is
   // named as the default, never passed off as a live estimate.
@@ -326,10 +388,10 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
     let cancelled = false;
     const timer = setTimeout(() => {
       void estimateMaxEvr(effectiveRate)
-        .then(({ maxDecimal, feeDecimal }) => {
+        .then(({ maxDecimal, feeDecimal, maxText }) => {
           if (cancelled) return;
           lastMaxRateRef.current = effectiveRate ?? null;
-          setAmount(maxDecimal > 0 ? fmtBalance(maxDecimal, 8) : '0');
+          setAmount(maxDecimal > 0 ? maxText : '0');
           setMaxFeeEvr(feeDecimal);
         })
         .catch(() => {});
@@ -390,15 +452,20 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
   };
 
   const fillPct = (pct: number) => {
-    const floored = floorToDecimals((pct / 100) * availableBalance, assetDecimals);
-    setAmount(floored > 0 ? fmtBalance(floored, assetDecimals) : '0');
+    // (base * pct) / 100 in bigint, then floored to what the asset can express.
+    const floored = floorToPrecision(
+      (availableBase * BigInt(pct)) / 100n,
+      balanceScale,
+      assetDecimals,
+    );
+    setAmount(floored > 0n ? formatAmount(floored, balanceScale) : '0');
     setMaxUsed(false);
   };
 
   const fillMax = async () => {
     // Assets: send the full balance — the EVR fee is paid separately from EVR.
     if (isAsset) {
-      setAmount(availableBalance > 0 ? fmtBalance(availableBalance, assetDecimals) : '0');
+      setAmount(availableBase > 0n ? formatAmount(availableBase, balanceScale) : '0');
       setMaxUsed(false);
       return;
     }
@@ -407,9 +474,9 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
     // send is actually built at (the re-estimate effect keeps it so later).
     setMaxLoading(true);
     try {
-      const { maxDecimal, feeDecimal } = await estimateMaxEvr(effectiveRate);
+      const { maxDecimal, feeDecimal, maxText } = await estimateMaxEvr(effectiveRate);
       lastMaxRateRef.current = effectiveRate ?? null;
-      setAmount(maxDecimal > 0 ? fmtBalance(maxDecimal, 8) : '0');
+      setAmount(maxDecimal > 0 ? maxText : '0');
       if (maxDecimal > 0) {
         setMaxUsed(true);
         setMaxFeeEvr(feeDecimal);
@@ -432,7 +499,7 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
   const feeNote = isAsset
     ? `Network fee: paid in ${nativeTicker} (from your ${nativeTicker} balance).`
     : maxUsed && maxFeeEvr != null
-    ? `Network fee: ~${fmtBalance(maxFeeEvr, 8)} ${nativeTicker} (deducted from Max)`
+    ? `Network fee: ~${fmtBalance(maxFeeEvr, activeNet.decimals)} ${nativeTicker} (deducted from Max)`
     : `Network fee: deducted from your ${nativeTicker} balance at review. The exact fee follows the transaction's size.`;
 
   // The store keeps raw error codes; map them for display on this screen.
@@ -464,8 +531,18 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
       );
       return;
     }
-    const amountNum = parseFloat(amount);
-    if (!amount || isNaN(amountNum) || amountNum <= 0) {
+    // Validate by PARSING at the chain's scale rather than through parseFloat:
+    // the text is what gets sent onward, so whatever this accepts is exactly
+    // what the store will convert. Its message names the real problem (too many
+    // decimal places, say) instead of one generic line.
+    let amountBase: bigint;
+    try {
+      amountBase = parseAmount(amount, activeNet.decimals);
+    } catch (err) {
+      setFieldError(err instanceof Error ? err.message : 'Enter a valid amount.');
+      return;
+    }
+    if (amountBase <= 0n) {
       setFieldError('Enter a valid amount greater than 0.');
       return;
     }
@@ -477,9 +554,12 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
       return;
     }
 
-    const result = await buildSend(to.trim(), amountNum, assetId, effectiveRate);
+    const result = await buildSend(amount, to.trim(), assetId, effectiveRate);
     if (result) {
       setPlan(result);
+      // Snapshot alongside the plan: the review repeats these warnings, it
+      // never re-derives them.
+      setPlanRisk(recipientRisk);
       setStep('review');
     }
   };
@@ -488,6 +568,7 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
     if (step === 'review') {
       clearSendPlan();
       setPlan(null);
+      setPlanRisk(null);
       setArmed(false);
       setPassword('');
       setPasswordError('');
@@ -536,7 +617,7 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
 
   // The unit shown on the review's amount row (asset name for asset sends; the
   // chain's native ticker for a native send).
-  const amountUnit = plan?.assetName ?? nativeTicker;
+  const amountUnit = displaySymbol(plan?.assetName ?? nativeTicker);
   // "EVRmore"/"Ravencoin network" mention on the review + success screens. Kept
   // as an explicit branch (not net.displayName) so the Evrmore wording stays the
   // exact historical "EVRmore network" the live smoke asserts on.
@@ -592,6 +673,14 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
           <span />
         </div>
         <div className="app-content" data-testid="live-send-review">
+          {/* The same recipient warnings the form showed, repeated here: this
+              is the last screen before the transaction is real. */}
+          {planRisk && (
+            <RecipientRiskBanners
+              firstTime={planRisk.firstTime}
+              lookalikeOf={planRisk.lookalikeOf ? fmtShortAddress(planRisk.lookalikeOf) : null}
+            />
+          )}
           <div className="banner warning" style={{ marginBottom: 14 }}>
             <AlertTriangle size={14} />
             This broadcasts a real {amountUnit} transaction to the {chainNetworkName}. Sends cannot be undone.
@@ -605,11 +694,11 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
               </div>
               <div className="sum-row">
                 <span className="sum-key">Amount</span>
-                <span className="sum-val">{fmtSats(plan.amountSats)} {amountUnit}</span>
+                <span className="sum-val">{fmtSats(plan.amountSats, activeNet.decimals)} {amountUnit}</span>
               </div>
               <div className="sum-row" data-testid="live-review-fee">
                 <span className="sum-key">Network fee</span>
-                <span className="sum-val">{fmtSats(plan.feeSats)} {nativeTicker}</span>
+                <span className="sum-val">{fmtSats(plan.feeSats, activeNet.decimals)} {nativeTicker}</span>
               </div>
               <div className="sum-row">
                 <span className="sum-key">Virtual size</span>
@@ -724,8 +813,10 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
         <button type="button" className="icon-btn" onClick={handleBack} aria-label="Back">
           <ChevronLeft size={20} />
         </button>
-        <h2>Send {assetId}</h2>
-        <span />
+        <h2>Send {shownAsset}</h2>
+        {/* Connection state, same dot-only indicator as the rest of the wallet
+            (KNOWN_LIMITATIONS item 33). */}
+        <SyncStatusPill compact />
       </div>
       {/* send-pinned: the fields scroll in .send-scroll below while the CTA row
           (.send-cta, with the no-gas + store-error banners) stays pinned above
@@ -734,6 +825,10 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
       <div className="app-content send-pinned">
         <form onSubmit={handleBuild}>
           <div className="send-scroll">
+          <RecipientRiskBanners
+            firstTime={recipientRisk.firstTime}
+            lookalikeOf={recipientRisk.lookalikeOf ? fmtShortAddress(recipientRisk.lookalikeOf) : null}
+          />
           <TextField
             label="Recipient address"
             placeholder={`${activeNet.displayName} address`}
@@ -746,7 +841,29 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
               wallet's chip highlights green (matched by address, so it survives
               duplicate names and clears itself when you edit the recipient). No
               separate confirmation line, so picking never shifts the layout. */}
-          {myWallets.length > 0 && (
+          {/* Past a handful of wallets the chip grid would eat the screen (an
+              EVM seed can carry 20 accounts): a dropdown then, the chips stay
+              for the common 1 to 4. */}
+          {myWallets.length > MY_WALLETS_CHIPS_MAX && (
+            <div data-testid="live-send-my-wallets" style={{ margin: '10px 0 12px' }}>
+              <select
+                data-testid="live-send-my-wallets-select"
+                className="live-picker"
+                value={myWallets.find((w) => !!w.address && trimmedTo === w.address)?.address ?? ''}
+                onChange={(e) => { if (e.target.value) pickMyWallet(e.target.value); }}
+                aria-label="Send to one of my wallets"
+                style={{ width: '100%' }}
+              >
+                <option value="">Send to one of my wallets ({myWallets.length})…</option>
+                {myWallets.map((w) => (
+                  <option key={w.id} value={w.address}>
+                    {w.name} · {w.address.slice(0, 8)}…{w.address.slice(-4)}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+          {myWallets.length > 0 && myWallets.length <= MY_WALLETS_CHIPS_MAX && (
             <div data-testid="live-send-my-wallets" style={{ margin: '10px 0 12px' }}>
               <div className="section-label" style={{ marginTop: 0, marginBottom: 6 }}>My wallets</div>
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
@@ -847,7 +964,7 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
           )}
 
           <TextField
-            label={`Amount (${assetId})`}
+            label={`Amount (${shownAsset})`}
             placeholder="0.00"
             type="number"
             min="0"
@@ -866,7 +983,12 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
             data-testid="live-send-available"
             style={{ fontSize: 11.5, margin: '6px 2px 8px' }}
           >
-            Available: {fmtBalance(availableBalance, assetDecimals)} {assetId}
+            Available:{' '}
+            {formatAmount(availableBase, balanceScale, {
+              grouping: true,
+              maxFractionDigits: Math.max(0, Math.min(assetDecimals, balanceScale)),
+            })}{' '}
+            {shownAsset}
           </div>
 
           {/* Quick-amount chips (25 / 50 / 75 / Max), MetaMask-style. */}
@@ -914,7 +1036,7 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
                   <div style={{ minWidth: 0 }}>
                     <div data-testid="live-fee-amount" style={{ fontWeight: 700, fontSize: 13.5 }}>
-                      ~{fmtBalance(feePreviewDecimal(headlineRate), 8)} {nativeTicker}
+                      ~{fmtBalance(feePreviewDecimal(headlineRate), activeNet.decimals)} {nativeTicker}
                     </div>
                     <div className="text-dim" data-testid="live-fee-rate" style={{ fontSize: 11, marginTop: 1 }}>
                       {headlineRate.toString()} sat/byte · {rateSourceLabel}
@@ -968,7 +1090,7 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
                         >
                           <span style={{ fontWeight: 700 }}>{meta.label}</span>
                           <span style={{ fontSize: 10, opacity: 0.9 }}>
-                            ~{fmtBalance(feePreviewDecimal(o.satPerByte), 8)}
+                            ~{fmtBalance(feePreviewDecimal(o.satPerByte), activeNet.decimals)}
                           </span>
                         </button>
                       );
@@ -1034,9 +1156,9 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
                   textOverflow: 'ellipsis',
                   whiteSpace: 'nowrap',
                 }}
-                title={assetId}
+                title={shownAsset}
               >
-                {assetId}
+                {shownAsset}
               </div>
               <div
                 className="text-dim"

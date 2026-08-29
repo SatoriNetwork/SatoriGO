@@ -23,7 +23,18 @@ const ALL_CHAIN_IDS = Object.keys(CHAIN_FEE_POLICIES) as ChainId[];
  *  Bitcoin's curve varies (1.00 at 1-2 blocks down to 0.35 at 25), and
  *  Dogecoin's 2-block answer spikes ~52x above its 6-block one (see the DOGE
  *  describe block below). */
-const MEASURED_ESTIMATE_SAT_PER_BYTE: Record<ChainId, number> = {
+/** Chains whose `blockchain.estimatefee` could NOT be measured, and why. This is
+ *  a CLOSED list, asserted below, so a future chain cannot quietly join it and
+ *  skip the measured-estimate check by simply being absent from the table. */
+const UNMEASURABLE_CHAIN_IDS: readonly ChainId[] = [
+  // Neoxa has no ElectrumX server anywhere to probe (see the NEOX block in
+  // network.ts), so there is no estimate to record and none is invented here.
+  // Its policy is sourced from the chain's OWN validation.h instead, and that is
+  // what the dedicated describe block near the bottom of this file pins.
+  'neoxa-mainnet',
+];
+
+const MEASURED_ESTIMATE_SAT_PER_BYTE: Partial<Record<ChainId, number>> = {
   'bitcoin-mainnet': 0.47,
   'litecoin-mainnet': 1.0,
   'bitcoingold-mainnet': 1.04,
@@ -56,11 +67,20 @@ const toCoinPerKb = (satPerByte: number) => (satPerByte * 1000) / 1e8;
 /** A typical 1-input / 2-output legacy tx is 226 bytes (10 + 148 + 2×34). */
 const TYPICAL_TX_BYTES = 226n;
 
-describe('CHAIN_FEE_POLICIES invariants (all seven chains + testnet)', () => {
+describe('CHAIN_FEE_POLICIES invariants (all eight chains + testnet)', () => {
   it('covers every ChainId exactly once', () => {
     // Record<ChainId, …> already enforces this at compile time; this pins the
     // runtime count so a type-system workaround would still fail a test.
-    expect(ALL_CHAIN_IDS).toHaveLength(8);
+    expect(ALL_CHAIN_IDS).toHaveLength(9);
+  });
+
+  it('has a measured estimate for every chain except the closed unmeasurable list', () => {
+    // The guard on the exemption. Every chain must EITHER carry a measured
+    // estimate or be named, with a reason, in UNMEASURABLE_CHAIN_IDS — adding a
+    // chain and forgetting to probe it fails here rather than silently skipping
+    // the fallback-fee check below.
+    const missing = ALL_CHAIN_IDS.filter((id) => MEASURED_ESTIMATE_SAT_PER_BYTE[id] === undefined);
+    expect(missing).toEqual([...UNMEASURABLE_CHAIN_IDS]);
   });
 
   it.each(ALL_CHAIN_IDS)('%s: ceiling is never below the floor (inversion guard)', (id) => {
@@ -81,7 +101,9 @@ describe('CHAIN_FEE_POLICIES invariants (all seven chains + testnet)', () => {
 
   it.each(ALL_CHAIN_IDS)('%s: default covers the measured estimate (a fallback tx confirms)', (id) => {
     const p = CHAIN_FEE_POLICIES[id];
-    const measured = serverEstimateToSatPerByte(toCoinPerKb(MEASURED_ESTIMATE_SAT_PER_BYTE[id]));
+    const estimate = MEASURED_ESTIMATE_SAT_PER_BYTE[id];
+    if (estimate === undefined) return; // unmeasurable, and pinned as such above
+    const measured = serverEstimateToSatPerByte(toCoinPerKb(estimate));
     expect(measured).not.toBeNull();
     // The old global default (10 sat/byte) was BELOW the EVR/RVN relay floor:
     // an unrelayable fallback. Each chain's default must price at/above what
@@ -245,6 +267,52 @@ describe('Dogecoin fee trap — the floor comes from the params, never the serve
     expect(est.differentiated).toBe(true);
     const shown = distinctFeeOptions(est.options);
     expect(shown.map((o) => o.satPerByte)).toEqual([10_000n, 1000n]);
+  });
+});
+
+describe('Neoxa fee policy — every value from the chain source, none from a server', () => {
+  const neox: ChainFeePolicy = CHAIN_FEE_POLICIES['neoxa-mainnet'];
+
+  it('pins the params-derived policy values', () => {
+    // Neoxa is the one chain in the table with NO measured column: there is no
+    // ElectrumX server for it to probe. The floor therefore comes from the
+    // chain's own source, src/validation.h:64 DEFAULT_MIN_RELAY_TX_FEE =
+    // 1000000 satoshis per kB -> 1000 sat/byte, which is the same relay floor
+    // Evrmore and Ravencoin were MEASURED at (they are the same lineage). The
+    // rest keep the EVR/RVN/DOGE shape: 10x-floor ceiling, 1 coin absolute cap.
+    expect(neox.floorSatPerByte).toBe(1000n);
+    expect(neox.ceilingSatPerByte).toBe(10_000n);
+    expect(neox.defaultSatPerByte).toBe(1200n);
+    expect(neox.maxTxFeeSats).toBe(100_000_000n); // 1 NEOX
+  });
+
+  it('sits on the Ravencoin/Evrmore fee scale, not the Bitcoin one', () => {
+    // A cross-check on the 1000000-per-kB reading: if it had been misread as
+    // Bitcoin Core's 1000-per-kB the floor would be 1 sat/byte, i.e. a thousand
+    // times too low, and every Neoxa transaction would be unrelayable.
+    expect(neox.floorSatPerByte).toBe(CHAIN_FEE_POLICIES['ravencoin-mainnet'].floorSatPerByte);
+    expect(neox.floorSatPerByte).toBe(CHAIN_FEE_POLICIES['evrmore-mainnet'].floorSatPerByte);
+    expect(neox.floorSatPerByte > CHAIN_FEE_POLICIES['bitcoin-mainnet'].floorSatPerByte).toBe(true);
+  });
+
+  it('raises an under-floor server answer and clamps an inflated one', () => {
+    // No server exists to produce either number today, which is precisely why
+    // the bounds must already be right: the day one appears, its first answer is
+    // untrusted input and these are the guards it meets.
+    expect(clampFeeRate(1n, neox)).toBe(1000n);
+    expect(clampFeeRate(999n, neox)).toBe(1000n);
+    expect(clampFeeRate(50_000n, neox)).toBe(10_000n);
+    expect(clampFeeRate(2000n, neox)).toBe(2000n); // a plausible answer passes through
+  });
+
+  it('a fallback (no server at all) estimate both relays and confirms', () => {
+    // This is the CURRENT state of the chain, not a hypothetical: with an empty
+    // server pool every estimate is null, so the default is what a Neoxa send
+    // would price at the moment the chain is switched on.
+    const est = buildFeeEstimate('neoxa-mainnet', neox, [null, null, null]);
+    expect(est.options.every((o) => o.satPerByte === neox.defaultSatPerByte)).toBe(true);
+    expect(est.options.every((o) => o.satPerByte >= neox.floorSatPerByte)).toBe(true);
+    expect(est.differentiated).toBe(false);
   });
 });
 

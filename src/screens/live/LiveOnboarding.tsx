@@ -1,14 +1,24 @@
-import { useMemo, useState } from 'react';
-import { KeyRound, Download, AlertTriangle, Fingerprint } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { KeyRound, Download, AlertTriangle, Fingerprint, Info, ShieldCheck } from 'lucide-react';
 import { Button } from '../../components/Button';
 import { PasswordField, TextField } from '../../components/TextField';
 import { CopyButton } from '../../components/CopyButton';
+import { clearSecretClipboardNow } from '../../services/clipboard';
 import { BrandLogo } from '../../components/BrandLogo';
+import { ConstellationField } from '../../components/ConstellationField';
 import { PasswordStrengthBar } from '../../components/PasswordStrengthBar';
 import { useLiveStore, chainDisplayName } from '../../store/liveStore';
 import { MIN_PASSWORD_LENGTH } from '../../services/constants';
+import {
+  buildQuiz,
+  checkQuiz,
+  pickQuizPositions,
+  type Quiz,
+  type QuizChoice,
+} from '../../services/mnemonicQuiz';
 import { networkFor, type EvrmoreNetwork } from '../../services/chain/chainParams';
 import { classifyPrivateKeyOrigin } from '../../services/chain/keys';
+import { isEvmChainTarget } from '../../store/evmChains';
 import { ChainPicker, CHAIN_OPTIONS, type ChainChoice } from './ChainPicker';
 
 type Step = 'choose' | 'create-form' | 'mnemonic' | 'import-form' | 'pk-form';
@@ -48,9 +58,10 @@ function joinChainNames(nets: readonly EvrmoreNetwork[]): string {
 /**
  * What (if anything) to tell the user about the WIF version byte of the key they
  * pasted, given the chain they selected. Returns a hard `error` that blocks the
- * import, a soft `warning` that does not, or neither.
+ * import, a soft `warning` that does not, an informational `notice` that also
+ * does not, or neither.
  *
- * REJECT vs WARN, and why the line is drawn here:
+ * REJECT vs WARN vs NOTICE, and why the line is drawn here:
  *
  *   - A byte belonging to NO pickable chain is REJECTED. There is no reading of
  *     that paste under which this wallet is the right home for the key: the most
@@ -65,11 +76,17 @@ function joinChainNames(nets: readonly EvrmoreNetwork[]): string {
  *     precisely what they are doing, and blocking would break a legitimate flow
  *     to protect against a guess.
  *
- *   - A byte matching the SELECTED chain says nothing worth saying, so nothing
- *     is said. 128 is Evrmore, Ravencoin AND Bitcoin, so "the prefix matches"
- *     would read as confirmation the wallet has not earned. The same collision
- *     is why the warning copy admits what it cannot distinguish instead of
- *     presenting itself as a chain check.
+ *   - A byte matching the SELECTED chain, but ALSO matching other pickable
+ *     chains, gets a NOTICE, not silence. 128 is Evrmore, Ravencoin AND
+ *     Bitcoin, so "the prefix matches" is not proof the key was made for this
+ *     one; the honest thing is to say the check cannot see past the shared
+ *     byte, before the import rather than never. This is item 10 of
+ *     KNOWN_LIMITATIONS.md made visible at the one screen it affects. It must
+ *     never read as a warning: nothing here suggests the key is wrong, and the
+ *     import proceeds exactly as it would without this notice.
+ *
+ *   - A byte matching the SELECTED chain and NO other pickable chain says
+ *     nothing worth saying, so nothing is said.
  *
  *   - A raw 64-character hex key carries no version byte at all and is always
  *     accepted in silence. There is nothing to compare.
@@ -77,7 +94,13 @@ function joinChainNames(nets: readonly EvrmoreNetwork[]): string {
 function pkChainNotice(
   input: string,
   network: ChainChoice,
-): { error?: string; warning?: string } {
+): { error?: string; warning?: string; notice?: string } {
+  // This whole check is about a WIF version byte, a UTXO-only encoding: an EVM
+  // account takes a raw secp256k1 key with no chain-tagged prefix at all (see
+  // importPrivateKeyWallet's EVM branch in the store), so there is nothing here
+  // to compare and nothing to say. Also guards the networkFor() call below,
+  // which does not know an `evm:<key>` target.
+  if (isEvmChainTarget(network)) return {};
   const target = networkFor(network);
   const origin = classifyPrivateKeyOrigin(input, target, PICKABLE_NETWORKS);
   if (origin.kind === 'unknown-chain') {
@@ -97,6 +120,19 @@ function pkChainNotice(
         `This key's WIF prefix belongs to ${joinChainNames(origin.chains)}, not ${target.displayName}. ` +
         `Importing it here derives a new ${target.displayName} address, which is not the address its ` +
         `coins are on. Chains share WIF prefixes, so this cannot always tell them apart.`,
+    };
+  }
+  if (origin.kind === 'selected-chain' && origin.chains.length > 1) {
+    // `chains` includes the selected chain itself (that is what made it
+    // 'selected-chain'); compare on chainId, not object identity or the legacy
+    // `id` field, since Ravencoin mainnet also carries id:'mainnet'.
+    const others = origin.chains.filter((n) => n.chainId !== target.chainId);
+    return {
+      notice:
+        `This key will be imported as ${target.displayName}. Its WIF prefix is also used by ` +
+        `${joinChainNames(others)}, so the wallet cannot tell which of these chains it was actually ` +
+        `created for. If it did not come from ${target.displayName}, this import will still succeed ` +
+        `and will not find the coins.`,
     };
   }
   return {};
@@ -260,6 +296,141 @@ function PasswordSection({
   );
 }
 
+/**
+ * The optional BIP39 passphrase ("25th word") on a NEWLY CREATED wallet.
+ *
+ * Built as the same explicit check-tile as "Create without a password" above,
+ * deliberately NOT as the <details> disclosure the import form uses. A <details>
+ * keeps whatever was typed inside it when it is collapsed again, so a user could
+ * type a passphrase, close it believing they had cancelled, and walk away with a
+ * wallet their recovery phrase alone will never reopen. Toggling this off clears
+ * both fields, so there is no invisible state.
+ *
+ * Typed TWICE, unlike the import form's single field, because the two cases are
+ * not symmetric. On import the passphrase already exists, so a typo shows up
+ * immediately as an empty wallet the user can retry. On creation there is
+ * nothing to compare against, ever: a typo silently mints a different wallet at
+ * a different address, and the mistyped string is never written down anywhere.
+ * The confirmation field is the only check that can exist here.
+ */
+function CreatePassphraseSection({
+  enabled,
+  onToggle,
+  passphrase,
+  setPassphrase,
+  confirm,
+  setConfirm,
+  error,
+  noPassword,
+}: {
+  enabled: boolean;
+  onToggle(v: boolean): void;
+  passphrase: string;
+  setPassphrase(v: string): void;
+  confirm: string;
+  setConfirm(v: string): void;
+  error?: string;
+  /** The wallet is being created without a password, which changes what can
+   *  honestly be said about how the passphrase is stored. */
+  noPassword: boolean;
+}) {
+  return (
+    <>
+      <div
+        role="checkbox"
+        aria-checked={enabled}
+        tabIndex={0}
+        data-testid="live-create-passphrase-optin"
+        onClick={() => onToggle(!enabled)}
+        onKeyDown={(e) => {
+          if (e.key === ' ' || e.key === 'Enter') {
+            e.preventDefault();
+            onToggle(!enabled);
+          }
+        }}
+        style={{
+          display: 'flex',
+          gap: 10,
+          alignItems: 'flex-start',
+          cursor: 'pointer',
+          background: 'var(--card)',
+          border: '1px solid var(--border)',
+          borderRadius: 'var(--r-md)',
+          padding: '10px 12px',
+          margin: '4px 0 12px',
+        }}
+      >
+        <div
+          style={{
+            width: 18,
+            height: 18,
+            borderRadius: 5,
+            border: `2px solid ${enabled ? 'var(--danger)' : 'var(--border-strong)'}`,
+            background: enabled ? 'var(--danger-bg)' : 'transparent',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            flexShrink: 0,
+            marginTop: 1,
+            transition: 'all 0.15s',
+          }}
+        >
+          {enabled && <span style={{ color: 'var(--danger)', fontSize: 11, fontWeight: 700 }}>✓</span>}
+        </div>
+        <span style={{ fontSize: 12, lineHeight: 1.5 }}>
+          <strong>Add a BIP39 passphrase (advanced)</strong>
+          <span className="text-dim" style={{ display: 'block', fontWeight: 400, marginTop: 1 }}>
+            A 25th word folded into your recovery phrase. Leave this off unless you already know you want one.
+          </span>
+        </span>
+      </div>
+
+      {enabled && (
+        <>
+          <div
+            className="banner danger"
+            data-testid="live-create-passphrase-warning"
+            style={{ marginBottom: 12, alignItems: 'flex-start', flexDirection: 'column', gap: 4 }}
+          >
+            <strong>Your recovery phrase alone will no longer restore this wallet.</strong>
+            <span style={{ fontWeight: 400 }}>
+              Restoring needs the phrase and this passphrase together. Nobody, including us, can
+              recover it or reset it. Lose it and these coins are gone for good.
+            </span>
+          </div>
+
+          <PasswordField
+            label="BIP39 passphrase"
+            showLabel="Show"
+            hideLabel="Hide"
+            value={passphrase}
+            onChange={(e) => setPassphrase(e.target.value)}
+            placeholder="Enter passphrase"
+            testId="live-create-passphrase"
+          />
+          <PasswordField
+            label="Confirm passphrase"
+            showLabel="Show"
+            hideLabel="Hide"
+            value={confirm}
+            onChange={(e) => setConfirm(e.target.value)}
+            placeholder="Repeat passphrase"
+            testId="live-create-passphrase-confirm"
+            error={error}
+          />
+          {/* Item 16 of KNOWN_LIMITATIONS.md, said at the one screen where the
+              user is choosing to take it on rather than buried in a document. */}
+          <span className="text-faint" style={{ fontSize: 10.5, display: 'block', marginTop: -6, marginBottom: 12 }}>
+            {noPassword
+              ? 'It is stored next to your recovery phrase, and with no wallet password anyone using this browser can read both. It does not give you the deniability a passphrase kept outside the wallet would.'
+              : 'It is stored encrypted next to your recovery phrase, under your wallet password, so this wallet can unlock later. That means it does not give you the deniability a passphrase kept outside the wallet would.'}
+          </span>
+        </>
+      )}
+    </>
+  );
+}
+
 function CreateForm({ onBack }: { onBack(): void }) {
   const createWallet = useLiveStore((s) => s.createWallet);
   const addingWallet = useLiveStore((s) => s.addingWallet);
@@ -268,16 +439,40 @@ function CreateForm({ onBack }: { onBack(): void }) {
   const [network, setNetwork] = useState<ChainChoice>('mainnet');
   // Chains switched off in expert Settings are not offered for a new wallet.
   const hiddenChains = useLiveStore((s) => s.hiddenChains);
+  // Empty in a build without the EVM engine, which drops the picker back to
+  // its UTXO-only rows (see ChainPicker's own doc comment).
+  const evmChains = useLiveStore((s) => s.evm.chains);
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
   const [noPassword, setNoPassword] = useState(false);
   const [ack, setAck] = useState(false);
+  // Opt-in BIP39 passphrase, off by default. Its own error slot, routed under the
+  // Confirm passphrase field: painting it on the wallet-password pair would
+  // redden the wrong field, the same trap the import form's phraseError avoids.
+  const [usePassphrase, setUsePassphrase] = useState(false);
+  const [passphrase, setPassphrase] = useState('');
+  const [passphraseConfirm, setPassphraseConfirm] = useState('');
+  const [passphraseError, setPassphraseError] = useState('');
   const [localError, setLocalError] = useState('');
   const [loading, setLoading] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLocalError('');
+    setPassphraseError('');
+    // Checked BEFORE the password fields. A password complaint is recoverable
+    // noise; a mistyped passphrase is the one mistake on this form that cannot
+    // be undone afterwards, so it must never be buried under "min 8 characters".
+    if (usePassphrase) {
+      if (!passphrase) {
+        setPassphraseError('Enter a passphrase, or switch this option back off.');
+        return;
+      }
+      if (passphrase !== passphraseConfirm) {
+        setPassphraseError('Passphrases do not match.');
+        return;
+      }
+    }
     if (!noPassword) {
       if (password.length < MIN_PASSWORD_LENGTH) {
         setLocalError(`Password must be at least ${MIN_PASSWORD_LENGTH} characters.`);
@@ -292,7 +487,10 @@ function CreateForm({ onBack }: { onBack(): void }) {
       return;
     }
     setLoading(true);
-    await createWallet(noPassword ? '' : password, name, network);
+    // `usePassphrase &&` is the second guard: the toggle already clears the
+    // fields, so a value can only survive here as a bug, and this is a bug that
+    // would create a wallet the user cannot restore.
+    await createWallet(noPassword ? '' : password, name, network, usePassphrase ? passphrase : '');
     setLoading(false);
   };
 
@@ -314,7 +512,14 @@ function CreateForm({ onBack }: { onBack(): void }) {
         autoComplete="off"
       />
 
-      <ChainPicker hidden={hiddenChains} value={network} onChange={setNetwork} testIdPrefix="live-create-chain" secretKind="phrase" />
+      <ChainPicker
+        hidden={hiddenChains}
+        evmChains={evmChains}
+        value={network}
+        onChange={setNetwork}
+        testIdPrefix="live-create-chain"
+        secretKind="phrase"
+      />
 
       <PasswordSection
         noPassword={noPassword}
@@ -335,7 +540,30 @@ function CreateForm({ onBack }: { onBack(): void }) {
         </span>
       )}
 
-      <div style={{ display: 'flex', gap: 9, marginTop: 20 }}>
+      {/* Below the password choice on purpose: what can honestly be said about
+          where the passphrase is stored is a statement ABOUT that choice, so it
+          reads correctly only once the choice is already on screen. */}
+      <div style={{ marginTop: 14 }}>
+        <CreatePassphraseSection
+          enabled={usePassphrase}
+          onToggle={(v) => {
+            setUsePassphrase(v);
+            // Switching it off must leave nothing behind: a remembered value
+            // would silently derive a different wallet on submit.
+            setPassphrase('');
+            setPassphraseConfirm('');
+            setPassphraseError('');
+          }}
+          passphrase={passphrase}
+          setPassphrase={setPassphrase}
+          confirm={passphraseConfirm}
+          setConfirm={setPassphraseConfirm}
+          error={passphraseError || undefined}
+          noPassword={noPassword}
+        />
+      </div>
+
+      <div style={{ display: 'flex', gap: 9, marginTop: 6 }}>
         <Button type="button" variant="secondary" onClick={onBack}>Back</Button>
         <Button type="submit" block loading={loading} data-testid="live-create-submit">
           Create wallet
@@ -345,20 +573,259 @@ function CreateForm({ onBack }: { onBack(): void }) {
   );
 }
 
-function MnemonicView({ mnemonic }: { mnemonic: string }) {
+/**
+ * "Confirm your recovery phrase": the second half of the backup step, between
+ * the words and the wallet, on CREATED wallets only.
+ *
+ * A checkbox saying "I saved it" is a promise, not evidence, and the phrase is
+ * never shown again after this screen. Asking for three words back at positions
+ * the user could not have predicted is the only moment where a phrase that was
+ * never actually written down can still be caught, while the words are one tap
+ * away behind "Back to the phrase".
+ *
+ * A wrong answer clears the blanks and says so, and that is all it does: there
+ * is no lockout and no limit, because the user is not an attacker here and the
+ * only thing a hard failure mode would achieve is pushing them to screenshot the
+ * phrase. Import never sees this screen (the phrase came from the user).
+ */
+function MnemonicVerify({
+  words,
+  quiz,
+  onBack,
+  onConfirmed,
+}: {
+  words: string[];
+  /** Owned by MnemonicView, so stepping back to the words and returning asks
+   *  for the SAME positions. Re-rolling them there would look like the wallet
+   *  moving the goalposts while the user is trying to comply. */
+  quiz: Quiz;
+  onBack(): void;
+  onConfirmed(): void;
+}) {
+  const [answers, setAnswers] = useState<(QuizChoice | null)[]>(() => quiz.positions.map(() => null));
+  const [error, setError] = useState('');
+
+  const usedIds = new Set(answers.filter((a): a is QuizChoice => !!a).map((a) => a.id));
+  const complete = answers.every((a) => !!a);
+
+  /** A tapped chip drops into the first empty blank, left to right. */
+  const place = (choice: QuizChoice) => {
+    setError('');
+    setAnswers((prev) => {
+      const idx = prev.findIndex((a) => !a);
+      if (idx < 0) return prev;
+      const next = [...prev];
+      next[idx] = choice;
+      return next;
+    });
+  };
+
+  /** A tapped blank empties itself and returns its chip to the bank. */
+  const clearSlot = (idx: number) => {
+    setError('');
+    setAnswers((prev) => {
+      if (!prev[idx]) return prev;
+      const next = [...prev];
+      next[idx] = null;
+      return next;
+    });
+  };
+
+  const submit = () => {
+    if (checkQuiz(words, quiz.positions, answers.map((a) => a?.word ?? null))) {
+      onConfirmed();
+      return;
+    }
+    // Clearing on a wrong answer is deliberate: leaving three wrong words in
+    // place invites re-submitting the same guess.
+    setAnswers(quiz.positions.map(() => null));
+    setError('Those are not the right words. Check your backup and try again.');
+  };
+
+  return (
+    <div data-testid="live-mnemonic-verify">
+      <h3 style={{ marginBottom: 6 }}>Confirm your recovery phrase</h3>
+      <p className="text-dim" style={{ fontSize: 12, marginBottom: 14 }}>
+        Tap the words that belong in these spots, using the phrase you just wrote down.
+      </p>
+
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: `repeat(${quiz.positions.length}, 1fr)`,
+          gap: 8,
+          marginBottom: 12,
+        }}
+      >
+        {quiz.positions.map((position, idx) => {
+          const filled = answers[idx];
+          return (
+            <div key={position} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <span className="text-faint" style={{ fontSize: 10.5, fontWeight: 600 }}>
+                Word #{position}
+              </span>
+              <button
+                type="button"
+                data-testid={`live-mnemonic-slot-${position}`}
+                aria-label={`Word number ${position}${filled ? `: ${filled.word}, tap to clear` : ', empty'}`}
+                onClick={() => clearSlot(idx)}
+                style={{
+                  fontSize: 12,
+                  fontWeight: 600,
+                  minHeight: 34,
+                  padding: '6px 6px',
+                  borderRadius: 8,
+                  cursor: filled ? 'pointer' : 'default',
+                  color: 'var(--text)',
+                  background: filled ? 'var(--card)' : 'transparent',
+                  border: filled
+                    ? '1px solid var(--border-strong)'
+                    : '1px dashed var(--border-strong)',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                }}
+              >
+                {filled?.word ?? ''}
+              </button>
+            </div>
+          );
+        })}
+      </div>
+
+      {error && (
+        <div
+          className="banner danger"
+          role="alert"
+          data-testid="live-mnemonic-verify-error"
+          style={{ marginBottom: 12, alignItems: 'flex-start' }}
+        >
+          <AlertTriangle size={14} />
+          <span>{error}</span>
+        </div>
+      )}
+
+      <div
+        data-testid="live-mnemonic-choices"
+        style={{
+          display: 'flex',
+          flexWrap: 'wrap',
+          gap: 7,
+          justifyContent: 'center',
+          background: 'var(--bg-elev)',
+          borderRadius: 'var(--r-md)',
+          border: '1px solid var(--border-strong)',
+          padding: 12,
+          marginBottom: 14,
+        }}
+      >
+        {quiz.bank.map((choice) => {
+          const used = usedIds.has(choice.id);
+          return (
+            <button
+              key={choice.id}
+              type="button"
+              disabled={used}
+              data-testid={`live-mnemonic-choice-${choice.id}`}
+              onClick={() => place(choice)}
+              style={{
+                fontSize: 12,
+                fontWeight: 600,
+                padding: '6px 11px',
+                borderRadius: 7,
+                border: '1px solid var(--border-strong)',
+                background: 'var(--card)',
+                color: 'var(--text)',
+                cursor: used ? 'default' : 'pointer',
+                opacity: used ? 0.28 : 1,
+                transition: 'opacity 0.15s',
+              }}
+            >
+              {choice.word}
+            </button>
+          );
+        })}
+      </div>
+
+      <Button
+        block
+        disabled={!complete}
+        onClick={submit}
+        data-testid="live-mnemonic-verify-submit"
+        icon={<ShieldCheck size={15} />}
+      >
+        Confirm
+      </Button>
+      <Button
+        block
+        variant="ghost"
+        onClick={onBack}
+        data-testid="live-mnemonic-verify-back"
+        style={{ marginTop: 8 }}
+      >
+        Back to the phrase
+      </Button>
+    </div>
+  );
+}
+
+function MnemonicView({ mnemonic, hasPassphrase }: { mnemonic: string; hasPassphrase: boolean }) {
   const clearPendingMnemonic = useLiveStore((s) => s.clearPendingMnemonic);
   const words = mnemonic.trim().split(/\s+/);
   const [saved, setSaved] = useState(false);
+  // The words themselves are gone from the screen while the quiz is up: leaving
+  // them visible would turn "confirm your backup" into a copying exercise.
+  const [verifying, setVerifying] = useState(false);
+  // Rolled once for this wallet, and held above the quiz view so it survives
+  // "Back to the phrase" (see MnemonicVerify's `quiz` prop).
+  const [quiz] = useState<Quiz>(() => buildQuiz(words, pickQuizPositions(words.length)));
+
+  // Leaving this screen wipes the phrase from the clipboard if the user copied
+  // it, without waiting out the 30 s timer. It runs here rather than on popup
+  // teardown because the Clipboard API needs a focused document, which a
+  // closing popup does not have (see services/clipboard.ts). A no-op unless a
+  // SECRET is what we last put there, so an address copied afterwards survives.
+  useEffect(() => () => { void clearSecretClipboardNow(); }, []);
+
+  if (verifying) {
+    return (
+      <div data-testid="live-onboarding">
+        <MnemonicVerify
+          words={words}
+          quiz={quiz}
+          onBack={() => setVerifying(false)}
+          onConfirmed={clearPendingMnemonic}
+        />
+      </div>
+    );
+  }
 
   return (
     <div data-testid="live-onboarding">
       <h3 style={{ marginBottom: 6 }}>Your recovery phrase</h3>
+      {/* "the ONLY backup" is true for the overwhelming majority of wallets and
+          FALSE for a passphrase one, where these words restore nothing on their
+          own. Getting that wrong here is not a wording nit: it is the sentence
+          the user acts on when deciding what to write down. */}
       <div
         className="banner danger"
+        data-testid="live-mnemonic-warning"
         style={{ marginBottom: 14, alignItems: 'flex-start', flexDirection: 'column', gap: 4 }}
       >
-        <strong>Write this down. It is the ONLY backup.</strong>
-        <span style={{ fontWeight: 400 }}>It will not be shown again. Anyone with this phrase controls your funds.</span>
+        {hasPassphrase ? (
+          <>
+            <strong>Write this down. This phrase alone will NOT restore this wallet.</strong>
+            <span style={{ fontWeight: 400 }}>
+              You set a BIP39 passphrase, so restoring needs the phrase and that passphrase
+              together. The phrase will not be shown again and nobody, including us, can recover
+              either one. Anyone with both controls your funds.
+            </span>
+          </>
+        ) : (
+          <>
+            <strong>Write this down. It is the ONLY backup.</strong>
+            <span style={{ fontWeight: 400 }}>It will not be shown again. Anyone with this phrase controls your funds.</span>
+          </>
+        )}
       </div>
 
       <div
@@ -389,7 +856,10 @@ function MnemonicView({ mnemonic }: { mnemonic: string }) {
             }}
           >
             <span style={{ fontSize: 10, color: 'var(--text-faint)', minWidth: 14, textAlign: 'right' }}>{i + 1}.</span>
-            <span>{word}</span>
+            {/* Per-word testid (1-based, matching the number shown): the quiz
+                below asks for words by POSITION, so the tests and the smokes
+                need to read the phrase position by position, not as one blob. */}
+            <span data-testid={`live-mnemonic-word-${i + 1}`}>{word}</span>
           </div>
         ))}
       </div>
@@ -436,10 +906,17 @@ function MnemonicView({ mnemonic }: { mnemonic: string }) {
         >
           {saved && <span style={{ color: 'var(--success)', fontSize: 11, fontWeight: 700 }}>✓</span>}
         </div>
-        <span style={{ fontSize: 12.5, fontWeight: 600 }}>I have written down my recovery phrase and stored it safely.</span>
+        <span style={{ fontSize: 12.5, fontWeight: 600 }}>
+          {hasPassphrase
+            ? 'I have written down my recovery phrase and my passphrase, and stored them safely.'
+            : 'I have written down my recovery phrase and stored it safely.'}
+        </span>
       </div>
 
-      <Button block disabled={!saved} onClick={clearPendingMnemonic} icon={<Download size={15} />}>
+      {/* Goes to the confirmation quiz, not to the wallet. The label is unchanged
+          because what it promises is unchanged: this is still the way out of the
+          phrase screen, and the step behind it takes seconds. */}
+      <Button block disabled={!saved} onClick={() => setVerifying(true)} icon={<Download size={15} />}>
         I saved it, continue to wallet
       </Button>
     </div>
@@ -453,6 +930,9 @@ function ImportForm({ onBack }: { onBack(): void }) {
   const [network, setNetwork] = useState<ChainChoice>('mainnet');
   // Chains switched off in expert Settings are not offered for a new wallet.
   const hiddenChains = useLiveStore((s) => s.hiddenChains);
+  // Empty in a build without the EVM engine, which drops the picker back to
+  // its UTXO-only rows (see ChainPicker's own doc comment).
+  const evmChains = useLiveStore((s) => s.evm.chains);
   const [phrase, setPhrase] = useState('');
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
@@ -520,7 +1000,14 @@ function ImportForm({ onBack }: { onBack(): void }) {
         autoComplete="off"
       />
 
-      <ChainPicker hidden={hiddenChains} value={network} onChange={setNetwork} testIdPrefix="live-import-chain" secretKind="phrase" />
+      <ChainPicker
+        hidden={hiddenChains}
+        evmChains={evmChains}
+        value={network}
+        onChange={setNetwork}
+        testIdPrefix="live-import-chain"
+        secretKind="phrase"
+      />
 
       <div className="field" style={{ marginBottom: 13 }}>
         <label>Recovery phrase</label>
@@ -610,6 +1097,9 @@ function PkImportForm({ onBack }: { onBack(): void }) {
   const [network, setNetwork] = useState<ChainChoice>('mainnet');
   // Chains switched off in expert Settings are not offered for a new wallet.
   const hiddenChains = useLiveStore((s) => s.hiddenChains);
+  // Empty in a build without the EVM engine, which drops the picker back to
+  // its UTXO-only rows (see ChainPicker's own doc comment).
+  const evmChains = useLiveStore((s) => s.evm.chains);
   const [pk, setPk] = useState('');
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
@@ -679,7 +1169,14 @@ function PkImportForm({ onBack }: { onBack(): void }) {
         autoComplete="off"
       />
 
-      <ChainPicker hidden={hiddenChains} value={network} onChange={setNetwork} testIdPrefix="live-pk-chain" secretKind="key" />
+      <ChainPicker
+        hidden={hiddenChains}
+        evmChains={evmChains}
+        value={network}
+        onChange={setNetwork}
+        testIdPrefix="live-pk-chain"
+        secretKind="key"
+      />
 
       <div className="field" style={{ marginBottom: 13 }}>
         <label>Private key (WIF or hex)</label>
@@ -709,6 +1206,20 @@ function PkImportForm({ onBack }: { onBack(): void }) {
         >
           <AlertTriangle size={14} />
           <span>{notice.warning}</span>
+        </div>
+      )}
+
+      {/* .banner.info, not .banner.warning: the byte matches the selected chain,
+          this is not a mismatch. Purely informational, so it must look nothing
+          like the warning above or the refusal below (KNOWN_LIMITATIONS.md #10). */}
+      {notice.notice && (
+        <div
+          className="banner info"
+          data-testid="live-pk-chain-notice"
+          style={{ marginBottom: 14, alignItems: 'flex-start' }}
+        >
+          <Info size={14} />
+          <span>{notice.notice}</span>
         </div>
       )}
 
@@ -777,6 +1288,20 @@ function BrandStrip() {
 
 export function LiveOnboarding() {
   const pendingMnemonic = useLiveStore((s) => s.pendingMnemonic);
+  // The arrival class is dropped the moment its animation finishes: keeping it
+  // would keep the mark composited as a GPU texture rasterised at CSS size,
+  // which Windows display scaling then stretches into standing pixelation
+  // (owner, lock screen, 2026-08-25). Plain DOM after arrival = native-DPI crisp.
+  const [markArrived, setMarkArrived] = useState(false);
+  const markProps = {
+    className: markArrived ? 'welcome-mark' : 'welcome-mark welcome-mark-arrive',
+    // Any animationend from this element will do: the arrival (780ms) ends
+    // before the glow swell (1100ms, and that one lives on ::before, which the
+    // class removal does not touch), and jsdom's event carries no animationName.
+    onAnimationEnd: () => setMarkArrived(true),
+  };
+
+  const pendingMnemonicHasPassphrase = useLiveStore((s) => s.pendingMnemonicHasPassphrase);
   const addingWallet = useLiveStore((s) => s.addingWallet);
   const cancelAddWallet = useLiveStore((s) => s.cancelAddWallet);
   const [step, setStep] = useState<Step>('choose');
@@ -786,72 +1311,84 @@ export function LiveOnboarding() {
     return (
       <div className="app-frame screen-enter" data-testid="live-onboarding">
         <div className="app-content">
-          <MnemonicView mnemonic={pendingMnemonic} />
+          <MnemonicView mnemonic={pendingMnemonic} hasPassphrase={pendingMnemonicHasPassphrase} />
         </div>
       </div>
     );
   }
 
+  const welcome = step === 'choose';
+
   return (
     <div className="app-frame screen-enter" data-testid="live-onboarding">
-      <div className="app-content">
-        {step === 'choose' && (
-          <div>
-            <div style={{ textAlign: 'center', padding: '18px 0 22px' }}>
-              {/* Same brand block as the lock screen (logo + wordmark + tagline). */}
-              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3, marginBottom: 12 }}>
-                <BrandLogo slot="satori" size={88} alt="Satori Network" />
-                <span className="brand-title" style={{ fontSize: 19, marginTop: 10 }}>Satori GO</span>
-                <span className="text-faint" style={{ fontSize: 10.5 }}>
-                  Built for the Satori Network
-                </span>
-              </div>
-              <h2 style={{ fontSize: 18, marginBottom: 6 }}>
-                {addingWallet ? 'Add another wallet' : 'Your Satori GO Wallet'}
-              </h2>
-              <p className="text-dim" style={{ fontSize: 12.5 }}>
-                Create a new wallet, restore a recovery phrase, or import a Satori private key.
-              </p>
+      {/* The animated Satori network, behind everything. Welcome step only: the
+          create/import forms are work surfaces and the mnemonic screen above is
+          the most serious screen in the wallet. */}
+      {welcome && <ConstellationField />}
+      <div className={welcome ? 'app-content welcome-centered' : 'app-content'}>
+        {welcome && (
+          <div className="welcome-wow">
+            {/* Each element carries its own delay, so the block arrives as one
+                movement rather than as one flash. See .wow-in in global.css. */}
+            <div {...markProps}>
+              <BrandLogo slot="satori" size={88} alt="Satori Network" />
             </div>
+            <h2 className="welcome-wow-title wow-in" style={{ animationDelay: '90ms' }}>
+              {addingWallet ? 'Add another wallet' : 'Satori GO'}
+            </h2>
+            {/* The brand line, not a feature list: no chain is named here, and
+                no chain ever should be (house rule: identity is multi-chain). */}
+            <p className="welcome-wow-sub wow-in" style={{ animationDelay: '180ms' }}>
+              {addingWallet
+                ? 'Create a new wallet, restore a recovery phrase, or import a Satori private key.'
+                : 'A non-custodial multi-chain wallet made by Satori Network. Your keys are created on this device and never leave it.'}
+            </p>
 
-            <Button
-              block
-              icon={<KeyRound size={15} />}
-              onClick={() => setStep('create-form')}
-              style={{ marginBottom: 10 }}
-            >
-              Create new wallet
-            </Button>
-            <Button
-              block
-              variant="secondary"
-              icon={<Download size={15} />}
-              onClick={() => setStep('import-form')}
-              style={{ marginBottom: 10 }}
-            >
-              Import recovery phrase
-            </Button>
-            <Button
-              block
-              variant="secondary"
-              icon={<Fingerprint size={15} />}
-              onClick={() => setStep('pk-form')}
-              data-testid="live-choose-pk"
-            >
-              Import private key (Satori)
-            </Button>
-
-            {addingWallet && (
+            <div className="welcome-wow-actions">
               <Button
                 block
-                variant="ghost"
-                onClick={cancelAddWallet}
-                data-testid="live-add-wallet-cancel"
-                style={{ marginTop: 10 }}
+                icon={<KeyRound size={15} />}
+                onClick={() => setStep('create-form')}
+                className="wow-in"
+                style={{ animationDelay: '270ms' }}
               >
-                Cancel
+                Create new wallet
               </Button>
-            )}
+              <Button
+                block
+                variant="secondary"
+                icon={<Download size={15} />}
+                onClick={() => setStep('import-form')}
+                className="wow-in"
+                style={{ animationDelay: '350ms' }}
+              >
+                Import recovery phrase
+              </Button>
+              <Button
+                block
+                variant="secondary"
+                icon={<Fingerprint size={15} />}
+                onClick={() => setStep('pk-form')}
+                data-testid="live-choose-pk"
+                className="wow-in"
+                style={{ animationDelay: '430ms' }}
+              >
+                Import private key (Satori)
+              </Button>
+
+              {addingWallet && (
+                <Button
+                  block
+                  variant="ghost"
+                  onClick={cancelAddWallet}
+                  data-testid="live-add-wallet-cancel"
+                  className="wow-in"
+                  style={{ animationDelay: '510ms' }}
+                >
+                  Cancel
+                </Button>
+              )}
+            </div>
 
             <BrandStrip />
           </div>

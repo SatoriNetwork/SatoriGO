@@ -1,9 +1,10 @@
 import { useState } from 'react';
 import { QRCodeView } from '../../components/QRCodeView';
+import { SyncStatusPill } from '../../components/SyncStatusPill';
 import { CopyButton } from '../../components/CopyButton';
 import { Button } from '../../components/Button';
 import { TokenIcon } from '../../components/BrandLogo';
-import { useLiveStore, nativeTickerFor, assetsSupported, chainDisplayName } from '../../store/liveStore';
+import { useLiveStore, nativeTickerFor, assetsSupported, chainDisplayName, activeFamily } from '../../store/liveStore';
 import { ChevronLeft, CheckCircle, Plus } from 'lucide-react';
 import { LiveNav } from './LiveNav';
 
@@ -42,8 +43,11 @@ export function LiveReceive({ onBack }: LiveReceiveProps) {
   const canHoldAssets = assetsSupported();
 
   // The active wallet's kind gates the add-address affordance: only seed wallets
-  // can derive more addresses (a pk / Satori wallet has one fixed address).
-  const isSeedWallet = activeWallet?.kind === 'seed';
+  // can derive more addresses (a pk / Satori wallet has one fixed address). An
+  // EVM account is ALSO single-address by design (one key, one address on
+  // every EVM chain, see the EVM engine design notes §1), so it is excluded here
+  // too rather than opening a form the store would just refuse.
+  const isSeedWallet = activeWallet?.kind === 'seed' && activeFamily() !== 'evm';
 
   // Which derived address the QR / copy row shows. Default = primary (index 0);
   // falls back to the primary when the selection is stale (e.g. wallet switch).
@@ -86,7 +90,9 @@ export function LiveReceive({ onBack }: LiveReceiveProps) {
           <ChevronLeft size={20} />
         </button>
         <h2>Receive</h2>
-        <span />
+        {/* Connection state, same dot-only indicator as the rest of the wallet
+            (KNOWN_LIMITATIONS item 33). */}
+        <SyncStatusPill compact />
       </div>
       <div className="app-content" data-testid="live-receive">
         <div className="banner info" style={{ marginBottom: 14 }}>

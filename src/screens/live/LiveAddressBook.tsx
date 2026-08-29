@@ -7,6 +7,7 @@ import { ChevronLeft, BookUser, Trash2, Plus, Pencil, Check, X } from 'lucide-re
 import { Button } from '../../components/Button';
 import { TextField } from '../../components/TextField';
 import { CopyButton } from '../../components/CopyButton';
+import { SyncStatusPill } from '../../components/SyncStatusPill';
 import { EmptyState } from '../../components/EmptyState';
 import { useLiveStore, chainDisplayName } from '../../store/liveStore';
 import { LiveNav } from './LiveNav';
@@ -75,7 +76,10 @@ export function LiveAddressBook({ onBack, onPick }: LiveAddressBookProps) {
           <ChevronLeft size={20} />
         </button>
         <h2>Address book</h2>
-        <span />
+        {/* Same dot-only indicator as the Settings sub-screens. This screen has
+            its own sub-header rather than going through LiveSettings' Shell, so
+            it needed wiring separately or item 33 would have a hole in it. */}
+        <SyncStatusPill compact />
       </div>
 
       <div className="app-content" data-testid="live-address-book">

@@ -24,6 +24,12 @@ vi.mock('../../services/chain/liveWallet', () => {
     network() {
       return 'mainnet';
     }
+    activeWalletFamily() {
+      return 'utxo';
+    }
+    evmChainKey() {
+      return null;
+    }
     getProvider() {
       return {};
     }

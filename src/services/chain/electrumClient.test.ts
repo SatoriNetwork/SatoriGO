@@ -7,9 +7,23 @@ import {
 } from './electrumClient';
 import {
   PUBLIC_ELECTRUM_SERVERS,
+  buildEvrElectrumPool,
+  buildNeoxElectrumPool,
+  buildRvnElectrumPool,
+  buildBtcElectrumPool,
+  buildLtcElectrumPool,
+  buildDogeElectrumPool,
+  buildBtgsElectrumPool,
+  buildWjkElectrumPool,
   electrumWssUrl,
   ELECTRUM_METHODS,
 } from './network';
+
+/** A stand-in gateway build: the pool builders take the gateway and token as
+ *  arguments, so the gateway shape is exercised here without a rebuild and
+ *  without mocking the build defines. */
+const GW = 'https://network.satorigo.app';
+const GW_TOKEN = 'sgw_test_token';
 
 // ---------------------------------------------------------------------------
 // Mock WebSocket
@@ -34,6 +48,11 @@ class MockWebSocket {
   static throwOnConstruct = false;
 
   readonly url: string;
+  /** EXACTLY what the client passed as the constructor's 2nd argument, kept
+   *  `undefined` when it passed nothing: the difference between "no
+   *  subprotocol" and "an empty list" is what the gateway-bridge tests below
+   *  assert, and a plain public node must get the former. */
+  readonly protocols: string | string[] | undefined;
   readyState = MockWebSocket.CONNECTING;
   sent: string[] = [];
 
@@ -42,11 +61,12 @@ class MockWebSocket {
   onerror: OnFn = null;
   onclose: OnFn = null;
 
-  constructor(url: string) {
+  constructor(url: string, protocols?: string | string[]) {
     if (MockWebSocket.throwOnConstruct) {
       throw new Error('boom');
     }
     this.url = url;
+    this.protocols = protocols;
     MockWebSocket.instances.push(this);
   }
 
@@ -192,6 +212,180 @@ describe('WssElectrumClient.connect', () => {
     await connecting;
 
     expect(client.endpoint()).toBe(electrumWssUrl(PUBLIC_ELECTRUM_SERVERS[1]));
+    client.close();
+  });
+
+  it('2b. offers the satori-v1 subprotocol pair to the gateway bridge, and NOTHING to a public node', async () => {
+    // The pair is how the gateway authenticates the socket. A plain public
+    // ElectrumX would not echo a subprotocol back, and a browser fails the
+    // handshake when a requested subprotocol is not selected, so passing it to
+    // everything would break every public node in the pool.
+    const pool = buildEvrElectrumPool(GW, GW_TOKEN);
+    const client = new WssElectrumClient(pool, { WebSocketImpl: MockWSImpl });
+    const connecting = client.connect();
+
+    await flush();
+    const bridge = MockWebSocket.instances[0];
+    expect(bridge.url).toBe('wss://network.satorigo.app/electrum/evr');
+    expect(bridge.protocols).toEqual(['satori-v1', GW_TOKEN]);
+
+    // Fail the bridge over to the first public fallback and check that socket
+    // was opened with no 2nd constructor argument at all.
+    bridge.emitError();
+    await flush();
+    const publicNode = MockWebSocket.instances[1];
+    expect(publicNode.url).toBe('wss://electrum1-mainnet.evrmorecoin.org:50004');
+    expect(publicNode.protocols).toBeUndefined();
+
+    publicNode.emitOpen();
+    await flush();
+    publicNode.emitMessage(versionReply(publicNode.lastSent().id));
+    await connecting;
+
+    // THE smoke's scenario in miniature: the bridge is tried first, the wallet
+    // still ends up connected, served by the public Evrmore pool.
+    expect(client.endpoint()).toBe('wss://electrum1-mainnet.evrmorecoin.org:50004');
+    client.close();
+  });
+
+  it('2c. an EVR bridge failure falls through BOTH public fallbacks before giving up', async () => {
+    const pool = buildEvrElectrumPool(GW, GW_TOKEN);
+    const client = new WssElectrumClient(pool, { WebSocketImpl: MockWSImpl });
+    const failing = client.connect();
+
+    for (let i = 0; i < 3; i++) {
+      await flush();
+      MockWebSocket.instances[i].emitError();
+    }
+    await expect(failing).rejects.toThrow(/All Electrum servers failed/);
+    expect(MockWebSocket.instances.map((w) => w.url)).toEqual([
+      'wss://network.satorigo.app/electrum/evr',
+      'wss://electrum1-mainnet.evrmorecoin.org:50004',
+      'wss://electrum2-mainnet.evrmorecoin.org:50004',
+    ]);
+    client.close();
+  });
+
+  it('2d. Ravencoin through the gateway has ONE endpoint: the bridge, and no fallback', async () => {
+    // Deliberate: there is no acceptable public Ravencoin ElectrumX to fall back
+    // to (they run plain upstream ElectrumX and reject the asset dialect), so a
+    // gateway outage takes RVN offline rather than corrupting asset balances.
+    const pool = buildRvnElectrumPool(GW, GW_TOKEN);
+    expect(pool).toHaveLength(1);
+    const client = new WssElectrumClient(pool, { WebSocketImpl: MockWSImpl });
+    const failing = client.connect();
+
+    await flush();
+    const bridge = MockWebSocket.instances[0];
+    expect(bridge.url).toBe('wss://network.satorigo.app/electrum/rvn');
+    expect(bridge.protocols).toEqual(['satori-v1', GW_TOKEN]);
+    bridge.emitError();
+
+    await expect(failing).rejects.toThrow(/All Electrum servers failed/);
+    expect(MockWebSocket.instances).toHaveLength(1);
+    client.close();
+  });
+
+  it('2d-ter. Neoxa: the bridge is the only endpoint, and a 404 route degrades honestly (1.4.0)', async () => {
+    // THE CURRENT REAL STATE OF THIS CHAIN, not a hypothetical. Neoxa is offered
+    // in the UI, but the gateway has no `neox` upstream configured yet (the
+    // owner's node is being stood up), so /electrum/neox answers 404 and the
+    // WebSocket handshake fails. What must NOT happen: a throw that escapes, a
+    // silent "connected", or a fall-through onto some other chain's servers.
+    //
+    // Same one-entry shape as Ravencoin above, and for the same reason: Neoxa
+    // carries the Ravencoin asset protocol, so a plain public node would answer
+    // server.version and then reject every asset call. There is deliberately no
+    // fallback to land on.
+    const pool = buildNeoxElectrumPool(GW, GW_TOKEN);
+    expect(pool).toHaveLength(1);
+    const client = new WssElectrumClient(pool, { WebSocketImpl: MockWSImpl });
+    const failing = client.connect();
+
+    await flush();
+    const bridge = MockWebSocket.instances[0];
+    expect(bridge.url).toBe('wss://network.satorigo.app/electrum/neox');
+    expect(bridge.protocols).toEqual(['satori-v1', GW_TOKEN]);
+    // The route does not exist: the browser fails the handshake.
+    bridge.emitError();
+
+    // A rejected promise the caller can render, not an unhandled throw…
+    await expect(failing).rejects.toThrow(/All Electrum servers failed/);
+    // …no second socket to some other chain's node…
+    expect(MockWebSocket.instances).toHaveLength(1);
+    // …and the client reports the truth rather than a stale "connected".
+    expect(client.isConnected()).toBe(false);
+    client.close();
+
+    // Reconnecting later (once the owner's node is behind the bridge) tries the
+    // same single endpoint again rather than remembering the failure.
+    MockWebSocket.instances = [];
+    const retry = new WssElectrumClient(buildNeoxElectrumPool(GW, GW_TOKEN), {
+      WebSocketImpl: MockWSImpl,
+    });
+    const reconnecting = retry.connect();
+    await flush();
+    expect(MockWebSocket.instances[0].url).toBe('wss://network.satorigo.app/electrum/neox');
+    MockWebSocket.instances[0].emitError();
+    await expect(reconnecting).rejects.toThrow(/All Electrum servers failed/);
+    retry.close();
+  });
+
+  it('2d-bis. a DEAD bridge on BTC/LTC/DOGE/BTGS/WJK fails over to that chain FIRST public server (1.4.0)', async () => {
+    // The reason the public pools stayed: the live gateway route may not exist
+    // yet, or may go down, and a gateway outage must never stop someone's
+    // Bitcoin. Each case opens the bridge FIRST (with the subprotocol pair),
+    // kills it, and asserts the very next socket is that chain's own first
+    // public server, opened with NO subprotocol, and that the client ends up
+    // connected there. This is exactly the path the live smoke exercises.
+    const cases = [
+      { build: buildBtcElectrumPool, bridge: 'wss://network.satorigo.app/electrum/btc', first: 'wss://btc.electrum1.cipig.net:30000' },
+      { build: buildLtcElectrumPool, bridge: 'wss://network.satorigo.app/electrum/ltc', first: 'wss://ltc.electrum1.cipig.net:30063' },
+      { build: buildDogeElectrumPool, bridge: 'wss://network.satorigo.app/electrum/doge', first: 'wss://doge.electrum1.cipig.net:30060' },
+      { build: buildBtgsElectrumPool, bridge: 'wss://network.satorigo.app/electrum/btgs', first: 'wss://electrum.bitcoingold.site:50005' },
+      { build: buildWjkElectrumPool, bridge: 'wss://network.satorigo.app/electrum/wjk', first: 'wss://electrum1.wojakcoin.cash:50104' },
+    ] as const;
+
+    for (const { build, bridge: bridgeUrl, first } of cases) {
+      MockWebSocket.instances = [];
+      const client = new WssElectrumClient(build(GW, GW_TOKEN), { WebSocketImpl: MockWSImpl });
+      const connecting = client.connect();
+
+      await flush();
+      const bridge = MockWebSocket.instances[0];
+      expect(bridge.url).toBe(bridgeUrl);
+      expect(bridge.protocols).toEqual(['satori-v1', GW_TOKEN]);
+
+      // The gateway route 404s / is down: the socket errors out.
+      bridge.emitError();
+      await flush();
+      const publicNode = MockWebSocket.instances[1];
+      expect(publicNode.url).toBe(first);
+      expect(publicNode.protocols).toBeUndefined();
+
+      publicNode.emitOpen();
+      await flush();
+      publicNode.emitMessage(versionReply(publicNode.lastSent().id));
+      await connecting;
+      expect(client.endpoint()).toBe(first);
+      client.close();
+    }
+  });
+
+  it('2e. a development build (no gateway) opens every socket with no subprotocol', async () => {
+    const pool = buildEvrElectrumPool('', '');
+    const client = new WssElectrumClient(pool, { WebSocketImpl: MockWSImpl });
+    const connecting = client.connect();
+
+    await flush();
+    const ws = MockWebSocket.instances[0];
+    expect(ws.url).toBe('wss://electrumx1.satorinet.io:50004');
+    expect(ws.protocols).toBeUndefined();
+
+    ws.emitOpen();
+    await flush();
+    ws.emitMessage(versionReply(ws.lastSent().id));
+    await connecting;
     client.close();
   });
 });

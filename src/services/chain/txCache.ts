@@ -191,17 +191,23 @@ const CLASSIFY_BATCH_SIZE = 25;
  * Ceiling on classify requests in flight ACROSS EVERY ADDRESS of the wallet.
  *
  * A refresh runs refreshTransactionCache() once per receive address, all at the
- * same time and all over ONE socket, so what a server actually sees is
- * CLASSIFY_BATCH_SIZE x addressCount. A wallet may hold up to 20 receive
- * addresses, so raising the batch from 5 to 25 without a ceiling would take the
- * worst case from 100 concurrent requests to 500 — a number nothing here has
- * measured, on servers that are often one volunteer's machine.
+ * same time and all over ONE socket, so what a server WANTS to send is
+ * CLASSIFY_BATCH_SIZE x addressCount. This ceiling is the only thing that
+ * bounds it, and it is now doing considerably more work than when it was
+ * written: MAX_RECEIVE_ADDRESSES was raised from 20 to 100 for the gap-limit
+ * scan, so the unclamped worst case went from 500 to 2500 requests at once, on
+ * servers that are often one volunteer's machine.
  *
- * 100 is deliberately EXACTLY the old worst case (old batch 5 x 20 addresses),
- * so no server ever sees a burst larger than the one this wallet already sent
- * before the change, while the ordinary single-address wallet (the Satori case,
- * addressCount 1) gets the full measured 25. It is also the largest value the
- * measurements above actually cover, with zero errors on all four servers.
+ * 100 was chosen as EXACTLY the worst case this wallet already produced before
+ * the batch was raised (old batch 5 x the old cap of 20), so no server ever
+ * sees a bigger burst than it did then, whatever the address count grows to.
+ * The ordinary single-address wallet (the Satori case, addressCount 1) still
+ * gets the full measured 25. It is also the largest value the measurements
+ * above actually cover, with zero errors on all four servers.
+ *
+ * The number is deliberately NOT derived from MAX_RECEIVE_ADDRESSES: it is a
+ * measured network limit, not an arithmetic consequence of how many addresses
+ * a wallet may hold.
  */
 const MAX_CONCURRENT_CLASSIFY = 100;
 

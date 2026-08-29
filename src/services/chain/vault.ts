@@ -19,6 +19,15 @@
 // record is plain-JSON-serializable.
 
 import { scryptAsync } from '@noble/hashes/scrypt';
+import { base64ToBytes, bytesToBase64 } from './base64';
+import {
+  bytesEqual,
+  generateWalletKey,
+  unwrapWalletKey,
+  wrapWalletKey,
+  zeroKey,
+  type WrappedWalletKey,
+} from './appKey';
 
 // ---------------------------------------------------------------------------
 // Record shape
@@ -44,6 +53,49 @@ export interface VaultRecord {
   iv: string;
   /** base64 of the AES-256-GCM ciphertext (includes the 16-byte auth tag). */
   ciphertext: string;
+}
+
+/**
+ * VERSION 2: the secret under a per-wallet WALLET KEY, and that wallet key
+ * wrapped by the app MASTER KEY (the app-password design notes §3).
+ *
+ * There is no KDF here at all and that is the point: the expensive scrypt is
+ * paid ONCE, on the app record (appKey.ts), and this record only holds two
+ * AES-256-GCM blobs. Changing the app password re-wraps `wrappedKey` and never
+ * rewrites `ciphertext`, so a password change cannot corrupt a seed.
+ *
+ * A v1 record is NEVER upgraded in place and NEVER stops being readable: v1 and
+ * v2 both live in `WalletEntry.vault` forever, and the reader dispatches on
+ * `version`. A wallet whose password the user does not supply simply stays v1.
+ *
+ * `keySource` names WHICH keys can open the wallet key. Today only 'app'. §7's
+ * later "extra password on one wallet" adds a SECOND wrapped copy of the same
+ * wallet key under 'app+wallet' — new optional fields, no format change and no
+ * re-encryption of the secret, which is exactly why the wallet key exists.
+ */
+export interface VaultRecordV2 {
+  version: 2;
+  /** The wallet key is wrapped by the app master key. */
+  keySource: 'app';
+  /** base64 of AES-256-GCM(masterKey, walletKey). */
+  wrappedKey: string;
+  /** base64 of the 12-byte GCM IV for the wrap. */
+  wrapIv: string;
+  /** base64 of the 12-byte GCM IV for the secret itself. */
+  iv: string;
+  /** base64 of AES-256-GCM(walletKey, secret), auth tag included. */
+  ciphertext: string;
+}
+
+/**
+ * What `WalletEntry.vault` may hold. EVERY reader must dispatch on `version`;
+ * isVaultRecordV2() is the only sanctioned way to ask.
+ */
+export type StoredVaultRecord = VaultRecord | VaultRecordV2;
+
+/** True for an app-key-protected (v2) record. The v1 path is everything else. */
+export function isVaultRecordV2(record: StoredVaultRecord | null | undefined): record is VaultRecordV2 {
+  return !!record && (record as VaultRecordV2).version === 2;
 }
 
 // ---------------------------------------------------------------------------
@@ -76,65 +128,6 @@ export const DEFAULT_KDF = {
   r: 8,
   p: 1,
 } as const;
-
-// ---------------------------------------------------------------------------
-// base64 helpers (no Buffer, no btoa — works identically in browser + node)
-// ---------------------------------------------------------------------------
-
-const B64_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-
-/** Encode bytes to a standard (padded) base64 string. */
-function bytesToBase64(bytes: Uint8Array): string {
-  let out = '';
-  let i = 0;
-  for (; i + 2 < bytes.length; i += 3) {
-    const n = (bytes[i] << 16) | (bytes[i + 1] << 8) | bytes[i + 2];
-    out += B64_CHARS[(n >> 18) & 63] + B64_CHARS[(n >> 12) & 63] + B64_CHARS[(n >> 6) & 63] + B64_CHARS[n & 63];
-  }
-  const rem = bytes.length - i;
-  if (rem === 1) {
-    const n = bytes[i] << 16;
-    out += B64_CHARS[(n >> 18) & 63] + B64_CHARS[(n >> 12) & 63] + '==';
-  } else if (rem === 2) {
-    const n = (bytes[i] << 16) | (bytes[i + 1] << 8);
-    out += B64_CHARS[(n >> 18) & 63] + B64_CHARS[(n >> 12) & 63] + B64_CHARS[(n >> 6) & 63] + '=';
-  }
-  return out;
-}
-
-/** Lookup table for base64 decode; -1 = invalid char, -2 = padding. */
-const B64_LOOKUP: Int8Array = (() => {
-  const t = new Int8Array(256).fill(-1);
-  for (let i = 0; i < B64_CHARS.length; i++) t[B64_CHARS.charCodeAt(i)] = i;
-  t['='.charCodeAt(0)] = -2;
-  return t;
-})();
-
-/** Decode a standard base64 string to bytes. Throws on malformed input. */
-function base64ToBytes(b64: string): Uint8Array {
-  // Collect the 6-bit values, ignoring padding.
-  const vals: number[] = [];
-  for (let i = 0; i < b64.length; i++) {
-    const v = B64_LOOKUP[b64.charCodeAt(i)];
-    if (v === -1) throw new Error('invalid base64 in vault record');
-    if (v === -2) break; // padding: no more data
-    vals.push(v);
-  }
-  const outLen = (vals.length * 6) >> 3;
-  const out = new Uint8Array(outLen);
-  let bits = 0;
-  let buf = 0;
-  let o = 0;
-  for (let i = 0; i < vals.length; i++) {
-    buf = (buf << 6) | vals[i];
-    bits += 6;
-    if (bits >= 8) {
-      bits -= 8;
-      out[o++] = (buf >> bits) & 0xff;
-    }
-  }
-  return out;
-}
 
 // ---------------------------------------------------------------------------
 // core crypto
@@ -267,8 +260,142 @@ export async function changeVaultPassword(
 }
 
 // ---------------------------------------------------------------------------
+// version 2: the app-key path
+//
+// These are ADDITIVE. Nothing above this line changed behaviour when v2 was
+// introduced: a wallet with no app password never reaches any of it.
+// ---------------------------------------------------------------------------
+
+/**
+ * Encrypt a secret under a FRESH random wallet key, and wrap that wallet key
+ * under the app master key.
+ *
+ * Note the asymmetry with createVault(): the master key is NOT derived here and
+ * NOT stored anywhere. It arrives from the session (liveWallet holds it in page
+ * memory only) and leaves untouched.
+ */
+export async function createVaultV2(
+  secret: string | Uint8Array,
+  masterKey: Uint8Array,
+): Promise<VaultRecordV2> {
+  const walletKey = generateWalletKey();
+  const plaintext = toSecretBytes(secret);
+  try {
+    const key = await crypto.subtle.importKey('raw', walletKey, { name: 'AES-GCM' }, false, [
+      'encrypt',
+      'decrypt',
+    ]);
+    const iv = randomBytes(IV_LEN);
+    const ctBuffer = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, plaintext);
+    const wrapped: WrappedWalletKey = await wrapWalletKey(masterKey, walletKey);
+    return {
+      version: 2,
+      keySource: 'app',
+      wrappedKey: wrapped.wrappedKey,
+      wrapIv: wrapped.wrapIv,
+      iv: bytesToBase64(iv),
+      ciphertext: bytesToBase64(new Uint8Array(ctBuffer)),
+    };
+  } finally {
+    zeroKey(walletKey);
+    // Same rule as createVault: only a throwaway copy we made is zeroed.
+    if (typeof secret === 'string') plaintext.fill(0);
+  }
+}
+
+/**
+ * Decrypt a v2 record with the app master key: unwrap the wallet key, then use
+ * it on the secret. THROWS on a wrong master key or a tampered record (both
+ * GCM layers authenticate before returning anything).
+ */
+export async function unlockVaultV2(record: VaultRecordV2, masterKey: Uint8Array): Promise<Uint8Array> {
+  validateRecordV2(record);
+  const walletKey = await unwrapWalletKey(masterKey, record);
+  try {
+    const key = await crypto.subtle.importKey('raw', walletKey, { name: 'AES-GCM' }, false, [
+      'encrypt',
+      'decrypt',
+    ]);
+    const iv = base64ToBytes(record.iv);
+    const ciphertext = base64ToBytes(record.ciphertext);
+    try {
+      const plainBuffer = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ciphertext);
+      return new Uint8Array(plainBuffer);
+    } catch {
+      throw new Error('Failed to unlock vault: wrong password or corrupted data.');
+    }
+  } finally {
+    zeroKey(walletKey);
+  }
+}
+
+/** Decrypt a v2 record and UTF-8-decode the result to a string. */
+export async function unlockVaultV2String(record: VaultRecordV2, masterKey: Uint8Array): Promise<string> {
+  const bytes = await unlockVaultV2(record, masterKey);
+  try {
+    return new TextDecoder().decode(bytes);
+  } finally {
+    bytes.fill(0);
+  }
+}
+
+/**
+ * Move a v2 record from one master key to another. This is the whole cost of an
+ * app-password change: 32 bytes re-wrapped, the SECRET'S ciphertext and IV
+ * copied across untouched, so a change can never damage a seed.
+ *
+ * VERIFIED BY CONSTRUCTION: the new wrap is opened again with the NEW master
+ * key and compared to the wallet key byte for byte before the record is
+ * returned. A caller that gets a record back can rely on it opening.
+ *
+ * THROWS if `oldMasterKey` is wrong (the unwrap fails its auth tag) or if that
+ * verification does not match.
+ */
+export async function rewrapVaultV2(
+  record: VaultRecordV2,
+  oldMasterKey: Uint8Array,
+  newMasterKey: Uint8Array,
+): Promise<VaultRecordV2> {
+  validateRecordV2(record);
+  const walletKey = await unwrapWalletKey(oldMasterKey, record); // throws on a wrong old key
+  try {
+    const wrapped = await wrapWalletKey(newMasterKey, walletKey);
+    const next: VaultRecordV2 = {
+      version: 2,
+      keySource: 'app',
+      wrappedKey: wrapped.wrappedKey,
+      wrapIv: wrapped.wrapIv,
+      iv: record.iv,
+      ciphertext: record.ciphertext,
+    };
+    const check = await unwrapWalletKey(newMasterKey, next);
+    const ok = bytesEqual(check, walletKey);
+    zeroKey(check);
+    if (!ok) throw new Error('Re-wrap verification failed.');
+    return next;
+  } finally {
+    zeroKey(walletKey);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // validation
 // ---------------------------------------------------------------------------
+
+/** Sanity-check a v2 record's shape before attempting to use it. */
+function validateRecordV2(record: VaultRecordV2): void {
+  if (!record || record.version !== 2 || record.keySource !== 'app') {
+    throw new Error('Unsupported or malformed vault record.');
+  }
+  if (
+    typeof record.wrappedKey !== 'string' ||
+    typeof record.wrapIv !== 'string' ||
+    typeof record.iv !== 'string' ||
+    typeof record.ciphertext !== 'string'
+  ) {
+    throw new Error('Malformed vault record: missing wrappedKey/wrapIv/iv/ciphertext.');
+  }
+}
 
 /** Sanity-check a record's shape before attempting to use it. */
 function validateRecord(record: VaultRecord): void {

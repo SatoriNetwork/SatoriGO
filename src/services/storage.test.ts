@@ -3,7 +3,7 @@
 // environment is 'node', so this file opts into jsdom on its own (see
 // clipboard.test.ts for the same pattern).
 import { beforeEach, describe, expect, it } from 'vitest';
-import { LocalStorageAdapter } from './storage';
+import { LocalStorageAdapter, MemoryStorageAdapter } from './storage';
 
 describe('LocalStorageAdapter — sensitive-key overlay', () => {
   beforeEach(() => {
@@ -95,5 +95,45 @@ describe('LocalStorageAdapter — sensitive-key overlay', () => {
 
     const second = await storage.get<typeof original>('liveWallets');
     expect(second!.wallets).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The MEMORY adapter is the double every service-level test runs against, so
+// its fidelity to the two real ones decides what those tests can see.
+// ---------------------------------------------------------------------------
+
+describe('MemoryStorageAdapter — the test double must not be kinder than reality', () => {
+  it('CLONES on read, so two readers never share one object', async () => {
+    const storage = new MemoryStorageAdapter();
+    await storage.set('liveWallets', { wallets: [{ id: 'w1' }] });
+
+    type Shape = { wallets: Array<{ id: string }> };
+    const pageA = await storage.get<Shape>('liveWallets');
+    const pageB = await storage.get<Shape>('liveWallets');
+
+    // Two extension pages read the same key. chrome.storage.local serializes
+    // across the IPC boundary and localStorage re-parses JSON, so neither can
+    // hand back one shared object. This used to, and every cross-page race the
+    // app password can lose a seed to was invisible because of it.
+    expect(pageA).not.toBe(pageB);
+    pageA!.wallets.push({ id: 'w2' });
+    expect(pageB!.wallets).toHaveLength(1);
+    expect((await storage.get<Shape>('liveWallets'))!.wallets).toHaveLength(1);
+  });
+
+  it('still clones on write, so a mutation after set() does not reach storage', async () => {
+    const storage = new MemoryStorageAdapter();
+    const written = { wallets: [{ id: 'w1' }] };
+    await storage.set('liveWallets', written);
+    written.wallets.push({ id: 'w2' });
+
+    type Shape = { wallets: Array<{ id: string }> };
+    expect((await storage.get<Shape>('liveWallets'))!.wallets).toHaveLength(1);
+  });
+
+  it('undefined stays undefined (structuredClone is never handed a missing key)', async () => {
+    const storage = new MemoryStorageAdapter();
+    await expect(storage.get('nothing-here')).resolves.toBeUndefined();
   });
 });

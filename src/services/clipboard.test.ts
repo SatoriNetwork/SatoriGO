@@ -2,13 +2,19 @@
 // This suite needs `document` (document.hasFocus) — the project's default
 // vitest environment is 'node', so this file opts into jsdom on its own.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { copyText, SECRET_CLIPBOARD_CLEAR_SECONDS } from './clipboard';
+import {
+  copyText,
+  clearSecretClipboardNow,
+  SECRET_CLIPBOARD_CLEAR_SECONDS,
+  __resetClipboardForTests,
+} from './clipboard';
 
 describe('clipboard auto-clear', () => {
   let writeText: ReturnType<typeof vi.fn>;
   let hasFocus: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
+    __resetClipboardForTests();
     vi.useFakeTimers();
     writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, 'clipboard', {
@@ -78,5 +84,75 @@ describe('clipboard auto-clear', () => {
     await vi.advanceTimersByTimeAsync(15 * 1000);
     expect(writeText).toHaveBeenCalledTimes(3);
     expect(writeText).toHaveBeenLastCalledWith('');
+  });
+});
+
+// The reliable half of KNOWN_LIMITATIONS item 5. The 30 s timer above dies with
+// the popup, and clearing on popup teardown is impossible — the Clipboard API
+// needs a FOCUSED document and a closing popup has already lost focus, so such a
+// handler would always reject. Instead the screens that reveal a secret wipe it
+// on the way out, while the popup is still open and the write lands.
+describe('clearSecretClipboardNow', () => {
+  let writeText: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    __resetClipboardForTests();
+    vi.useFakeTimers();
+    writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    document.hasFocus = vi.fn().mockReturnValue(true);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('wipes a copied secret immediately, ahead of its 30 s timer', async () => {
+    await copyText('seed words here', 0, { secret: true });
+    await clearSecretClipboardNow();
+    expect(writeText).toHaveBeenCalledTimes(2);
+    expect(writeText).toHaveBeenLastCalledWith('');
+  });
+
+  // The hazard this guard exists for: the user copies the seed, pastes it into a
+  // password manager, copies an ADDRESS, then leaves the screen. Blanking here
+  // would destroy the address they are about to paste.
+  it('does NOT wipe an ordinary copy made after the secret', async () => {
+    await copyText('seed words here', 0, { secret: true });
+    await copyText('some-address');
+    await clearSecretClipboardNow();
+    expect(writeText).toHaveBeenCalledTimes(2);
+    expect(writeText).toHaveBeenLastCalledWith('some-address');
+  });
+
+  it('is a no-op when nothing secret was ever copied', async () => {
+    await copyText('some-address');
+    await clearSecretClipboardNow();
+    expect(writeText).toHaveBeenCalledTimes(1);
+  });
+
+  it('is a no-op once the auto-clear timer has already fired', async () => {
+    await copyText('seed words here', 0, { secret: true });
+    await vi.advanceTimersByTimeAsync(SECRET_CLIPBOARD_CLEAR_SECONDS * 1000);
+    expect(writeText).toHaveBeenCalledTimes(2); // the timer's blank
+    await clearSecretClipboardNow();
+    expect(writeText).toHaveBeenCalledTimes(2); // no second blank
+  });
+
+  it('cancels the pending timer, so a later copy is not blanked by it', async () => {
+    await copyText('seed words here', 0, { secret: true });
+    await clearSecretClipboardNow(); // early exit from the reveal screen
+    await copyText('some-address');
+    await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+    expect(writeText).toHaveBeenCalledTimes(3); // secret, blank, address — nothing after
+    expect(writeText).toHaveBeenLastCalledWith('some-address');
+  });
+
+  it('stays silent when the document has lost focus (the write would reject)', async () => {
+    await copyText('seed words here', 0, { secret: true });
+    document.hasFocus = vi.fn().mockReturnValue(false);
+    await expect(clearSecretClipboardNow()).resolves.toBeUndefined();
+    expect(writeText).toHaveBeenCalledTimes(1);
   });
 });

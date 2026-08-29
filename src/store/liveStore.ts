@@ -3,28 +3,85 @@
 // rather than crashing. The service instance is module-level (singleton).
 
 import { create } from 'zustand';
+import { parseAmount, formatAmount, amountToNumber } from '../services/chain/amounts';
 import {
   LiveWalletService,
   BroadcastGatedError,
+  MAX_RECEIVE_ADDRESSES,
+  type BackupPreview,
   type FeeEstimate,
   type LiveNetworkId,
   type LiveSendPlan,
   type WalletSummary,
 } from '../services/chain/liveWallet';
 import { buildFeeEstimate } from '../services/chain/feePolicy';
+import { isStoreWriteFailed } from '../services/chain/storeWrite';
 import { getStorage } from '../services/storage';
-import { fetchPrices } from '../services/prices';
+import { fetchPrices, type PriceMap, type PriceQuote } from '../services/prices';
+import { HAS_GATEWAY } from '../services/gateway';
+import {
+  capDismissedKeys,
+  fetchNotificationsResult,
+  migrateDismissedKeys,
+  normalizeDismissalKey,
+  NOTIF_REFRESH_MS,
+  type NotificationItem,
+} from '../services/notifications';
 import { isValidAddress } from '../services/chain/keys';
-import { feePolicyFor, networkFor, supportsAssets } from '../services/chain/chainParams';
+import {
+  feePolicyFor,
+  isNewChain,
+  isYoungChain,
+  networkFor,
+  supportsAssets,
+} from '../services/chain/chainParams';
+import { EVM_NETWORK, loadEvmModules, walletFamily, type WalletFamily } from '../services/chain/engine';
+import { evmProviderFor, readEvmDiscoveredBalances, refreshEvmWallet } from './evmBalances';
+import { clearBalanceCaches, loadBalanceCache, mergeBalanceRows, saveBalanceCache } from './balanceCache';
+import { setTokenLogos } from './tokenLogoRegistry';
+import { loadOlderEvmHistory, refreshEvmHistory } from './evmHistory';
+import { EVM_HISTORY_IN_MEMORY_MAX_ROWS, loadEvmHistoryCache, mergeEvmHistory } from './evmHistoryCache';
+import {
+  evmChainKeyOf,
+  evmChainTarget,
+  evmExplorerTxUrl,
+  isEvmChainTarget,
+  loadEvmChainInfos,
+  type EvmChainInfo,
+  type EvmChainTarget,
+} from './evmChains';
+import {
+  broadcastEvmPlan,
+  buildEvmSendPlan,
+  withEvmFeeLevel,
+  EvmSendError,
+  type EvmSendInput,
+  type EvmSendPlan,
+} from './evmSend';
+import {
+  buildEvmStakePlan,
+  loadEvmStakingSnapshot,
+  readExactDelegation,
+  readUnbondingEntryCount,
+  type EvmStakeAction,
+  type EvmStakeInput,
+  type EvmStakePlan,
+  type EvmStakingSnapshot,
+} from './evmStaking';
+import { withCallGasHeadroom, withEvmCallFeeLevel } from './evmCall';
+import type { EvmFeeLevel } from '../services/chain/evm/fees';
+import type { EvmNonceTracker } from '../services/chain/evm/nonce';
 import { checkElectrumServer } from '../services/chain/electrumClient';
 import {
   DEFAULT_ELECTRUM_SERVER_URLS,
   ELECTRUM_SERVERS_STORAGE_KEY,
   electrumServersStorageKey,
   defaultServerUrlsFor,
+  isGatewayElectrumUrl,
   parseServerUrl,
   serverToUrl,
   setElectrumServers,
+  withGatewayBridgeUrls,
   type ElectrumEndpoint,
 } from '../services/chain/network';
 import type {
@@ -50,7 +107,6 @@ import {
   type PoolInfo,
   type LenderStatus,
 } from '../services/satoriPool';
-import type { NativeTicker } from '../services/chain/chainParams';
 
 // Module-level singleton — one service, one connection.
 const svc = new LiveWalletService();
@@ -64,6 +120,69 @@ export function activeChainId(): LiveNetworkId {
   return svc.network();
 }
 
+/** Family of the ACTIVE wallet ('utxo' for every pre-EVM wallet). For an EVM
+ *  account activeChainId() still names the LAST UTXO chain (the Electrum side
+ *  is idle), so every chain-shaped read must consult this first. */
+export function activeFamily(): WalletFamily {
+  return svc.activeWalletFamily();
+}
+
+/** The chain id the UI should treat as active: the UTXO LiveNetworkId, or the
+ *  `evm:<key>` target of the chain the active EVM account is showing. */
+export function activeChainTarget(): string {
+  const key = svc.evmChainKey();
+  return activeFamily() === 'evm' && key ? evmChainTarget(key) : activeChainId();
+}
+
+/** Display facts for ANY chain id the switcher/picker can name: a UTXO
+ *  LiveNetworkId/ChainId, or an `evm:<key>` target (resolved against the EVM
+ *  chains this build knows). Null for an EVM target this build does not carry. */
+export function describeChain(
+  id: string,
+  evmChains: readonly EvmChainInfo[],
+): {
+  id: string;
+  family: WalletFamily;
+  displayName: string;
+  ticker: string;
+  decimals: number;
+  /** The project's own site. Both families carry one, so the chain list can
+   *  show the domain that tells two similarly named chains apart. */
+  homepage: string;
+  /** A thin network: Home shows its caution notice. */
+  young: boolean;
+  /** Marked "New" beside the name in the chain list (young, or new here). */
+  isNew: boolean;
+} | null {
+  const key = evmChainKeyOf(id);
+  if (key !== null) {
+    const c = evmChains.find((x) => x.key === key);
+    return c
+      ? {
+          id,
+          family: 'evm',
+          displayName: c.displayName,
+          ticker: c.nativeTicker,
+          decimals: c.nativeDecimals,
+          homepage: c.homepage,
+          young: c.young,
+          isNew: c.young || c.recentlyAdded,
+        }
+      : null;
+  }
+  const net = networkFor(id as LiveNetworkId);
+  return {
+    id,
+    family: 'utxo',
+    displayName: net.displayName,
+    ticker: net.ticker,
+    decimals: net.decimals,
+    homepage: net.homepage,
+    young: isYoungChain(net),
+    isNew: isNewChain(net),
+  };
+}
+
 /**
  * Human name of a chain (default = active chain), straight from its params.
  *
@@ -72,14 +191,50 @@ export function activeChainId(): LiveNetworkId {
  * silently mislabels EVERY chain added since: sending BTC announced the
  * "EVRmore network". A ternary cannot grow with the chain list; a lookup can.
  */
-export function chainDisplayName(chainId: string = activeChainId()): string {
+export function chainDisplayName(chainId: string = activeChainTarget()): string {
+  const evm = evmChainInfoFor(chainId);
+  if (evm) return evm.displayName;
   return networkFor(chainId as Parameters<typeof networkFor>[0]).displayName;
 }
 
-/** Native coin ticker ('EVR' / 'RVN') of a chain (default = active chain).
- *  Exported for chain-aware UI labels (fee notes, error text, unit suffixes). */
-export function nativeTickerFor(chainId: string = activeChainId()): NativeTicker {
+/** The EVM chains this build knows, mirrored here (module scope) so the pure
+ *  chain helpers above the store can answer for `evm:<key>` ids without a
+ *  store read. Filled by init() from loadEvmChainInfos(); empty without --evm. */
+let evmChainInfos: readonly EvmChainInfo[] = [];
+
+/** The EVM chain an id names: an `evm:<key>` target, or the stored 'evm'
+ *  sentinel of an EVM summary (which means "the chain the active account is
+ *  showing"). Null for a UTXO id or an unknown key. */
+function evmChainInfoFor(chainId: string): EvmChainInfo | null {
+  if (chainId === EVM_NETWORK) {
+    const key = svc.evmChainKey();
+    return key ? (evmChainInfos.find((c) => c.key === key) ?? null) : null;
+  }
+  const key = evmChainKeyOf(chainId);
+  if (key === null) return null;
+  return evmChainInfos.find((c) => c.key === key) ?? null;
+}
+
+/** Native coin ticker ('EVR' / 'RVN' / 'ETH' / 'BNB') of a chain (default =
+ *  the active chain, EVM-aware). Exported for chain-aware UI labels (fee
+ *  notes, error text, unit suffixes). */
+export function nativeTickerFor(chainId: string = activeChainTarget()): string {
+  const evm = evmChainInfoFor(chainId);
+  if (evm) return evm.nativeTicker;
   return networkFor(chainId as LiveNetworkId).ticker;
+}
+
+/** The identifier the notification targeting matches THIS wallet's active chain
+ *  against (services/notifications.ts). A UTXO chain is its native ticker,
+ *  upper-cased (EVR, RVN, BTGS, LTC, WJK, BTC, DOGE); an EVM chain is
+ *  `EVM:<KEY>` upper-cased (EVM:BASE, EVM:BSC, EVM:ETHEREUM, EVM:EPIX). Built
+ *  from the SAME chain helpers the rest of the UI uses, so a chain added later
+ *  is targetable with no change here. */
+export function activeChainIdentifier(): string {
+  const target = activeChainTarget();
+  const key = evmChainKeyOf(target);
+  if (key !== null) return `EVM:${key.toUpperCase()}`;
+  return nativeTickerFor(target).toUpperCase();
 }
 
 /** Whether `assetId` names the chain's NATIVE coin (EVR on Evrmore, RVN on
@@ -87,8 +242,8 @@ export function nativeTickerFor(chainId: string = activeChainId()): NativeTicker
  *  hardcoded ticker: on a Ravencoin wallet the native coin arrives as 'RVN', and a
  *  literal `=== 'EVR'` check routed it down the ASSET path, asking the chain for
  *  an asset named "RVN" (which does not exist -> unknown-asset at review). */
-export function isNativeAssetId(assetId: string, chainId: string = activeChainId()): boolean {
-  return assetId.trim().toUpperCase() === nativeTickerFor(chainId);
+export function isNativeAssetId(assetId: string, chainId: string = activeChainTarget()): boolean {
+  return assetId.trim().toUpperCase() === nativeTickerFor(chainId).toUpperCase();
 }
 
 /** Wallets that live on the SAME chain as `chainId` (default = active chain).
@@ -98,12 +253,20 @@ export function isNativeAssetId(assetId: string, chainId: string = activeChainId
  *  EVERY recipient picker (the My-wallets quick-pick, the address book, any
  *  future suggestion UI) must be scoped to the active wallet's chain with this
  *  helper, not shown unfiltered. */
-export function walletsOnChain<T extends { network: string }>(
+export function walletsOnChain<T extends { network: string; family?: WalletFamily }>(
   wallets: T[],
-  chainId: string = activeChainId(),
+  chainId: string = activeChainTarget(),
 ): T[] {
+  // An EVM account is ONE address on every EVM chain, so every EVM wallet is
+  // "on" every `evm:<key>` target: the recipient picker for a Base send may
+  // offer the user's other EVM accounts, never a UTXO one.
+  if (isEvmChainTarget(chainId)) return wallets.filter((w) => walletFamily(w) === 'evm');
   const chain = networkFor(chainId as LiveNetworkId).chainId;
-  return wallets.filter((w) => networkFor(w.network as LiveNetworkId).chainId === chain);
+  // Family first: an EVM account has no UTXO `network`, so it must never reach
+  // networkFor(). Absent family = utxo, so every existing wallet is unaffected.
+  return wallets.filter(
+    (w) => walletFamily(w) === 'utxo' && networkFor(w.network as LiveNetworkId).chainId === chain,
+  );
 }
 
 /** True when two chain ids name the SAME chain. Compares the CANONICAL chainId,
@@ -136,9 +299,17 @@ function chainIdAliases(id: string): string[] {
  *  actually stored on an Evrmore WalletEntry) and `.has('evrmore-mainnet')` (the
  *  canonical ChainId) answer true for one Evrmore wallet. Membership is the
  *  contract; `.size` is NOT a chain count. */
-export function chainsWithWallets(wallets: WalletSummary[]): Set<string> {
+export function chainsWithWallets(wallets: WalletSummary[], evmChainKeys: readonly string[] = []): Set<string> {
   const out = new Set<string>();
-  for (const w of wallets) for (const alias of chainIdAliases(w.network)) out.add(alias);
+  for (const w of wallets) {
+    if (walletFamily(w) === 'evm') {
+      // One EVM account enables EVERY EVM chain this build knows: same address
+      // on all of them, so there is nothing to derive per chain.
+      for (const key of evmChainKeys) out.add(evmChainTarget(key));
+      continue;
+    }
+    for (const alias of chainIdAliases(w.network)) out.add(alias);
+  }
   return out;
 }
 
@@ -147,10 +318,12 @@ export function chainsWithWallets(wallets: WalletSummary[]): Set<string> {
  *  `<base> (<target chain>)`, so stripping the tag recovers the shared base name
  *  that groups one seed's wallets across chains. Param-driven (the chain's own
  *  displayName/ticker), so it never needs a table of chain names. */
-function baseWalletName(w: { name: string; network: string }): string {
-  const net = networkFor(w.network as LiveNetworkId);
+function baseWalletName(w: { name: string; network: string; family?: WalletFamily }): string {
   const name = w.name.trim();
-  for (const tag of [net.displayName, net.ticker]) {
+  // An EVM account is tagged with the family, not a chain (enableChain names
+  // it "<base> (EVM)"), and has no UTXO params to consult.
+  const tags = walletFamily(w) === 'evm' ? ['EVM'] : [networkFor(w.network as LiveNetworkId).displayName, networkFor(w.network as LiveNetworkId).ticker];
+  for (const tag of tags) {
     const suffix = ` (${tag})`;
     if (name.length > suffix.length && name.toLowerCase().endsWith(suffix.toLowerCase())) {
       return name.slice(0, name.length - suffix.length).trim();
@@ -172,7 +345,14 @@ export function walletOnChain(wallets: WalletSummary[], chainId: string): Wallet
   // `active` is carried on the summaries themselves, so this stays a pure
   // function of its arguments (no service/store read) and is safe in tests.
   const active = wallets.find((w) => w.active);
-  if (active) {
+  // Switching to an EVM chain while an EVM account is active stays on THAT
+  // account (the address is the same on every EVM chain); otherwise the
+  // sibling rule below picks the EVM account derived from the active seed.
+  if (isEvmChainTarget(chainId) && active && walletFamily(active) === 'evm') return active;
+  // The sibling rule (chain-tagged names come from enableChain: "Name (Base)"
+  // or "Name (Ravencoin)"); an active EVM account has no UTXO chain to strip,
+  // so a UTXO target falls through to FIRST.
+  if (active && (walletFamily(active) === 'utxo' || isEvmChainTarget(chainId))) {
     const base = baseWalletName(active).toLowerCase();
     if (base) {
       const sibling = candidates.find((c) => baseWalletName(c).toLowerCase() === base);
@@ -185,8 +365,20 @@ export function walletOnChain(wallets: WalletSummary[], chainId: string): Wallet
 /** Whether Satori pool staking applies on this chain. SATORIEVR is an Evrmore
  *  asset, so staking is Evrmore-only; it is inert on Ravencoin. Exported so the
  *  UI can hide/guard the Stake action without re-deriving the chain check. */
-export function stakingSupported(chainId: string = activeChainId()): boolean {
+export function stakingSupported(chainId: string = activeChainTarget()): boolean {
   return nativeTickerFor(chainId) === 'EVR';
+}
+
+/** Whether this chain has NATIVE staking, the kind a cosmos/evm chain exposes
+ *  through precompiles (Epix). A different feature from Satori pool staking
+ *  above, on a different family, with its own screen: the two are deliberately
+ *  separate predicates so a chain can have either, both or neither, and no
+ *  screen ever has to name a chain to decide.
+ *
+ *  Reads the registry mirror in state, so a build without the EVM engine (whose
+ *  chain list is empty) answers false everywhere. */
+export function evmStakingSupported(chainId: string = activeChainTarget()): boolean {
+  return !!evmChainInfoFor(chainId)?.staking;
 }
 
 /** Whether this chain (default = active chain) implements the Ravencoin-style
@@ -196,7 +388,9 @@ export function stakingSupported(chainId: string = activeChainId()): boolean {
  *  affordance in the UI MUST gate on this CAPABILITY, never on a hardcoded
  *  chain name or ticker (`=== 'BTGS'`) — that is what lets a future plain
  *  chain drop in with no UI edits. */
-export function assetsSupported(chainId: string = activeChainId()): boolean {
+export function assetsSupported(chainId: string = activeChainTarget()): boolean {
+  // Every EVM chain has a token layer (ERC-20).
+  if (evmChainInfoFor(chainId)) return true;
   return supportsAssets(networkFor(chainId as LiveNetworkId));
 }
 
@@ -225,7 +419,123 @@ function cacheProvider(): TransactionCacheProvider {
   return svc.getProvider() as unknown as TransactionCacheProvider;
 }
 
-export type LivePhase = 'boot' | 'onboarding' | 'locked' | 'ready';
+/**
+ * 'app-locked' is the APP lock screen (the app-password design notes §5): it only
+ * ever appears once the user has SET an app password, and it gates the whole
+ * application, with the choice of wallet coming after it. Without an app
+ * password the phase never occurs and the flow is 'locked' -> 'ready' exactly as
+ * it has always been.
+ *
+ * 'force-app-password' is the FORCED SETUP screen (§12), and it is the inverse
+ * situation: it appears only for a user who has a wallet that opens with NO
+ * password and no app password to protect it with. It is the one phase with no
+ * way out but forward, so it can only ever be entered from init() and can only
+ * be left by setting the password.
+ */
+export type LivePhase =
+  | 'boot'
+  | 'onboarding'
+  | 'force-app-password'
+  | 'app-locked'
+  | 'locked'
+  | 'ready';
+
+/** A token this wallet reads on an EVM chain, identified by contract. */
+export interface EvmTrackedToken {
+  address: string;
+  symbol: string;
+  decimals: number;
+  /** Its mark as a validated PNG data: URL (evm/tokenLogos.ts), once fetched;
+   *  absent = not fetched yet, none exists, or the wallet will not vouch for
+   *  the token (letter badge). A mark is kept ONLY for a token the trust rule
+   *  says yes to: see evm/tokenTrust.ts. */
+  logo?: string;
+  /** Does the wallet vouch for this token (evm/tokenTrust.ts: in the chain's
+   *  token list AND carrying a mark)? true = no warning, shown automatically
+   *  while it holds a balance; false = drawn as unlisted, and a DISCOVERED one
+   *  is kept out of the list (airdrop / spam) until the user imports it or adds
+   *  it by contract; absent = not checked yet, no claim either way. */
+  trusted?: boolean;
+  /** Which version of the trust rule produced `trusted`. Absent means the
+   *  pre-1.4.0 rule, which vouched for a token on a mark alone. See
+   *  TOKEN_TRUST_RULE. */
+  trustRule?: number;
+}
+
+/**
+ * Version of the rule behind every persisted `trusted` verdict.
+ *
+ * 1 (implicit, pre-1.4.0): a mark existed for the contract. In a gateway build
+ *   that read "the gateway returned a picture", which a hostile gateway can
+ *   arrange for its own contract (2026-08-25 security review).
+ * 2: evm/tokenTrust.ts, which also requires the contract to be in the chain's
+ *   public token list.
+ *
+ * A stored verdict from an older rule that said TRUSTED is not one this build
+ * will stand behind, so it is cleared on read and decided again. An older
+ * `false` survives: "no mark" is untrusted under every rule, and re-asking
+ * would cost a probe per spam token on every unlock.
+ */
+export const TOKEN_TRUST_RULE = 2;
+
+/** One row of the Add token search on an EVM chain: a token from the chain's
+ *  public token list. `symbol`/`name` label the ROW only; adding the token
+ *  still goes through addEvmToken(address), which reads symbol and decimals
+ *  from the chain (see src/services/chain/evm/tokenSearch.ts, rule (a)). */
+export interface TokenSearchHit {
+  /** EIP-55 checksummed contract address. */
+  address: string;
+  name: string;
+  symbol: string;
+  decimals: number;
+}
+
+/** How many indexer-discovered token contracts are remembered per account and
+ *  chain (newest first). Each costs one balanceOf per refresh. */
+const MAX_DISCOVERED_EVM_TOKENS = 40;
+
+/** The history indexer is asked at most this often per (address, chain) on the
+ *  20 s auto-refresh: public Blockscout rate-limits by IP and a wallet polling
+ *  history six times a minute gets itself banned for a while. A MANUAL refresh
+ *  (not silent) always asks. */
+const EVM_HISTORY_MIN_INTERVAL_MS = 60_000;
+const evmHistoryAskedAt = new Map<string, number>();
+
+const evmTrackedKey = (walletId: string, chainKey: string) => `evmTokens:${walletId}:${chainKey}`;
+const evmDiscoveredKey = (walletId: string, chainKey: string) => `evmDiscovered:${walletId}:${chainKey}`;
+
+/** Read a persisted token list; malformed entries are dropped. */
+async function readEvmTokens(key: string): Promise<EvmTrackedToken[]> {
+  try {
+    const v = await getStorage().get<unknown>(key);
+    if (!Array.isArray(v)) return [];
+    return v
+      .filter(
+        (t): t is EvmTrackedToken =>
+          typeof t === 'object' &&
+          t !== null &&
+          typeof (t as EvmTrackedToken).address === 'string' &&
+          typeof (t as EvmTrackedToken).symbol === 'string' &&
+          typeof (t as EvmTrackedToken).decimals === 'number',
+      )
+      .map(retireStaleTrust);
+  } catch {
+    return [];
+  }
+}
+
+/** Drop a `trusted: true` (and the mark it came with) that an older, weaker
+ *  rule recorded, so the current rule decides it again. See TOKEN_TRUST_RULE.
+ *  Until the re-check lands the token simply carries no claim: no vouching, and
+ *  no warning it has not earned. */
+export function retireStaleTrust(token: EvmTrackedToken): EvmTrackedToken {
+  if (token.trusted !== true || token.trustRule === TOKEN_TRUST_RULE) return token;
+  const next: EvmTrackedToken = { ...token };
+  delete next.trusted;
+  delete next.logo;
+  delete next.trustRule;
+  return next;
+}
 
 /** Transient sync feedback: 'initial' while a wallet with no cached history runs
  *  its first full refresh (slim banner on home), 'switching' while the active
@@ -237,10 +547,28 @@ export type LiveSyncing = 'idle' | 'initial' | 'switching';
 const PINNED_ASSETS_KEY = 'pinnedAssets';
 const HIDDEN_ASSETS_KEY = 'hiddenAssets';
 
+/** Owner-authored notifications the user has dismissed: an array of DISMISSAL
+ *  KEYS (`id@rev`, see services/notifications.ts dismissalKey). Global, not
+ *  per-wallet: a dismissed notice stays dismissed on every account.
+ *
+ *  The storage key keeps its `.v1` name across the move from bare ids to
+ *  `id@rev` on purpose: the shape is still an array of strings and the entries
+ *  are migrated on READ (migrateDismissedKeys), so a user upgrading from a build
+ *  that stored bare ids keeps every dismissal instead of having them all come
+ *  back at once. A new key would have thrown that history away. */
+const NOTIF_DISMISSED_KEY = 'notif.dismissed.v1';
+
 /** Per-wallet pin/hide lists: each wallet curates its OWN tokens, so adding or
  *  removing an asset in one wallet never affects another. Keyed by wallet id. */
 const pinnedKey = (walletId: string) => `pinnedAssets:${walletId}`;
 const hiddenKey = (walletId: string) => `hiddenAssets:${walletId}`;
+
+/** The user's manual row order, per wallet AND per chain. The chain is in the
+ *  key because the ASSET SET is per chain: one EVM account holds a different
+ *  list of tokens on Base than on BNB Chain, and an order shared between them
+ *  would be a list of names that mostly do not exist on the other side. Same
+ *  shape as the pin/hide keys, one segment longer. */
+const assetOrderKey = (walletId: string, chainId: string) => `assetOrder:${walletId}:${chainId}`;
 
 /** Per-wallet record of what the user has already SEEN in Activity. Anything not
  *  covered by it counts as "new" for the Activity badge. */
@@ -288,6 +616,13 @@ const SEEN_TX_CAP = 400;
 /** Nothing seen yet. */
 function emptyActivitySeen(): ActivitySeen {
   return { height: 0, txids: [] };
+}
+
+/** "We have not asked how far back this source goes." Every wallet switch,
+ *  chain switch and lock resets to it, because the answer belongs to ONE
+ *  account on ONE chain. */
+function emptyOlderHistory(): LiveState['olderHistory'] {
+  return { canLoadOlder: null, cursor: null, loading: false, error: null };
 }
 
 /** Read + normalise the persisted seen-record for a wallet.
@@ -392,6 +727,17 @@ const EXPLORER_URL_KEY = 'explorerUrlTemplate';
 const AUTO_LOCK_MINUTES_KEY = 'autoLockMinutes';
 const SETTINGS_MODE_KEY = 'settingsMode';
 const HIDDEN_CHAINS_KEY = 'hiddenChains';
+/** Home's "hide zero balances" toggle. GLOBAL, not per wallet or chain: it is a
+ *  reading preference about lists, and someone who does not want to see empty
+ *  rows does not want to see them on the next chain either. */
+const HIDE_ZERO_BALANCES_KEY = 'ui:hideZeroBalances';
+/** Privacy mode: amounts on Home are masked (owner, 2026-08-19: the eye on the
+ *  main window should switch balances off, like MetaMask). */
+const HIDE_BALANCES_KEY = 'ui:hideBalances';
+/** Per seed + EVM chain: the account indexes known USED there (the EVM accounts
+ *  design notes, per-chain visibility). Written by discovery and Add account;
+ *  read into `evmAccountsOnChain` for the active chain. */
+const evmSeenKey = (seedGroup: string, chainKey: string) => `evmAccountsSeen:${seedGroup}:${chainKey}`;
 
 /** Chains the user has switched OFF in expert Settings, by canonical chainId.
  *
@@ -420,6 +766,11 @@ export function isChainHideable(chainId: string, activeChain: string): boolean {
 /** Why a chain cannot be hidden, or null when it can. The UI copy lives here so
  *  the reason shown and the rule enforced cannot drift apart. */
 export function chainHideBlockedReason(chainId: string, activeChain: string): string | null {
+  // An EVM chain (`evm:<key>`): hideable unless it is the one in use. There is
+  // no "home" EVM chain; the account exists on every EVM chain regardless.
+  if (isEvmChainTarget(chainId)) {
+    return chainId === activeChain ? 'This is the network you are using. Switch to another one first.' : null;
+  }
   if (networkFor(chainId as LiveNetworkId).ticker === 'EVR') {
     return 'The home network is always available.';
   }
@@ -499,6 +850,28 @@ export interface StakingState {
   loaded: boolean;
 }
 
+/** What the last (or running) gap-limit address scan is doing / found. Session
+ *  only, never persisted: the addresses it discovers ARE the persisted part. */
+export interface AddressScanState {
+  /** True while a scan is in flight (drives the spinner + disables the button). */
+  scanning: boolean;
+  /** Receive indices examined so far this run, out of at most MAX_SCAN_INDEX+1. */
+  scanned: number;
+  /** Result of the last finished scan, or null when none has run this session. */
+  result: {
+    /** How many receive addresses the scan ADDED (0 = nothing was found). */
+    found: number;
+    /** The wallet's address count after the scan. */
+    addressCount: number;
+    /** False when the answer is only a lower bound (see AddressScanResult). */
+    complete: boolean;
+    /** Addresses whose history could not be read (never counted as empty). */
+    failedReads: number;
+  } | null;
+  /** Last scan error (locked wallet, no wallet), or null. */
+  error: string | null;
+}
+
 /** Default EVRMORE block-explorer URL template. `{txid}` is replaced with the
  *  real txid. */
 export const DEFAULT_EXPLORER_URL = 'https://cryptoscope.io/evrmore/tx/?txid={txid}';
@@ -573,6 +946,23 @@ export const DEFAULT_EXPLORER_URL_DOGE = 'https://3xpl.com/dogecoin/transaction/
  */
 export const DEFAULT_EXPLORER_URL_WJK = 'https://explorer.wojakcoin.cash/tx/{txid}';
 
+/** Default NEOXA block-explorer URL template. VERIFIED LIVE 2026-08-25 against
+ *  the real mainnet txid
+ *  6015158b4ed814d31a16dbdf9810e28a84c33b664b32474878a921dd315d2704 (the
+ *  coinbase of block 2,231,300, hash
+ *  0000000000448c8880a3a2273258fadbd3823738b03b298b587b1a6140ed99b8, read from
+ *  the chain itself through the explorer's own getblockhash/getblock API):
+ *  https://explorer.neoxa.net/tx/<txid> answered HTTP 200 with the SERVED HTML
+ *  already containing that txid (3 times) AND the block height 2,231,300 — i.e.
+ *  server-rendered real data cross-checked against the live chain, the stronger
+ *  of the two verification methods used in this file (the SPA cases above had to
+ *  fall back to the explorer's API). It is the project's own explorer, linked
+ *  from neoxa.net.
+ *
+ *  explorers.test.ts pins that no two chains share a template, a check that
+ *  exists because a WojakCoin transaction once opened on Evrmore's explorer. */
+export const DEFAULT_EXPLORER_URL_NEOX = 'https://explorer.neoxa.net/tx/{txid}';
+
 /** Block-explorer template default for a chain (default = active chain). '' on
  *  a chain with no known explorer (see the WOJAKCOIN comment above) — callers
  *  must treat an empty template as "no explorer available", not fall through
@@ -580,7 +970,9 @@ export const DEFAULT_EXPLORER_URL_WJK = 'https://explorer.wojakcoin.cash/tx/{txi
  *
  *  This is the SINGLE place that knows which chains have an explorer; the
  *  absence of an entry IS the answer, so nothing else needs a chain check. */
-function defaultExplorerFor(chainId: string = activeChainId()): string {
+function defaultExplorerFor(chainId: string = activeChainTarget()): string {
+  const evm = evmChainInfoFor(chainId);
+  if (evm) return evm.explorerTxUrl;
   const ticker = nativeTickerFor(chainId);
   if (ticker === 'RVN') return DEFAULT_EXPLORER_URL_RVN;
   if (ticker === 'BTGS') return DEFAULT_EXPLORER_URL_BTGS;
@@ -588,6 +980,7 @@ function defaultExplorerFor(chainId: string = activeChainId()): string {
   if (ticker === 'BTC') return DEFAULT_EXPLORER_URL_BTC;
   if (ticker === 'DOGE') return DEFAULT_EXPLORER_URL_DOGE;
   if (ticker === 'WJK') return DEFAULT_EXPLORER_URL_WJK;
+  if (ticker === 'NEOX') return DEFAULT_EXPLORER_URL_NEOX;
   if (ticker === 'EVR') return DEFAULT_EXPLORER_URL;
   // A chain with no known explorer fails closed rather than borrowing another
   // chain's, which would resolve a foreign txid on the wrong chain and read to
@@ -598,7 +991,7 @@ function defaultExplorerFor(chainId: string = activeChainId()): string {
 /** True when the chain ships a built-in explorer template. DERIVED from
  *  defaultExplorerFor so a new chain never needs a second edit here, and a
  *  chain can never claim an explorer it does not have. */
-export function hasDefaultExplorer(chainId: string = activeChainId()): boolean {
+export function hasDefaultExplorer(chainId: string = activeChainTarget()): boolean {
   return defaultExplorerFor(chainId) !== '';
 }
 
@@ -608,7 +1001,7 @@ export function hasDefaultExplorer(chainId: string = activeChainId()): boolean {
  *  canonical chainId (WojakCoin's key exists so a user who later types in their
  *  own explorer URL still gets a chain-isolated slot, even though there is no
  *  built-in default). */
-function explorerKeyForChain(chainId: string = activeChainId()): string {
+function explorerKeyForChain(chainId: string = activeChainTarget()): string {
   const ticker = nativeTickerFor(chainId);
   if (ticker === 'RVN') return `${EXPLORER_URL_KEY}:ravencoin-mainnet`;
   if (ticker === 'BTGS') return `${EXPLORER_URL_KEY}:bitcoingold-mainnet`;
@@ -616,6 +1009,7 @@ function explorerKeyForChain(chainId: string = activeChainId()): string {
   if (ticker === 'WJK') return `${EXPLORER_URL_KEY}:wojakcoin-mainnet`;
   if (ticker === 'BTC') return `${EXPLORER_URL_KEY}:bitcoin-mainnet`;
   if (ticker === 'DOGE') return `${EXPLORER_URL_KEY}:dogecoin-mainnet`;
+  if (ticker === 'NEOX') return `${EXPLORER_URL_KEY}:neoxa-mainnet`;
   return EXPLORER_URL_KEY;
 }
 
@@ -707,8 +1101,13 @@ async function readAddressBook(): Promise<Contact[]> {
  * Default chain = Evrmore, so the exported constant/helpers keep their historical
  * behavior for every existing caller.
  */
-export function protectedAssetsFor(chainId: string = activeChainId()): readonly string[] {
+export function protectedAssetsFor(chainId: string = activeChainTarget()): readonly string[] {
   const ticker = nativeTickerFor(chainId);
+  // An EVM chain protects its native coin and its DEFAULT tokens: those rows
+  // come from the provider, not from pins, and until token management for EVM
+  // exists (add by contract address) a removed default could not be restored.
+  const evm = evmChainInfoFor(chainId);
+  if (evm) return [ticker, ...evm.defaultTokens.map((t) => t.symbol ?? '').filter(Boolean)];
   if (!assetsSupported(chainId)) return [ticker];
   return ticker === 'EVR' ? ['EVR', 'SATORIEVR'] : [ticker];
 }
@@ -718,7 +1117,7 @@ export const PROTECTED_ASSETS: readonly string[] = ['EVR', 'SATORIEVR'];
 
 /** False for a protected asset of the given chain (default active). The single
  *  source of truth for every remove control. */
-export function isRemovableAsset(name: string, chainId: string = activeChainId()): boolean {
+export function isRemovableAsset(name: string, chainId: string = activeChainTarget()): boolean {
   return !protectedAssetsFor(chainId).includes(name.trim().toUpperCase());
 }
 
@@ -727,8 +1126,8 @@ export function isRemovableAsset(name: string, chainId: string = activeChainId()
  *  first, by construction. Evrmore pins SATORIEVR; Ravencoin pins nothing; a
  *  chain with no asset protocol (BTGS) pins nothing — there is nothing it could
  *  pin. */
-export function defaultPinsFor(chainId: string = activeChainId()): readonly string[] {
-  if (!assetsSupported(chainId)) return [];
+export function defaultPinsFor(chainId: string = activeChainTarget()): readonly string[] {
+  if (!assetsSupported(chainId) || evmChainInfoFor(chainId)) return [];
   return nativeTickerFor(chainId) === 'EVR' ? ['SATORIEVR'] : [];
 }
 
@@ -736,10 +1135,22 @@ export function defaultPinsFor(chainId: string = activeChainId()): readonly stri
 export const DEFAULT_PINNED_ASSETS = ['SATORIEVR'] as const;
 
 /**
+ * Drop pins that cannot exist on `chainId`: every pin on an EVM chain (tokens
+ * there are tracked by contract, not by name), and SATORIEVR anywhere but on an
+ * Evrmore-ticker chain. Same reference back when nothing changes.
+ */
+export function sanitizePins(pinned: string[], chainId: string = activeChainTarget()): string[] {
+  if (evmChainInfoFor(chainId)) return pinned.length === 0 ? pinned : [];
+  const evrmore = nativeTickerFor(chainId) === 'EVR';
+  const kept = pinned.filter((n) => evrmore || n.toUpperCase() !== 'SATORIEVR');
+  return kept.length === pinned.length ? pinned : kept;
+}
+
+/**
  * Ensure the chain's default assets are pinned. Returns the SAME array reference
  * when nothing changes, so callers can skip a pointless write to storage.
  */
-export function applyDefaultPins(pinned: string[], chainId: string = activeChainId()): string[] {
+export function applyDefaultPins(pinned: string[], chainId: string = activeChainTarget()): string[] {
   const missing = defaultPinsFor(chainId).filter((name) => !pinned.includes(name));
   return missing.length ? [...pinned, ...missing] : pinned;
 }
@@ -751,7 +1162,7 @@ export function applyDefaultPins(pinned: string[], chainId: string = activeChain
  * this, anyone who did that would keep an invisible SATORIEVR forever, with no
  * remove/restore control to undo it. Same reference back when there is nothing to do.
  */
-export function unhideProtected(hidden: string[], chainId: string = activeChainId()): string[] {
+export function unhideProtected(hidden: string[], chainId: string = activeChainTarget()): string[] {
   const kept = hidden.filter((n) => isRemovableAsset(n, chainId));
   return kept.length === hidden.length ? hidden : kept;
 }
@@ -765,13 +1176,21 @@ export function computeDisplayedAssets(
   assets: LiveAssetBalance[],
   pinned: string[],
   hidden: string[],
-  chainId: string = activeChainId(),
+  chainId: string = activeChainTarget(),
 ): LiveAssetBalance[] {
-  // Native coin name for this chain (EVR / RVN) — always first, never hidden.
+  // Native coin name for this chain (EVR / RVN / ETH) — always first, never hidden.
   const native = nativeTickerFor(chainId);
+  const evmInfo = evmChainInfoFor(chainId);
+  const nativeDecimals = evmInfo ? evmInfo.nativeDecimals : networkFor(chainId as LiveNetworkId).decimals;
   const nativeRow =
     assets.find((a) => a.isNative || a.name === native) ??
-    ({ name: native, amount: 0, decimals: 8, isNative: true } as LiveAssetBalance);
+    ({
+      name: native,
+      amountBase: 0n,
+      scale: nativeDecimals,
+      decimals: evmInfo ? nativeDecimals : 8,
+      isNative: true,
+    } as LiveAssetBalance);
 
   // A protected asset can never be hidden, whatever the list says.
   const hiddenSet = new Set(hidden.filter((n) => isRemovableAsset(n, chainId)));
@@ -782,11 +1201,14 @@ export function computeDisplayedAssets(
     if (a.isNative || a.name === native) continue;
     byName.set(a.name, a);
   }
-  // Pinned-but-not-held show up with a 0 balance.
-  for (const name of pinned) {
+  // Pinned-but-not-held show up with a 0 balance. (Not on an EVM chain: pins
+  // are UTXO asset names; EVM tokens arrive as rows from the provider.)
+  for (const name of evmInfo ? [] : pinned) {
     if (name === native) continue;
     if (!byName.has(name)) {
-      byName.set(name, { name, amount: 0, decimals: 8, isNative: false });
+      // Pinned but not held: an ASSET row, so its scale is the on-chain asset
+      // base unit (always 8), not the chain's own.
+      byName.set(name, { name, amountBase: 0n, scale: 8, decimals: 8, isNative: false });
     }
   }
 
@@ -807,7 +1229,9 @@ export function mergeAssetBalances(lists: LiveAssetBalance[][]): LiveAssetBalanc
   for (const list of lists) {
     for (const a of list) {
       const prev = byName.get(a.name);
-      byName.set(a.name, prev ? { ...prev, amount: prev.amount + a.amount } : { ...a });
+      // bigint addition: summing across addresses is exactly where the old
+      // whole-unit floats accumulated error, one rounding per address.
+      byName.set(a.name, prev ? { ...prev, amountBase: prev.amountBase + a.amountBase } : { ...a });
     }
   }
   // The native coin (flagged isNative — EVR or RVN) is always first; the rest
@@ -998,10 +1422,13 @@ function withLocalPending(address: string, txs: LiveTransaction[]): LiveTransact
  *  asset send it is the asset amount, with the fee carried separately. Pure +
  *  exported for tests. */
 export function localPendingFromPlan(plan: LiveSendPlan, chainId: string): LiveTransaction {
-  const feeNative = Number(plan.feeSats) / 1e8;
-  // On-chain base units are always 1e8, for the native coin AND every asset
-  // (an asset's `decimals` is display precision only) — see electrumProvider.
-  const sent = Number(plan.amountSats) / 1e8;
+  // Display figures for the optimistic row. The chain's own scale for the fee
+  // (always the native coin); an ASSET amount stays on the chain's on-chain base
+  // unit, which is 1e8 for every Evrmore/Ravencoin asset regardless of that
+  // asset's own `divisions` — see ASSET_BASE_UNIT in electrumProvider.
+  const chainDecimals = networkFor(chainId as LiveNetworkId).decimals;
+  const feeNative = amountToNumber(plan.feeSats, chainDecimals);
+  const sent = amountToNumber(plan.amountSats, chainDecimals);
   const isAsset = !!plan.assetName;
   return {
     txid: plan.built.txid,
@@ -1019,6 +1446,17 @@ interface LiveState {
   // --- wallet phase ---------------------------------------------------------
   phase: LivePhase;
 
+  // --- app password (optional; the app-password design notes) ------------------
+  /** True when an app password is configured on this device. False for every
+   *  install that never opted in, which is what keeps the old flow intact. */
+  appPasswordSet: boolean;
+  /** True while the session holds the master key (page memory only). */
+  appUnlocked: boolean;
+  /** True when a recovery code exists on this device (the app-password design notes
+   *  §13). Only ever true alongside `appPasswordSet`: the code is a second way
+   *  to the app's master key, so there is nothing for it to open without one. */
+  recoveryCodeSet: boolean;
+
   // --- wallet data ----------------------------------------------------------
   /** Primary receive address (= addresses[0].address) — kept for back-compat. */
   address: string;
@@ -1026,15 +1464,46 @@ interface LiveState {
   addresses: ReceiveAddress[];
   /** Dynamically-detected balances aggregated across ALL addresses (EVR first). */
   assets: LiveAssetBalance[];
-  /** User-added (pinned) asset names — persisted. */
+  /** User-added (pinned) asset names — persisted. MEMBERSHIP only: a pinned
+   *  asset gets a row even at a zero balance. It has never meant "first", and
+   *  `assetOrder` below is what owns position. */
   pinnedAssets: string[];
   /** User-removed (hidden) asset names — persisted. */
   hiddenAssets: string[];
+  /** The user's own row order for the Home asset list, non-native names only,
+   *  best first — persisted PER WALLET AND PER CHAIN (the asset set is). Empty
+   *  = never arranged, so the automatic order decides everything. A name that
+   *  is no longer displayed is ignored, not resurrected (applyManualOrder). */
+  assetOrder: string[];
   txs: LiveTransaction[];
-  /** Latest USD (≈ USDT) prices for the priced assets. Absent key = no price yet.
-   *  EVR + SATORIEVR (Evrmore), RVN (Ravencoin), LTC (Litecoin), BTC (Bitcoin)
-   *  and DOGE (Dogecoin) are the only priced assets. */
-  prices: { EVR?: number; SATORIEVR?: number; RVN?: number; LTC?: number; BTC?: number; DOGE?: number };
+  /** Latest USD prices, keyed by ticker. Absent key = no price yet. NOT a closed
+   *  set: the gateway publishes whatever tickers the owner configured sources
+   *  for, so a chain added later shows fiat with no change here. */
+  prices: PriceMap;
+  /** 24h price move in PERCENT for the priced assets (2.4 = +2.4%), keyed by
+   *  asset name. Kept exactly like `prices`: an absent key means "not known",
+   *  and a failed fetch leaves the previous value in place rather than blanking
+   *  it. Only the assets whose source publishes (or lets us derive) a 24h figure
+   *  ever appear here. */
+  priceChanges24h: Partial<Record<string, number>>;
+  /** The FULL quote table as published (ticker -> { usd, eur, pln, change24h,
+   *  source }). `prices` and `priceChanges24h` are the views of it the UI reads
+   *  today; this is kept whole so a later currency switch or a "priced by"
+   *  label needs no new plumbing, and so an unknown ticker is never dropped. */
+  priceTable: Record<string, PriceQuote>;
+  /** Owner-authored notifications from the gateway, ALREADY order-sorted (lowest
+   *  first). Empty in a build with no gateway. Home picks the ones that apply to
+   *  this wallet with selectNotifications and the banner rotates through them. */
+  notifications: NotificationItem[];
+  /** Epoch ms of the last SUCCESSFUL notifications fetch (0 = never). Drives the
+   *  refetch throttle; a failed fetch leaves the list AND this untouched. */
+  notificationsFetchedAt: number;
+  /** Notifications the user dismissed, as DISMISSAL KEYS (`id@rev`, see
+   *  services/notifications.ts dismissalKey), NOT bare ids: a notice the owner
+   *  resubmits with a bumped rev is a key nobody has dismissed, so it comes back
+   *  for everyone. Persisted, global across wallets; legacy bare ids from an
+   *  older build are migrated to `id@0` when they are read. */
+  dismissedNotificationKeys: string[];
   /** Number of transactions not yet viewed in Activity (drives the tab badge). */
   unreadActivity: number;
   /** What the active wallet has already seen in Activity (persisted per wallet):
@@ -1044,10 +1513,56 @@ interface LiveState {
    *  "history too large"), so Activity is knowingly incomplete. Null when every
    *  address's history was read. Never persisted: it is re-learned every sync. */
   historyIssue: HistoryIssue | null;
+  /** True while the history source is being read (UTXO classification run or
+   *  the EVM indexer). Activity shows a loading state instead of "No
+   *  transactions yet" while this is on and nothing is listed (owner, 2026-08-19:
+   *  "for a while Activity showed nothing although it was fetching"). */
+  historyLoading: boolean;
+  /**
+   * How much further back this wallet's history source can go, for the "Load
+   * older" control on Activity (owner, live testing 2026-08-25: "there is no
+   * pagination in activities, I checked for USDT on EVM BNB").
+   *
+   * It is deliberately a THREE-state answer, because "we have not asked yet",
+   * "there is more" and "that is everything this source has" are three
+   * different things and only the last one may be shown as a full stop:
+   *   - `canLoadOlder: null`  the question has not been settled yet.
+   *   - `canLoadOlder: true`  there is another page to fetch.
+   *   - `canLoadOlder: false` the source has nothing older, OR cannot page at
+   *     all (a UTXO chain, where Electrum already served the WHOLE address
+   *     history and there is nothing left to ask for).
+   */
+  olderHistory: {
+    canLoadOlder: boolean | null;
+    /** Opaque, source-specific; never read outside the history modules. */
+    cursor: string | null;
+    loading: boolean;
+    /** Why the last "Load older" failed, in the wallet's own words. */
+    error: string | null;
+  };
   /** Locally-recorded Satori pool staking events for the active wallet (newest
    *  first; persisted per wallet). Merged into the Activity feed. */
   stakingEvents: StakingEvent[];
   network: NetworkStatus | null;
+
+  // --- EVM (family 'evm') ------------------------------------------------------
+  /** The EVM chains this build knows (EMPTY in a package built without --evm:
+   *  every EVM affordance in the UI keys off this list) and the chain the
+   *  ACTIVE EVM account is showing (null for a UTXO wallet). */
+  evm: { chains: EvmChainInfo[]; activeChainKey: string | null };
+  /** ERC-20 tokens of the ACTIVE account on the ACTIVE EVM chain, by CONTRACT:
+   *  `tracked` = added by the user (always shown, even at 0), `discovered` =
+   *  seen moving through the address by the history indexer (shown only while
+   *  the balance is above 0). Both persisted per wallet and chain. */
+  evmTokens: { tracked: EvmTrackedToken[]; discovered: EvmTrackedToken[] };
+  /** The EVM send being reviewed (built by quoteEvmSend, sent by confirmEvmSend). */
+  evmSend: EvmSendPlan | null;
+  loadingEvmSend: boolean;
+  /** Native staking on an EVM chain that has it (Epix): what the Stake screen
+   *  shows, and the action under review. `snapshot` is null before the first
+   *  read and on a chain with no staking; `plan` is the priced precompile call
+   *  waiting for the arming gate, exactly as `evmSend` is for a send. */
+  evmStaking: { snapshot: EvmStakingSnapshot | null; loading: boolean; plan: EvmStakePlan | null; planning: boolean };
 
   // --- multi-wallet ---------------------------------------------------------
   /** All wallets (metadata only — never a secret). */
@@ -1068,6 +1583,13 @@ interface LiveState {
    *  no reason to touch (servers, raw addresses, diagnostics); 'expert' shows
    *  everything. A view filter only: it never changes what the wallet does. */
   settingsMode: SettingsMode;
+  /** When true, the Home asset list leaves out every zero-balance row (the
+   *  native coin excepted — it is the chain's own coin and always shows). A
+   *  view filter only: nothing is unpinned, hidden or forgotten, and the count
+   *  of what it left out is shown under the list so it is never a silent loss. */
+  hideZeroBalances: boolean;
+  /** Privacy mode: every amount on Home reads as dots. Persisted. */
+  hideBalances: boolean;
   /** Canonical chainIds the user has hidden from the switcher and the chain
    *  picker. Presentation only: no wallet or key is affected. */
   hiddenChains: string[];
@@ -1089,6 +1611,11 @@ interface LiveState {
 
   // --- transient mnemonic (shown once after create, never persisted) ---------
   pendingMnemonic: string | null;
+  /** Whether the wallet behind `pendingMnemonic` was created WITH a BIP39
+   *  passphrase. The backup screen calls the words "the ONLY backup", which is
+   *  false and dangerous for such a wallet, so it needs to know. Only meaningful
+   *  while `pendingMnemonic` is set, and cleared everywhere that is. */
+  pendingMnemonicHasPassphrase: boolean;
 
   // --- pending send plan ----------------------------------------------------
   sendPlan: LiveSendPlan | null;
@@ -1096,6 +1623,17 @@ interface LiveState {
   // --- Satori pool staking (SATORIEVR only) ---------------------------------
   /** Live pool-staking state for the active wallet (server truth; not persisted). */
   staking: StakingState;
+
+  // --- receive-address discovery (gap-limit scan) ---------------------------
+  /** Progress + outcome of the last gap-limit scan for used receive addresses. */
+  addressScan: AddressScanState;
+  /** EVM accounts (the EVM accounts design notes): the last "discover accounts"
+   *  run on the active seed. `added` = how many new account entries the last
+   *  run created (null = no run yet / dismissed). */
+  evmAccountScan: EvmAccountScanState;
+  /** For the ACTIVE EVM chain: seedGroup -> hdIndexes known used there.
+   *  A missing group means "no data yet" (everything shows). */
+  evmAccountsOnChain: Record<string, number[] | undefined>;
 
   // --- flags ----------------------------------------------------------------
   loadingRefresh: boolean;
@@ -1118,7 +1656,16 @@ interface LiveState {
   init(): Promise<void>;
   // The optional `network` selects the wallet's chain (default 'mainnet' = Evrmore).
   // Phase-3 UI will pass it; plumbed through now so the chain reaches the service.
-  createWallet(password: string, name?: string, network?: LiveNetworkId): Promise<void>;
+  /** `passphrase` is the BIP39 passphrase (the "25th word"), the same trailing
+   *  parameter importWallet() takes and with the same meaning: part of the seed
+   *  derivation, NOT the wallet password. Empty = today's behaviour exactly. */
+  createWallet(
+    password: string,
+    name?: string,
+    /** A UTXO LiveNetworkId, or an `evm:<key>` target for ONE account that spans every EVM chain. */
+    network?: LiveNetworkId | EvmChainTarget,
+    passphrase?: string,
+  ): Promise<void>;
   clearPendingMnemonic(): void;
   /** `passphrase` is the BIP39 passphrase (the "25th word"), part of the seed
    *  derivation and NOT the wallet password. Empty = today's behaviour. */
@@ -1126,12 +1673,143 @@ interface LiveState {
     mnemonic: string,
     password: string,
     name?: string,
-    network?: LiveNetworkId,
+    network?: LiveNetworkId | EvmChainTarget,
     passphrase?: string,
   ): Promise<void>;
-  importPrivateKeyWallet(input: string, password: string, name?: string, network?: LiveNetworkId): Promise<void>;
-  unlock(password: string): Promise<boolean>;
+  importPrivateKeyWallet(
+    input: string,
+    password: string,
+    name?: string,
+    network?: LiveNetworkId | EvmChainTarget,
+  ): Promise<void>;
+  /** Point the ACTIVE EVM account at another EVM chain (persisted); the address
+   *  is unchanged, balances refresh for the new chain. No-op for a UTXO wallet. */
+  switchEvmChain(key: string): Promise<void>;
+  /** Load the ACTIVE account's tracked + discovered token lists for the ACTIVE
+   *  EVM chain (empty for a UTXO wallet). */
+  loadEvmTokens(): Promise<void>;
+  /** Fetch marks (Trust Wallet assets, PNG data URLs) for tracked tokens that
+   *  have none yet; best-effort, persisted, published to the icon registry. */
+  fetchEvmTokenLogos(): Promise<void>;
+  /** Decide, for discovered tokens not yet checked, whether they are listed
+   *  in the Trust Wallet registry (trusted: shown automatically) or not
+   *  (kept out until imported). Best-effort, persisted. */
+  checkDiscoveredEvmTokens(): Promise<void>;
+  /** Build an EVM send plan for review (fee quoted at every level, caps and
+   *  balances checked). Sets `evmSend`; returns null and sets `error` on failure. */
+  quoteEvmSend(input: EvmSendInput): Promise<EvmSendPlan | null>;
+  /** Re-price the plan under review at another level (no new quote). */
+  selectEvmFeeLevel(level: EvmFeeLevel): Promise<void>;
+  /** The largest native amount that fits with the worst-case fee at `level`, as
+   *  exact text for the amount field ('0' when nothing fits or unknown). Pass
+   *  the recipient when known: gas differs for a contract recipient, and the
+   *  quote at Review must see the same gas this figure was built with. */
+  estimateEvmMax(level?: EvmFeeLevel, to?: string): Promise<{ maxText: string; feeText: string }>;
+  /** True when the ACTIVE EVM chain has contract code at `address`
+   *  (eth_getCode), false when it is a plain account, null when the question
+   *  could not be answered (no engine, no EVM chain, RPC failure). A warning
+   *  input only: the send screens never block on it, so "unknown" must stay
+   *  distinguishable from "not a contract". Cached per chain and address. */
+  isEvmContractAddress(address: string): Promise<boolean | null>;
+  /** Sign and broadcast the plan under review (requires arm(true), exactly as
+   *  the UTXO path). Resolves with the txid and its explorer link. */
+  confirmEvmSend(): Promise<{ txid: string; explorerUrl: string; chainKey: string }>;
+  clearEvmSend(): void;
+
+  // --- EVM native staking (a chain whose registry row has `staking`) ---------
+  /** Read validators, my delegations, my unbonding entries and my rewards for
+   *  the active EVM account. Never throws: failures land in `snapshot.issue`. */
+  refreshEvmStaking(): Promise<void>;
+  /** Price one staking action for review (delegate / undelegate / redelegate /
+   *  claim). Sets `evmStaking.plan`; returns null and sets `error` on failure,
+   *  including the node's honest refusal to simulate. */
+  planEvmStake(input: EvmStakeInput): Promise<EvmStakePlan | null>;
+  /** Re-price the plan under review at another fee level (no new quote). */
+  selectEvmStakeFeeLevel(level: EvmFeeLevel): Promise<void>;
+  /** The largest amount this action can carry, as exact text: the balance minus
+   *  the worst-case fee and a margin for delegate, the exact delegation read
+   *  from the precompile for undelegate and redelegate. */
+  estimateEvmStakeMax(action: EvmStakeAction, valoper: string, level?: EvmFeeLevel): Promise<string>;
+  /** How many unbonding entries the account already has with `valoper`, or null
+   *  when unknown. The chain refuses an undelegate past its max_entries. */
+  countEvmUnbondingEntries(valoper: string): Promise<number | null>;
+  /** Sign and broadcast the staking plan under review (requires arm(true)). */
+  confirmEvmStake(): Promise<{ txid: string; explorerUrl: string; chainKey: string }>;
+  clearEvmStake(): void;
+  /** Unlock the ACTIVE wallet. `password` is that wallet's own password on a v1
+   *  vault and the APP password on a migrated one (ignored once the session
+   *  holds the master key). `opts.migrate === false` declines the transitional
+   *  move to the app password and leaves the wallet on v1. */
+  unlock(password: string, opts?: { migrate?: boolean }): Promise<boolean>;
   lock(): void;
+
+  // --- app password ---------------------------------------------------------
+  /** Unlock the APP with the app password, then open the active wallet when it
+   *  is already migrated (no second prompt) or show its own prompt when not. */
+  unlockApp(password: string): Promise<boolean>;
+  /** Set the app password for the first time. Migrates nothing. */
+  setAppPassword(password: string): Promise<{ ok: boolean; error?: string }>;
+  /** Change it: re-wrap every migrated wallet, then lock (the design's rule). */
+  changeAppPassword(oldPassword: string, newPassword: string): Promise<{ ok: boolean; error?: string }>;
+  /** After the app password is accepted: open a migrated active wallet straight
+   *  away, or fall through to its own transitional prompt when it is still v1. */
+  openActiveWalletAfterAppUnlock(): Promise<void>;
+  /** THE WAY OUT OF THE APP LOCK SCREEN (the app-password design notes §4 rule 5).
+   *  Select a wallet that is still on its own password and show that wallet's
+   *  own lock screen, so a forgotten app password never strands a wallet whose
+   *  password still works. False when every wallet has already moved over. */
+  openWithWalletPassword(): Promise<boolean>;
+  /** Back to the app lock screen from a per-wallet one (the inverse route). It
+   *  LOCKS: no seed and no master key are left behind that screen. */
+  showAppLock(): void;
+
+  // --- losing the app password (the app-password design notes §13) -------------
+  /** Make a recovery code, replacing any existing one. The code comes back ONCE
+   *  and is never retrievable again: show it, then let it go. */
+  createRecoveryCode(appPassword: string): Promise<{ ok: true; code: string } | { ok: false; error: string }>;
+  /** Drop the recovery code. Needs the app password, like making one. */
+  removeRecoveryCode(appPassword: string): Promise<{ ok: boolean; error?: string }>;
+  /** Open the app with the recovery code and set a new password in one act. */
+  unlockWithRecoveryCode(code: string, newPassword: string): Promise<{ ok: boolean; error?: string }>;
+  /** The whole store, encrypted under a password of the FILE's own. */
+  exportBackup(filePassword: string): Promise<{ ok: true; text: string; fileName: string } | { ok: false; error: string }>;
+  /** Open a backup file and describe what restoring it would do. Writes nothing. */
+  readBackupFile(text: string, filePassword: string): Promise<{ ok: true; preview: BackupPreview } | { ok: false; error: string }>;
+  /** Apply the backup that readBackupFile() decoded. */
+  applyRestore(mode: 'replace' | 'merge'): Promise<{ ok: boolean; error?: string }>;
+  /** Forget a decoded backup that was never confirmed. */
+  cancelRestore(): void;
+
+  // --- forced app-password setup (the app-password design notes §12) -----------
+  /** The recovery phrase (seed) or private key (pk) of ONE wallet that opens
+   *  with NO password, for the "back it up first" step of the forced setup. Null
+   *  for any wallet that is not in exactly that state. Reveals nothing that is
+   *  not already reachable today with nothing typed, and does NOT switch the
+   *  wallet this page is on. */
+  revealPasswordlessBackup(
+    walletId: string,
+  ): Promise<{ kind: 'seed' | 'pk'; secret: string } | null>;
+  /** Set the app password from the FORCED setup screen and move every wallet
+   *  that opens with no password onto it. Wallets with their own passwords are
+   *  not touched: they migrate lazily, each asking its own password once.
+   *  `migrated`/`kept` are wallet NAMES, for the summary the screen then shows. */
+  completeForcedAppPassword(
+    password: string,
+  ): Promise<{ ok: boolean; error?: string; migrated: string[]; kept: string[] }>;
+  /** Leave the forced setup screen once the password is set: open the active
+   *  wallet, or fall through to its own prompt when it still has a password. */
+  finishForcedAppPassword(): Promise<void>;
+  /** Turn the ACTIVE wallet's "do not ask when sending" off or on (§6).
+   *  Turning it ON switches off the pre-broadcast password check, so it costs
+   *  the current app password; turning it off is free.
+   *
+   *  `{ok:false}` with no `error` means the app password given was wrong (the
+   *  only thing the form can say about it); with an `error` it is a failure that
+   *  is not about the password, and that string is what to show instead. */
+  setNoSendPassword(
+    enabled: boolean,
+    password?: string,
+  ): Promise<{ ok: boolean; error?: string }>;
 
   // --- address book actions -------------------------------------------------
   addContact(label: string, address: string): { ok: true } | { ok: false; error: string };
@@ -1152,6 +1830,23 @@ interface LiveState {
   loadAddresses(): Promise<void>;
   /** Derive + persist one more receive address (seed wallets only). */
   addReceiveAddress(): Promise<{ ok: boolean; error?: string }>;
+  /** Gap-limit scan for receive addresses this seed has ALREADY used elsewhere,
+   *  raising the wallet's address count to cover them (never lowering it) and
+   *  refreshing balances when it found any. Requires an unlocked wallet; a 'pk'
+   *  wallet is single-address and returns found:0. Never throws — failures land
+   *  in addressScan.error and in the returned `error`. */
+  scanForUsedAddresses(): Promise<{ ok: boolean; found?: number; error?: string }>;
+  /** Add the next MetaMask-style account (next address index) on the ACTIVE,
+   *  unlocked EVM seed wallet and switch to it without locking. */
+  addEvmAccount(name?: string): Promise<{ ok: true; id: string } | { ok: false; error: string }>;
+  /** Find used accounts (balance or nonce on any configured EVM chain) on the
+   *  active EVM seed and create the missing entries up to the highest used. */
+  discoverEvmAccounts(): Promise<{ ok: boolean; added: number; error?: string }>;
+  /** Dismiss the "found N accounts" notice. */
+  clearEvmAccountScan(): void;
+  /** Load (and lazily probe) the active chain's per-seed account visibility. */
+  loadEvmAccountVisibility(): Promise<void>;
+  refreshEvmAccountsOnChain(seedGroup: string, chainKey: string): Promise<void>;
 
   // --- multi-wallet actions -------------------------------------------------
   loadWallets(): Promise<void>;
@@ -1178,12 +1873,59 @@ interface LiveState {
   revealMnemonic(password: string): Promise<string | null>;
   revealPrivateKey(password: string): Promise<string | null>;
   refresh(opts?: { silent?: boolean }): Promise<void>;
+  /**
+   * Fetch ONE page of Activity older than what is already listed, and append
+   * it (see `olderHistory`). One request per call, never two at once: the
+   * gateway rate-limits a burst, and paging must not become one. A no-op on a
+   * source that cannot go deeper, which is exactly what `canLoadOlder: false`
+   * tells the UI to say instead of showing an empty page.
+   */
+  loadOlderActivity(): Promise<void>;
   /** Fetch live USD prices and merge them into `prices` (best-effort, never throws). */
   loadPrices(): Promise<void>;
+  /** Fetch owner-authored notifications from the gateway (best-effort, never
+   *  throws). No-op on a build with no gateway; throttled to NOTIF_REFRESH_MS
+   *  unless `force` is set (Home mount forces); a failed fetch leaves the last
+   *  list. */
+  loadNotifications(opts?: { force?: boolean }): Promise<void>;
+  /** Dismiss a notification: add its DISMISSAL KEY (`id@rev`, from
+   *  services/notifications.ts dismissalKey) to the persisted set, so the banner
+   *  moves on to the next matching notice (or hides). A bare id is accepted and
+   *  read as revision 0, which is both what the old build stored and what a
+   *  notice with no `rev` parses to. */
+  dismissNotification(key: string): Promise<void>;
   startAutoRefresh(): void;
   stopAutoRefresh(): void;
   addAsset(name: string): Promise<{ ok: true } | { ok: false; error: string }>;
   removeAsset(name: string): void;
+  /** Remove SEVERAL assets from the list in one action (the list's edit mode).
+   *  Exactly what removeAsset does, in one write per storage key instead of one
+   *  per name — removeAsset itself is a call to this with a single name, so the
+   *  two can never drift apart. Protected assets in the list are ignored. */
+  removeAssets(names: readonly string[]): void;
+  /** Persist the user's manual row order for the ACTIVE wallet on the ACTIVE
+   *  chain. `names` is the full non-native display order. */
+  setAssetOrder(names: readonly string[]): void;
+  /** Read the manual row order for the active wallet + chain into state. Called
+   *  wherever either of those changes. */
+  loadAssetOrder(): Promise<void>;
+  /** Add an ERC-20 by CONTRACT ADDRESS on the active EVM chain: symbol and
+   *  decimals are read from the chain (never trusted from the input), the token
+   *  is tracked for this account and chain, and balances refresh. */
+  addEvmToken(contractAddress: string): Promise<{ ok: true } | { ok: false; error: string }>;
+  /** Import EVERY ERC-20 the active account holds on the active EVM chain (via
+   *  the provider's token index; needs a keyed provider, see `evm.chains[].alchemy`)
+   *  as tracked tokens; the user removes what they do not want. Returns how
+   *  many were added and how many the index listed without usable metadata. */
+  importEvmTokens(opts?: {
+    /** Only tokens with a Trust Wallet assets entry (a community-listed mark):
+     *  airdrop/spam tokens have none. Their marks come along for free. */
+    trustedOnly?: boolean;
+  }): Promise<{ ok: true; added: number; skipped: number; untrusted: number } | { ok: false; error: string }>;
+  /** Find tokens by name or symbol (or an address prefix) in the active EVM
+   *  chain's public token list, for the Add token field. Purely a lookup: the
+   *  caller adds a hit with addEvmToken(hit.address) like any pasted address. */
+  searchEvmTokens(query: string): Promise<{ ok: true; results: TokenSearchHit[] } | { ok: false; error: string }>;
   loadWalletAssets(): Promise<void>;
   /** Mark all current activity as seen (clears the badge); persists per wallet. */
   markActivitySeen(): void;
@@ -1206,12 +1948,23 @@ interface LiveState {
    *  [floor, ceiling] policy band, so this can never drain funds or undercut
    *  the relay floor even with a poisoned value. */
   buildSend(
+    /** The amount AS TYPED. Deliberately text, not a number: parsing it here
+     *  with the chain's own `decimals` keeps the value off a float entirely,
+     *  which is what the old parseFloat -> multiply path could not do. */
+    amountText: string,
     to: string,
-    amountDecimal: number,
     assetId: string,
     feeRateSatPerByte?: bigint,
   ): Promise<LiveSendPlan | null>;
-  estimateMaxEvr(feeRateSatPerByte?: bigint): Promise<{ maxDecimal: number; feeDecimal: number }>;
+  estimateMaxEvr(
+    feeRateSatPerByte?: bigint,
+  ): Promise<{
+    maxDecimal: number;
+    feeDecimal: number;
+    /** The same maximum as EXACT text, for putting straight into the amount
+     *  field. maxDecimal is for arithmetic and display only. */
+    maxText: string;
+  }>;
   /** Fee options for the ACTIVE chain (speed curve where the chain really has
    *  one, plus floor/ceiling/default for display and custom-rate validation).
    *  NEVER rejects: if even the service's own degraded path throws, this
@@ -1222,11 +1975,21 @@ interface LiveState {
   arm(on: boolean): void;
   broadcast(rawHex: string): Promise<string>;
   verifyPassword(password: string): Promise<boolean>;
-  changePassword(oldPassword: string, newPassword: string): Promise<boolean>;
+  /** Change the ACTIVE wallet's own password. `{ok:false}` with no `error` means
+   *  the current password was wrong (the only thing the form can say about it);
+   *  with an `error` it is a failure that is NOT about the password, and that
+   *  string is what the user must be shown instead. */
+  changePassword(
+    oldPassword: string,
+    newPassword: string,
+  ): Promise<{ ok: boolean; error?: string }>;
   setRequirePasswordToSend(on: boolean): void;
   setExplorerUrlTemplate(url: string): void;
   setAutoLockMinutes(minutes: number): void;
   setSettingsMode(mode: SettingsMode): void;
+  /** Hide (or show again) the zero-balance rows on Home. Persisted globally. */
+  setHideZeroBalances(hide: boolean): void;
+  setHideBalances(hide: boolean): void;
   /** Show or hide a chain. Refuses silently for a chain that must stay visible
    *  (see chainHideBlockedReason), so a stale UI cannot force a bad state. */
   setChainHidden(chainId: string, hidden: boolean): void;
@@ -1247,101 +2010,27 @@ function emptyStaking(): StakingState {
   return { pools: [], addressStatuses: [], loading: false, submitting: false, error: null, loaded: false };
 }
 
-/** LTC/USDT last price from the SAME CoinEx v2 spot-ticker endpoint family
- *  services/prices.ts already uses for EVR and RVN. Fetched here, self-
- *  contained, rather than plumbed through fetchPrices() there: it is a small,
- *  local addition, and api.coinex.com is already in host_permissions (EVR/RVN
- *  use it), so no manifest change is needed either. Self-caches for
- *  LTC_PRICE_CACHE_MS so the 20s auto-refresh tick doesn't hammer CoinEx on an
- *  LTC wallet -- mirrors fetchPrices()'s own cache window. Never throws;
- *  undefined on any failure (network / CORS / non-OK / malformed). */
-const LTC_TICKER_URL = 'https://api.coinex.com/v2/spot/ticker?market=LTCUSDT';
-const LTC_PRICE_CACHE_MS = 60_000;
-let ltcPriceCache: { value: number; at: number } | null = null;
-
-async function fetchLtcPrice(): Promise<number | undefined> {
-  const now = Date.now();
-  if (ltcPriceCache && now - ltcPriceCache.at < LTC_PRICE_CACHE_MS) return ltcPriceCache.value;
-  try {
-    const res = await fetch(LTC_TICKER_URL);
-    if (!res.ok) return undefined;
-    const json: unknown = await res.json();
-    if (!json || typeof json !== 'object' || (json as { code?: unknown }).code !== 0) return undefined;
-    const data = (json as { data?: unknown }).data;
-    const first = Array.isArray(data) ? (data[0] as unknown) : undefined;
-    const last = first && typeof first === 'object' ? (first as { last?: unknown }).last : undefined;
-    const n = typeof last === 'string' ? parseFloat(last) : typeof last === 'number' ? last : NaN;
-    if (!Number.isFinite(n) || n <= 0) return undefined;
-    ltcPriceCache = { value: n, at: now };
-    return n;
-  } catch {
-    return undefined;
-  }
+/** Fresh (never-run) address-scan snapshot. Reset alongside `staking` on lock /
+ *  switch / remove so one wallet's "found 3 addresses" never shows on another's. */
+export interface EvmAccountScanState {
+  scanning: boolean;
+  added: number | null;
+  error: string | null;
 }
 
-/** BTC/USDT last price, the SAME self-contained CoinEx v2 spot-ticker approach
- *  as fetchLtcPrice() above (own market, own cache, own failure handling) --
- *  api.coinex.com is already in host_permissions, so this needs no manifest
- *  change either. Endpoint verified live 2026-08-14: GET
- *  https://api.coinex.com/v2/spot/ticker?market=BTCUSDT returned {"code":0,
- *  "data":[{"market":"BTCUSDT","last":"62752",...}]} -- a real, parseable
- *  price. Never throws; undefined on any failure (network / CORS / non-OK /
- *  malformed), exactly like the LTC fetch. */
-const BTC_TICKER_URL = 'https://api.coinex.com/v2/spot/ticker?market=BTCUSDT';
-const BTC_PRICE_CACHE_MS = 60_000;
-let btcPriceCache: { value: number; at: number } | null = null;
-
-async function fetchBtcPrice(): Promise<number | undefined> {
-  const now = Date.now();
-  if (btcPriceCache && now - btcPriceCache.at < BTC_PRICE_CACHE_MS) return btcPriceCache.value;
-  try {
-    const res = await fetch(BTC_TICKER_URL);
-    if (!res.ok) return undefined;
-    const json: unknown = await res.json();
-    if (!json || typeof json !== 'object' || (json as { code?: unknown }).code !== 0) return undefined;
-    const data = (json as { data?: unknown }).data;
-    const first = Array.isArray(data) ? (data[0] as unknown) : undefined;
-    const last = first && typeof first === 'object' ? (first as { last?: unknown }).last : undefined;
-    const n = typeof last === 'string' ? parseFloat(last) : typeof last === 'number' ? last : NaN;
-    if (!Number.isFinite(n) || n <= 0) return undefined;
-    btcPriceCache = { value: n, at: now };
-    return n;
-  } catch {
-    return undefined;
-  }
+function emptyEvmAccountScan(): EvmAccountScanState {
+  return { scanning: false, added: null, error: null };
 }
 
-/** DOGE/USDT last price, the SAME self-contained CoinEx v2 spot-ticker approach
- *  as fetchLtcPrice() / fetchBtcPrice() above (own market, own cache, own
- *  failure handling) -- api.coinex.com is already in host_permissions, so this
- *  needs no manifest change either. Endpoint verified live 2026-08-15: GET
- *  https://api.coinex.com/v2/spot/ticker?market=DOGEUSDT returned {"code":0,
- *  "data":[{"market":"DOGEUSDT","last":"0.069897",...}]} -- a real, parseable
- *  price. Never throws; undefined on any failure (network / CORS / non-OK /
- *  malformed), exactly like the LTC and BTC fetches. */
-const DOGE_TICKER_URL = 'https://api.coinex.com/v2/spot/ticker?market=DOGEUSDT';
-const DOGE_PRICE_CACHE_MS = 60_000;
-let dogePriceCache: { value: number; at: number } | null = null;
-
-async function fetchDogePrice(): Promise<number | undefined> {
-  const now = Date.now();
-  if (dogePriceCache && now - dogePriceCache.at < DOGE_PRICE_CACHE_MS) return dogePriceCache.value;
-  try {
-    const res = await fetch(DOGE_TICKER_URL);
-    if (!res.ok) return undefined;
-    const json: unknown = await res.json();
-    if (!json || typeof json !== 'object' || (json as { code?: unknown }).code !== 0) return undefined;
-    const data = (json as { data?: unknown }).data;
-    const first = Array.isArray(data) ? (data[0] as unknown) : undefined;
-    const last = first && typeof first === 'object' ? (first as { last?: unknown }).last : undefined;
-    const n = typeof last === 'string' ? parseFloat(last) : typeof last === 'number' ? last : NaN;
-    if (!Number.isFinite(n) || n <= 0) return undefined;
-    dogePriceCache = { value: n, at: now };
-    return n;
-  } catch {
-    return undefined;
-  }
+function emptyAddressScan(): AddressScanState {
+  return { scanning: false, scanned: 0, result: null, error: null };
 }
+
+// PRICES: every ticker (EVR, SATORIEVR, RVN, LTC, BTC, DOGE, the EVM natives,
+// and whatever else the gateway is configured to publish) comes from ONE call
+// in services/prices.ts. The LTC/BTC/DOGE CoinEx fetchers that used to live
+// here went with it: a store build now talks to the Satori GO gateway like
+// every other build, so there is no second price path to keep in step.
 
 // Auto-refresh lives at module scope (not in state) so it never triggers a
 // re-render and survives store selector churn. Guarded so it can't stack.
@@ -1364,21 +2053,57 @@ let txSyncRun: { address: string } | null = null;
 // that is now active, so clearing is guarded by this module-level marker.
 let initialSyncAddress: string | null = null;
 
+/** The EVM chain the ACTIVE EVM account is showing, from state (pure), or null
+ *  for a UTXO wallet / a build without the engine. */
+export function activeEvmChain(state: Pick<LiveState, 'evm'>): EvmChainInfo | null {
+  const key = state.evm.activeChainKey;
+  return key ? (state.evm.chains.find((c) => c.key === key) ?? null) : null;
+}
+
+/** One nonce tracker for the session (keyed by chain and account inside),
+ *  created lazily through the flag-guarded modules on the first EVM send. */
+let evmNonces: EvmNonceTracker | null = null;
+
+/** eth_getCode answers, keyed `${chainKey}:${lowercased address}`. The send
+ *  form asks on every recipient it sees, so without this a corrected typo
+ *  re-asks the node for an address it already resolved. Only definitive
+ *  answers are cached: a failure stays uncached so the next look retries.
+ *  An address that HAS code keeps it forever (self-destruct was removed by
+ *  EIP-6780), and an address that has none can only gain some through a
+ *  deployment, which is not a change this wallet must catch mid-form. */
+const evmCodeCache = new Map<string, boolean>();
+
 export const useLiveStore = create<LiveState>((set, get) => ({
   // --- initial state --------------------------------------------------------
   phase: 'boot',
+  appPasswordSet: false,
+  appUnlocked: false,
+  recoveryCodeSet: false,
   address: '',
   addresses: [],
   assets: [],
   pinnedAssets: [],
   hiddenAssets: [],
+  assetOrder: [],
   txs: [],
   prices: {},
+  priceChanges24h: {},
+  priceTable: {},
+  notifications: [],
+  notificationsFetchedAt: 0,
+  dismissedNotificationKeys: [],
   unreadActivity: 0,
   activitySeen: emptyActivitySeen(),
   historyIssue: null,
+  historyLoading: false,
+  olderHistory: emptyOlderHistory(),
   stakingEvents: [],
   network: null,
+  evm: { chains: [], activeChainKey: null },
+  evmTokens: { tracked: [], discovered: [] },
+  evmSend: null,
+  loadingEvmSend: false,
+  evmStaking: { snapshot: null, loading: false, plan: null, planning: false },
   wallets: [],
   activeWalletId: null,
   addingWallet: false,
@@ -1386,6 +2111,8 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   explorerUrlTemplate: DEFAULT_EXPLORER_URL,
   autoLockMinutes: DEFAULT_AUTO_LOCK_MINUTES,
   settingsMode: 'basic',
+  hideZeroBalances: false,
+  hideBalances: false,
   hiddenChains: [],
   notifyDeposits: true,
   electrumServers: [...DEFAULT_ELECTRUM_SERVER_URLS],
@@ -1393,6 +2120,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   addressBook: [],
   connectedSites: [],
   pendingMnemonic: null,
+  pendingMnemonicHasPassphrase: false,
   sendPlan: null,
   staking: {
     pools: [],
@@ -1402,6 +2130,9 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     error: null,
     loaded: false,
   },
+  addressScan: emptyAddressScan(),
+  evmAccountScan: emptyEvmAccountScan(),
+  evmAccountsOnChain: {},
   loadingRefresh: false,
   loadingSend: false,
   offline: false,
@@ -1425,6 +2156,13 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     // Kick a price fetch immediately (non-blocking) — prices are independent of the
     // wallet phase, so they can start loading before any unlock/refresh happens.
     void get().loadPrices();
+    // The EVM chains this build carries (an empty list without --evm). Loaded
+    // once here so every screen can key its EVM affordances off state and never
+    // import the registry directly.
+    void loadEvmChainInfos().then((chains) => {
+      evmChainInfos = chains;
+      set((s) => ({ evm: { ...s.evm, chains } }));
+    });
     // Load the persisted pin/hide lists + live settings up-front so the first
     // refresh already reflects the user's curated set and preferences.
     const [
@@ -1436,6 +2174,9 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       addressBook,
       storedSettingsMode,
       storedHiddenChains,
+      storedHideZeroBalances,
+      storedHideBalances,
+      storedDismissedNotifs,
     ] = await Promise.all([
       readValue<boolean>(REQUIRE_PW_KEY),
       readValue<string>(EXPLORER_URL_KEY),
@@ -1445,6 +2186,9 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       readAddressBook(),
       readValue<string>(SETTINGS_MODE_KEY),
       readList(HIDDEN_CHAINS_KEY),
+      readValue<boolean>(HIDE_ZERO_BALANCES_KEY),
+      readValue<boolean>(HIDE_BALANCES_KEY),
+      readList(NOTIF_DISMISSED_KEY),
     ]);
     set({
       addressBook,
@@ -1453,6 +2197,10 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       // Default BASIC: the expert sections (servers, diagnostics, raw addresses)
       // are the ones where a wrong move costs something, so they are opt-in.
       settingsMode: storedSettingsMode === 'expert' ? 'expert' : 'basic',
+      // Default FALSE — nothing is hidden until the user asks for it. A wallet
+      // that quietly drops rows on first run would be lying about what it holds.
+      hideZeroBalances: storedHideZeroBalances === true,
+      hideBalances: storedHideBalances === true,
       // Normalised through networkFor so a stale or renamed id cannot hide a
       // chain by accident, and the two never-hideable rules are re-applied on
       // read rather than trusted from disk.
@@ -1473,6 +2221,11 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       // User-managed server pool (falls back to the built-in defaults).
       electrumServers:
         storedServers.length > 0 ? storedServers : [...DEFAULT_ELECTRUM_SERVER_URLS],
+      // Notifications the user has already dismissed (global across wallets).
+      // MIGRATED on read: a bare id written by a build from before revisions
+      // existed becomes `id@0`, so an upgrade does not bring every closed notice
+      // back. The migrated shape is written back on the next dismissal.
+      dismissedNotificationKeys: migrateDismissedKeys(storedDismissedNotifs),
     });
     // The active chain's server pool + explorer template are loaded and applied
     // by loadWallets() below (it knows the active wallet's chain), BEFORE the
@@ -1484,18 +2237,55 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       // Load THIS wallet's own pin/hide lists (per-wallet; migrates any legacy
       // global list into the active wallet exactly once).
       await get().loadWalletAssets();
+      // Is there an app password, and does this session already hold its key?
+      // FALSE on every install that never set one, and then nothing below this
+      // line differs from what it has always done.
+      const appPasswordSet = await svc.hasAppPassword();
+      set({
+        appPasswordSet,
+        appUnlocked: svc.appUnlocked(),
+        recoveryCodeSet: appPasswordSet && (await svc.hasRecoveryCode()),
+      });
+      // Does this device still have a wallet that opens with NO password, and no
+      // app password to protect it with (the app-password design notes §12)? False
+      // on every install that has neither, and then nothing below this line
+      // differs from what it has always done.
+      const forceAppPassword = exists && (await svc.appPasswordRequired());
       if (!exists) {
         set({ phase: 'onboarding' });
+      } else if (forceAppPassword) {
+        // BEFORE every other branch, deliberately, including `svc.isUnlocked()`:
+        // a page whose service already holds a seed from earlier in its own
+        // session must not walk past the screen either. This is the ONLY place
+        // the phase is entered, and the only way out of it is setting the
+        // password, so "closed the window" means "asked again at the next
+        // launch", which is what forced has to mean.
+        set({ phase: 'force-app-password' });
       } else if (svc.isUnlocked()) {
         // Wallet was already unlocked in this session (re-open).
         const address = svc.getAddress(0);
         set({ phase: 'ready', address });
         await get().loadAddresses();
         await get().refresh();
+      } else if (appPasswordSet && !svc.appUnlocked()) {
+        // §5: the app password gates the application; choosing a wallet comes
+        // after it. Nothing about any individual wallet is decided here.
+        set({ phase: 'app-locked' });
+      } else if (appPasswordSet) {
+        // The app is already open in this session (the popup was re-created but
+        // the service instance survived): go straight to the per-wallet step.
+        await get().openActiveWalletAfterAppUnlock();
       } else {
         // A passwordless active wallet has no password to ask for — auto-unlock
         // it with the empty passphrase and go straight to the ready wallet
         // instead of showing a lock screen.
+        //
+        // NARROW NOW, AND DELIBERATELY KEPT. Reaching here with a passwordless
+        // wallet means the forced-setup branch above declined, which happens
+        // only in the one damaged state where an app password CANNOT be set
+        // (§12). Opening the wallet as it has always opened is the right answer
+        // there: the alternative is a lock screen for a password that does not
+        // exist, which is the brick this whole flow is written to avoid.
         const active = get().wallets.find((w) => w.id === get().activeWalletId);
         if (active?.passwordless && (await get().unlock(''))) {
           // unlock() already advanced to `ready` and kicked a refresh.
@@ -1509,12 +2299,24 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   },
 
   // --- create ---------------------------------------------------------------
-  async createWallet(password: string, name?: string, network: LiveNetworkId = 'mainnet') {
+  async createWallet(
+    password: string,
+    name?: string,
+    network: LiveNetworkId | EvmChainTarget = 'mainnet',
+    passphrase = '',
+  ) {
     set({ error: null });
     try {
+      const evmKey = evmChainKeyOf(network);
       const { mnemonic } = await svc.create(password, {
-        network,
+        network: evmKey !== null ? 'mainnet' : (network as LiveNetworkId),
+        ...(evmKey !== null ? { family: 'evm' as const, evmChainKey: evmKey } : {}),
         ...(name?.trim() ? { name: name.trim() } : {}),
+        // Spread rather than always-present, so a create WITHOUT a passphrase
+        // hands the service the exact same options object it got before this
+        // existed. The service treats absent and '' identically; this keeps the
+        // no-passphrase path provably untouched instead of merely equivalent.
+        ...(passphrase ? { passphrase } : {}),
       });
       const address = svc.getAddress(0);
       // Stay in `onboarding` so LiveOnboarding renders the one-time recovery-phrase
@@ -1525,6 +2327,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
         address,
         addresses: [{ index: 0, address }],
         pendingMnemonic: mnemonic,
+        pendingMnemonicHasPassphrase: !!passphrase,
         assets: [],
         txs: [],
         network: null,
@@ -1545,7 +2348,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
 
   clearPendingMnemonic() {
     // The user acknowledged their backup — now enter the ready wallet.
-    set({ pendingMnemonic: null, phase: 'ready' });
+    set({ pendingMnemonic: null, pendingMnemonicHasPassphrase: false, phase: 'ready' });
   },
 
   // --- import ---------------------------------------------------------------
@@ -1553,12 +2356,20 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     mnemonic: string,
     password: string,
     name?: string,
-    network: LiveNetworkId = 'mainnet',
+    network: LiveNetworkId | EvmChainTarget = 'mainnet',
     passphrase = '',
   ) {
     set({ error: null });
     try {
-      await svc.import(mnemonic, password, network, name?.trim() || undefined, passphrase);
+      const evmKey = evmChainKeyOf(network);
+      await svc.import(
+        mnemonic,
+        password,
+        evmKey !== null ? 'mainnet' : (network as LiveNetworkId),
+        name?.trim() || undefined,
+        passphrase,
+        evmKey !== null ? { family: 'evm', evmChainKey: evmKey } : undefined,
+      );
       const address = svc.getAddress(0);
       set({
         phase: 'ready',
@@ -1570,12 +2381,35 @@ export const useLiveStore = create<LiveState>((set, get) => ({
         addingWallet: false,
         syncProgress: null,
         lastSyncAt: null,
+        addressScan: emptyAddressScan(),
+        // Staking figures belong to the account that was active a moment ago,
+        // exactly like the balances cleared above. Home now shows a staked
+        // total under the hero, so a leftover snapshot here would print another
+        // account's stake under this one's balance.
+        evmStaking: { snapshot: null, loading: false, plan: null, planning: false },
       });
       void get().loadWallets();
       void get().loadWalletAssets();
+      // IMPORT is the one moment a gap-limit scan is worth its cost: the seed
+      // may already have been used in another wallet, on addresses this one has
+      // never derived, which is exactly the "my imported wallet shows a smaller
+      // balance than I expect" case. Deliberately NOT run on unlock or on every
+      // refresh (up to GAP_LIMIT+ sequential round-trips, and several of these
+      // chains run on small volunteer servers), and NOT on create either: a
+      // freshly generated seed has no history anywhere to find.
+      //
+      // Fire-and-forget and AFTER the first balance refresh, so the common case
+      // (funds on the primary address) paints immediately and the scan only ever
+      // adds to what is already on screen. scanForUsedAddresses never throws.
       void get()
         .loadAddresses()
-        .then(() => get().refresh());
+        .then(() => get().refresh())
+        // An EVM account is ONE address, so there is no gap to scan -- but the
+        // same words may already carry Account 2, 3, ... in MetaMask, which is
+        // the EVM shape of the exact same "my imported wallet is missing funds"
+        // problem. One batched probe per chain, on import only, for the same
+        // reason (the EVM accounts design notes).
+        .then(() => (evmKey !== null ? get().discoverEvmAccounts() : get().scanForUsedAddresses()));
     } catch (err) {
       set({ error: err instanceof Error ? err.message : String(err) });
       throw err; // re-throw so the UI form can detect failure
@@ -1583,12 +2417,25 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   },
 
   // --- import a single private key (Satori-style single-address wallet) ------
-  async importPrivateKeyWallet(input: string, password: string, name?: string, network: LiveNetworkId = 'mainnet') {
+  async importPrivateKeyWallet(
+    input: string,
+    password: string,
+    name?: string,
+    network: LiveNetworkId | EvmChainTarget = 'mainnet',
+  ) {
     set({ error: null });
     try {
       // A single WIF/hex key becomes a one-address 'pk' wallet (how Satori-network
-      // wallets are generated). An empty password makes it passwordless.
-      await svc.importPrivateKey(input.trim(), password, network, name?.trim() || undefined);
+      // wallets are generated). An empty password makes it passwordless. A raw
+      // hex key on an `evm:<key>` target becomes a single-address EVM account.
+      const evmKey = evmChainKeyOf(network);
+      await svc.importPrivateKey(
+        input.trim(),
+        password,
+        evmKey !== null ? 'mainnet' : (network as LiveNetworkId),
+        name?.trim() || undefined,
+        evmKey !== null ? { family: 'evm', evmChainKey: evmKey } : undefined,
+      );
       const address = svc.getAddress(0);
       set({
         phase: 'ready',
@@ -1718,7 +2565,12 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg === 'address-limit-reached') {
-        return { ok: false, error: 'Address limit reached. This wallet already has 20 addresses.' };
+        // The number comes from the constant, so the copy cannot go stale the
+        // next time the cap moves.
+        return {
+          ok: false,
+          error: `Address limit reached. This wallet already has ${MAX_RECEIVE_ADDRESSES} addresses.`,
+        };
       }
       if (msg === 'single-address-wallet') {
         return { ok: false, error: 'This wallet uses a single fixed address.' };
@@ -1730,14 +2582,66 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     return { ok: true };
   },
 
+  async scanForUsedAddresses() {
+    // One scan at a time: it is up to a hundred sequential round-trips, and two
+    // in parallel would double that load on servers that are often one
+    // volunteer's machine, for no extra information.
+    if (get().addressScan.scanning) {
+      return { ok: false, error: 'A scan is already running.' };
+    }
+    set({ addressScan: { scanning: true, scanned: 0, result: null, error: null } });
+    try {
+      const res = await svc.discoverUsedAddresses({
+        onProgress: ({ scanned }) => {
+          set((s) => ({ addressScan: { ...s.addressScan, scanned } }));
+        },
+      });
+      const found = Math.max(0, res.addressCountAfter - res.addressCountBefore);
+      set({
+        addressScan: {
+          scanning: false,
+          scanned: res.scanned,
+          result: {
+            found,
+            addressCount: res.addressCountAfter,
+            complete: res.complete,
+            failedReads: res.failedReads,
+          },
+          error: null,
+        },
+      });
+      if (found > 0) {
+        // Only when the address set actually GREW is there anything new to
+        // fetch: a scan that found nothing leaves the wallet deriving exactly
+        // the addresses it already had, so a refresh here would be pure load.
+        await get().loadAddresses();
+        void get().refresh();
+      }
+      return { ok: true, found };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const error =
+        msg === 'Live wallet is locked'
+          ? 'Unlock this wallet before scanning.'
+          : msg === 'no-active-wallet'
+            ? 'No wallet is active.'
+            : msg;
+      set((s) => ({ addressScan: { ...s.addressScan, scanning: false, error } }));
+      return { ok: false, error };
+    }
+  },
+
   // --- unlock ---------------------------------------------------------------
-  async unlock(password: string) {
+  async unlock(password: string, opts?: { migrate?: boolean }) {
     set({ error: null });
     try {
-      const ok = await svc.unlock(password);
+      const ok = await svc.unlock(password, opts);
       if (ok) {
         const address = svc.getAddress(0);
         set({
+          // Unlocking a v1 wallet with an app password set may have just derived
+          // the master key from it (a fresh session), so re-read both flags.
+          appUnlocked: svc.appUnlocked(),
           phase: 'ready',
           address,
           addresses: [{ index: 0, address }],
@@ -1769,26 +2673,39 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     // discard its results anyway, but clear the marker so the next wallet's sync
     // can start immediately.
     txSyncRun = null;
-    svc.lock();
+    // This is the USER-FACING lock (the header lock button, the idle auto-lock),
+    // so it drops the app master key too — leaving it would let the app lock
+    // screen be walked straight past. A wallet SWITCH takes svc.lock() instead,
+    // which deliberately keeps the master key so a migrated wallet opens without
+    // asking again.
+    svc.lockApp();
     set({
-      phase: 'locked',
+      appUnlocked: false,
+      phase: get().appPasswordSet ? 'app-locked' : 'locked',
       address: '',
       addresses: [],
       assets: [],
       // Clear the previous wallet's curated tokens so nothing leaks on-screen.
       pinnedAssets: [],
       hiddenAssets: [],
+      assetOrder: [],
       txs: [],
       activitySeen: emptyActivitySeen(),
       unreadActivity: 0,
       historyIssue: null,
+      historyLoading: false,
+      olderHistory: emptyOlderHistory(),
       network: null,
       sendPlan: null,
+      evmSend: null,
+      evmStaking: { snapshot: null, loading: false, plan: null, planning: false },
+      evmTokens: { tracked: [], discovered: [] },
       error: null,
       syncing: 'idle',
       syncProgress: null,
       lastSyncAt: null,
       staking: emptyStaking(),
+      addressScan: emptyAddressScan(),
     });
   },
 
@@ -1796,22 +2713,42 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   async loadWallets() {
     try {
       const wallets = await svc.listWallets();
-      set({ wallets, activeWalletId: svc.activeWalletId() });
+      const active = wallets.find((w) => w.id === svc.activeWalletId());
+      set((s) => ({
+        wallets,
+        activeWalletId: svc.activeWalletId(),
+        // The chain the active EVM account is showing follows the wallet list.
+        evm: { ...s.evm, activeChainKey: active && walletFamily(active) === 'evm' ? (active.evmChainKey ?? null) : null },
+      }));
       // The active chain may have just changed (init / switch / unlock / create /
       // import / remove all route through here). Load THIS chain's own server pool
       // + explorer template (per-chain storage keys; Evrmore uses the legacy keys)
       // and apply the pool to the network module so the next connect uses it.
       const chainId = activeChainId();
+      // Per-chain account visibility follows the wallet list (init, switch,
+      // unlock, chain switch all route through here). Detached: it may probe.
+      void get().loadEvmAccountVisibility();
+      // The explorer follows the active TARGET (an EVM chain has its own); the
+      // Electrum pool is UTXO-only and follows the last UTXO chain.
+      const explorerChain = activeChainTarget();
       const [servers, explorer] = await Promise.all([
         readList(electrumServersStorageKey(chainId)),
-        readValue<string>(explorerKeyForChain(chainId)),
+        readValue<string>(explorerKeyForChain(explorerChain)),
       ]);
-      const serverUrls = servers.length > 0 ? servers : defaultServerUrlsFor(chainId);
+      // A pool persisted BEFORE this build has a gateway would have no bridge in
+      // it, which would quietly leave that chain talking to the public nodes
+      // direct. withGatewayBridgeUrls re-asserts it at the head (a no-op in a
+      // build with no gateway, and on the chains that have no bridge), keeping
+      // the user's own servers after it as extra fallbacks.
+      const serverUrls = withGatewayBridgeUrls(
+        servers.length > 0 ? servers : defaultServerUrlsFor(chainId),
+        chainId,
+      );
       activateServerUrls(serverUrls, chainId);
       set({
         electrumServers: serverUrls,
         explorerUrlTemplate:
-          typeof explorer === 'string' && explorer.trim() ? explorer : defaultExplorerFor(chainId),
+          typeof explorer === 'string' && explorer.trim() ? explorer : defaultExplorerFor(explorerChain),
       });
     } catch {
       // ignore — listing is best-effort
@@ -1830,38 +2767,97 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     try {
       try {
         await svc.switchWallet(id);
-      } catch {
+      } catch (err) {
+        // An unknown id means the wallet is already gone from the list the user
+        // clicked, and there is nothing to say. A write that could not land is
+        // the switch NOT HAVING HAPPENED, which this used to leave looking like
+        // it had, on a screen that then belonged to the other wallet.
+        if (isStoreWriteFailed(err)) set({ error: err.message });
         return;
       }
       get().stopAutoRefresh();
       txSyncRun = null;
+      // TWO ACCOUNTS OF ONE SEED (the EVM accounts design notes): the service kept
+      // the words in memory because the target account decrypts with the very
+      // password this session already used. So there is nothing to unlock, and
+      // the switch lands on `ready` with the new account's address instead of on
+      // a lock screen. Everything else below still resets: every piece of it
+      // belongs to the account being left.
+      let keptUnlocked = svc.isUnlocked();
+      let address = '';
+      if (keptUnlocked) {
+        try {
+          address = svc.getAddress(0);
+        } catch {
+          // Cannot derive the target account's address: lock rather than show a
+          // ready wallet with no address on it.
+          svc.lock();
+          keptUnlocked = false;
+        }
+      }
       set({
-        phase: 'locked',
-        address: '',
-        addresses: [],
+        phase: keptUnlocked ? 'ready' : 'locked',
+        // A wallet SWITCH keeps the master key on purpose (§5: choosing another
+        // migrated wallet must not ask again), so 'locked' here can mean "the
+        // app is still open". Report that honestly: LiveApp's idle auto-lock and
+        // LiveLock's Lock button both read this flag, and a stale `false` is
+        // what left the master key sitting behind a lock screen with no timer
+        // running and no way to lock it.
+        appUnlocked: svc.appUnlocked(),
+        address,
+        addresses: keptUnlocked ? [{ index: 0, address }] : [],
         assets: [],
         txs: [],
         // The badge and any history warning belong to the wallet being left.
         activitySeen: emptyActivitySeen(),
         unreadActivity: 0,
         historyIssue: null,
+        historyLoading: false,
+        olderHistory: emptyOlderHistory(),
         stakingEvents: [],
         network: null,
         sendPlan: null,
+        evmSend: null,
+        // Staking is per account AND per chain, exactly like the token lists.
+        evmStaking: { snapshot: null, loading: false, plan: null, planning: false },
+        // Token lists are per wallet AND per chain; loadWalletAssets below reads
+        // the new account's own, so the old account's must not show meanwhile.
+        evmTokens: { tracked: [], discovered: [] },
+        // Same reasoning for the manual row order (loadWalletAssets reads it).
+        assetOrder: [],
         pendingMnemonic: null,
+        pendingMnemonicHasPassphrase: false,
         addingWallet: false,
         error: null,
         syncProgress: null,
         lastSyncAt: null,
         staking: emptyStaking(),
+        addressScan: emptyAddressScan(),
       });
       await get().loadWallets();
       // Load the newly-active wallet's OWN token lists (isolated per wallet).
       await get().loadWalletAssets();
+      if (keptUnlocked) {
+        await get().loadAddresses();
+        void get().refresh();
+        return;
+      }
       // A passwordless wallet needs no password — auto-unlock it (skip the lock
       // screen) so switching to it lands straight on its ready home.
+      // A MIGRATED wallet is the same case for a different reason: the session
+      // still holds the master key (svc.lock() keeps it), so its own vault opens
+      // with nothing typed. §5: "wallet already migrated -> opens, no second
+      // prompt". A wallet still on v1 falls through to the lock screen, which
+      // shows the transitional prompt.
       const active = get().wallets.find((w) => w.id === get().activeWalletId);
-      if (active?.passwordless) {
+      if (active?.appProtected && svc.appUnlocked()) {
+        await get().unlock('');
+      } else if (active?.passwordless && !get().appPasswordSet) {
+        // ...but ONLY while there is no app password. Once there is one, opening
+        // this wallet is what moves it to the app key, and §6 requires the user
+        // to be told and allowed to decline. Falling through to the lock screen
+        // is what shows them that prompt. Caught by the live smoke, which found
+        // this branch migrating a passwordless wallet silently on a switch.
         await get().unlock('');
       }
     } finally {
@@ -1878,9 +2874,29 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   // switchWallet plumbing (lock, per-chain server pool + explorer, per-wallet
   // token lists, passwordless auto-unlock, refresh) is reused unchanged.
   async switchChain(chainId: string) {
+    const evmKey = evmChainKeyOf(chainId);
+    if (evmKey !== null) {
+      // An EVM chain: stay on the active EVM account (one address on every
+      // chain) and only change what it shows; otherwise land on the EVM
+      // account derived from the active seed, then point it at the chain.
+      if (get().wallets.length === 0) await get().loadWallets();
+      if (activeFamily() === 'evm') {
+        await get().switchEvmChain(evmKey);
+        return;
+      }
+      const target = walletOnChain(get().wallets, chainId);
+      if (!target) return; // enableChain's job (needs the password)
+      await get().switchWallet(target.id);
+      if (get().activeWalletId === target.id && svc.evmChainKey() !== evmKey) {
+        await get().switchEvmChain(evmKey);
+      }
+      return;
+    }
     // Already on this chain: nothing to do. Canonical compare, so the legacy
     // 'mainnet' alias and 'evrmore-mainnet' are correctly seen as one chain.
-    if (sameChain(activeChainId(), chainId)) return;
+    // Family first: for an active EVM account activeChainId() names an idle
+    // UTXO chain, which must not read as "already there".
+    if (activeFamily() === 'utxo' && sameChain(activeChainId(), chainId)) return;
     // The switcher may be the first thing touched after a cold open; make sure
     // we are choosing from a real list rather than an empty initial state.
     if (get().wallets.length === 0) await get().loadWallets();
@@ -1890,6 +2906,42 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     if (!target) return;
     if (target.id === get().activeWalletId) return;
     await get().switchWallet(target.id);
+  },
+
+  // --- EVM chain within the active account ------------------------------------
+  async switchEvmChain(key: string) {
+    if (activeFamily() !== 'evm') return;
+    if (svc.evmChainKey() === key) return;
+    if (!get().evm.chains.some((c) => c.key === key)) return;
+    try {
+      await svc.setEvmChainKey(key);
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : String(err) });
+      return;
+    }
+    // Same address, different chain: balances and the send under review belong
+    // to the old chain and go; the address and the wallet list stay.
+    set((s) => ({
+      evm: { ...s.evm, activeChainKey: key },
+      assets: [],
+      txs: [],
+      historyIssue: null,
+      olderHistory: emptyOlderHistory(),
+      unreadActivity: 0,
+      network: null,
+      evmSend: null,
+      evmStaking: { snapshot: null, loading: false, plan: null, planning: false },
+      // The manual row order belongs to the chain being left; the new chain's
+      // own is read below. Cleared first so the old arrangement cannot briefly
+      // reorder the new chain's rows.
+      assetOrder: [],
+      error: null,
+    }));
+    svc.allowBroadcast = false;
+    await get().loadWallets();
+    await get().loadAssetOrder();
+    await get().loadEvmTokens();
+    await get().refresh();
   },
 
   // Enable a chain the user has no wallet on yet by DERIVING one from the
@@ -1908,19 +2960,29 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     const active = wallets.find((w) => w.id === activeId) ?? wallets.find((w) => w.active);
     if (!active) return { ok: false, error: 'No wallet to derive from.' };
 
-    const target = networkFor(chainId as LiveNetworkId);
+    const targetInfo = describeChain(chainId, get().evm.chains);
+    if (!targetInfo) return { ok: false, error: 'This build does not carry that chain.' };
     // Fail CLOSED when the chain is already enabled: deriving again would create
     // a second entry with an identical address (same secret, same chain), which
-    // the user never asked for. Switching there is switchChain's job.
+    // the user never asked for. Switching there is switchChain's job. For an
+    // EVM target ANY existing EVM account already covers it (one address on
+    // every EVM chain).
     if (walletOnChain(wallets, chainId)) {
-      return { ok: false, error: `You already have a wallet on ${target.displayName}.` };
+      return {
+        ok: false,
+        error:
+          targetInfo.family === 'evm'
+            ? 'You already have an EVM account; it works on every EVM chain.'
+            : `You already have a wallet on ${targetInfo.displayName}.`,
+      };
     }
 
     // A passwordless wallet's vault is keyed by the EMPTY passphrase, and its
     // derived sibling must stay passwordless too — so the vault password is a
     // property of the source wallet, not of whatever the caller passed in.
     const pw = active.passwordless ? '' : password;
-    const name = `${baseWalletName(active)} (${target.displayName})`;
+    // An EVM account is tagged with the family, not a chain: it spans them all.
+    const name = `${baseWalletName(active)} (${targetInfo.family === 'evm' ? 'EVM' : targetInfo.displayName})`;
 
     // The ONLY variable that ever holds the plaintext. Typed nullable so it can
     // be released in `finally` (JS strings are immutable, so dropping the last
@@ -1954,9 +3016,9 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       // unlocked, reset on-screen data, load the chain's servers/explorer,
       // refresh). They throw on failure, leaving NOTHING created.
       if (active.kind === 'pk') {
-        await get().importPrivateKeyWallet(secret, pw, name, chainId as LiveNetworkId);
+        await get().importPrivateKeyWallet(secret, pw, name, chainId as LiveNetworkId | EvmChainTarget);
       } else {
-        await get().importWallet(secret, pw, name, chainId as LiveNetworkId, seedPassphrase);
+        await get().importWallet(secret, pw, name, chainId as LiveNetworkId | EvmChainTarget, seedPassphrase);
       }
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
@@ -1974,9 +3036,205 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     return { ok: true };
   },
 
+  // --- EVM accounts on one seed (the EVM accounts design notes) ----------------
+
+  // Add the next account of the active seed and land on it. The switch runs
+  // through switchWallet on purpose: the service has already made the new entry
+  // active WITHOUT locking, so switchWallet takes its kept-unlocked branch and
+  // the on-screen reset is byte-for-byte the one a same-seed switch does. One
+  // path, one behaviour, one set of tests.
+  async addEvmAccount(name?: string) {
+    try {
+      const chainKey = svc.evmChainKey();
+      const active = get().wallets.find((w) => w.id === get().activeWalletId);
+      const group = active?.seedGroup;
+      // "Add account" on a chain where some of this seed's accounts are not
+      // yet SHOWN surfaces the lowest hidden one (same entry, same address as
+      // on the other chains) instead of minting a new index; only when every
+      // existing account is already on this chain does a new index get made.
+      if (chainKey && group) {
+        const seen = get().evmAccountsOnChain[group];
+        if (seen !== undefined) {
+          const hidden = get()
+            .wallets.filter((w) => w.seedGroup === group && (w.hdIndex ?? 0) !== 0 && !seen.includes(w.hdIndex ?? 0))
+            .sort((a, b) => (a.hdIndex ?? 0) - (b.hdIndex ?? 0));
+          if (hidden.length > 0) {
+            const target = hidden[0];
+            const next = [...seen, target.hdIndex ?? 0].sort((a, b) => a - b);
+            persistValue(evmSeenKey(group, chainKey), next);
+            set((s) => ({ evmAccountsOnChain: { ...s.evmAccountsOnChain, [group]: next } }));
+            await get().switchWallet(target.id);
+            return { ok: true as const, id: target.id };
+          }
+        }
+      }
+      const { id } = await svc.addEvmAccount(name);
+      if (chainKey && group) {
+        const created = (await svc.listWallets()).find((w) => w.id === id);
+        const idx = created?.hdIndex ?? 0;
+        const seen = get().evmAccountsOnChain[group] ?? [];
+        if (!seen.includes(idx)) {
+          const next = [...seen, idx].sort((a, b) => a - b);
+          persistValue(evmSeenKey(group, chainKey), next);
+          set((s) => ({ evmAccountsOnChain: { ...s.evmAccountsOnChain, [group]: next } }));
+        }
+      }
+      await get().switchWallet(id);
+      return { ok: true as const, id };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const error =
+        msg === 'locked'
+          ? 'Unlock this wallet before adding an account.'
+          : msg === 'not-evm-seed'
+            ? 'Accounts can only be added to a wallet made from a recovery phrase on an EVM chain.'
+            : msg;
+      set({ error });
+      return { ok: false as const, error };
+    }
+  },
+
+  // Ask every configured EVM chain which of this seed's next accounts are
+  // already in use, and create the entries for the ones that are. The verdict
+  // rule and the merge live in the engine (evm/accountDiscovery.ts) so they can
+  // be tested against fixed answers; this action only supplies one batch
+  // function per chain and reports the outcome.
+  async discoverEvmAccounts() {
+    if (get().evmAccountScan.scanning) {
+      return { ok: false, added: 0, error: 'A scan is already running.' };
+    }
+    if (activeFamily() !== 'evm') {
+      return { ok: false, added: 0, error: 'This is not an EVM wallet.' };
+    }
+    const evm = await loadEvmModules();
+    if (!evm) return { ok: false, added: 0, error: 'This build has no EVM engine.' };
+    const chains = get().evm.chains;
+    set({ evmAccountScan: { scanning: true, added: null, error: null } });
+    // Set by the probe when NO chain answered: the difference between "these
+    // accounts are unused" and "nothing could be read" is the whole point.
+    let unreachable = false;
+    // Per-chain verdicts, recorded as that chain's visibility set (index 0 is
+    // always in): the switcher on BNB Chain then lists the accounts used on
+    // BNB Chain, not every account the seed has anywhere.
+    const group = get().wallets.find((w) => w.id === get().activeWalletId)?.seedGroup ?? null;
+    const probe = async (addresses: string[]): Promise<boolean[]> => {
+      const providers = await Promise.all(chains.map((c) => evmProviderFor(c.key)));
+      // One chain at a time, with a short gap: every chain is one 40-item
+      // batch, and through the gateway they all come from ONE client IP, so
+      // four chains at once tripped the per-IP burst limiter (and Alchemy's
+      // compute-units-per-second) and reported "could not reach any network".
+      // Sequential costs ~1 s more on import and stays under both limits.
+      const perChain: Array<Awaited<ReturnType<typeof evm.probeEvmAccountsUsed>> | null> = [];
+      for (let i = 0; i < chains.length; i++) {
+        const p = providers[i];
+        if (!p) {
+          perChain.push(null);
+          continue;
+        }
+        if (i > 0) await new Promise((r) => setTimeout(r, 350));
+        perChain.push(await evm.probeEvmAccountsUsed(addresses, [(calls) => p.rpc.batch(calls)]));
+      }
+      if (group) {
+        chains.forEach((c, i) => {
+          const outcome = perChain[i];
+          if (!outcome || !outcome.answered) return;
+          // Probe address k is hdIndex k+1 (discovery scans 1..MAX).
+          const seen = outcome.used.flatMap((u, k) => (u ? [k + 1] : []));
+          const withMain = [0, ...seen];
+          persistValue(evmSeenKey(group, c.key), withMain);
+          if (activeFamily() === 'evm' && svc.evmChainKey() === c.key) {
+            set((s) => ({ evmAccountsOnChain: { ...s.evmAccountsOnChain, [group]: withMain } }));
+          }
+        });
+      }
+      const answered = perChain.filter((o): o is NonNullable<typeof o> => o !== null && o.answered);
+      unreachable = answered.length === 0;
+      const used = addresses.map((_, k) => answered.some((o) => o.used[k]));
+      return used;
+    };
+    try {
+      const { added } = await svc.discoverEvmAccounts(probe);
+      if (unreachable) {
+        const error = 'Could not reach any EVM network to look for accounts.';
+        set({ evmAccountScan: { scanning: false, added: null, error } });
+        return { ok: false, added: 0, error };
+      }
+      set({ evmAccountScan: { scanning: false, added, error: null } });
+      // New entries are new wallets in the list; the active account is unchanged.
+      if (added > 0) await get().loadWallets();
+      return { ok: true, added };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const error =
+        msg === 'locked'
+          ? 'Unlock this wallet before looking for accounts.'
+          : msg === 'not-evm-seed'
+            ? 'Only a wallet made from a recovery phrase on an EVM chain has accounts to find.'
+            : msg;
+      set({ evmAccountScan: { scanning: false, added: null, error } });
+      return { ok: false, added: 0, error };
+    }
+  },
+
+  async loadEvmAccountVisibility() {
+    // UTXO chain (or no wallets): nothing to scope; clear the map.
+    const chainKey = activeFamily() === 'evm' ? svc.evmChainKey() : null;
+    if (!chainKey) {
+      if (Object.keys(get().evmAccountsOnChain).length > 0) set({ evmAccountsOnChain: {} });
+      return;
+    }
+    const groups = [...new Set(get().wallets.filter((w) => w.seedGroup).map((w) => w.seedGroup as string))];
+    const next: Record<string, number[] | undefined> = {};
+    await Promise.all(
+      groups.map(async (g) => {
+        const v = await readValue<number[]>(evmSeenKey(g, chainKey));
+        next[g] = Array.isArray(v) && v.every((n) => typeof n === 'number') ? v : undefined;
+      }),
+    );
+    if (svc.evmChainKey() !== chainKey) return;
+    set({ evmAccountsOnChain: next });
+    // A group with no record yet: ask THIS chain which of the existing
+    // accounts are used (balance or nonce), once, in the background. Until it
+    // answers everything shows (no data is not evidence of absence).
+    for (const g of groups) {
+      if (next[g] === undefined) void get().refreshEvmAccountsOnChain(g, chainKey);
+    }
+  },
+
+  /** Probe the given chain for which EXISTING accounts of `seedGroup` are used
+   *  there, and persist the answer. Creates no entries; display data only. */
+  async refreshEvmAccountsOnChain(seedGroup: string, chainKey: string) {
+    const evm = await loadEvmModules();
+    if (!evm) return;
+    const members = get()
+      .wallets.filter((w) => w.seedGroup === seedGroup && w.address)
+      .sort((a, b) => (a.hdIndex ?? 0) - (b.hdIndex ?? 0));
+    if (members.length === 0) return;
+    const provider = await evmProviderFor(chainKey);
+    if (!provider) return;
+    const outcome = await evm.probeEvmAccountsUsed(
+      members.map((w) => w.address),
+      [(calls) => provider.rpc.batch(calls)],
+    );
+    // An unanswered probe records NOTHING: better to keep showing everything
+    // than to hide accounts because a node was down.
+    if (!outcome.answered) return;
+    const seen = members.filter((_, i) => outcome.used[i]).map((w) => w.hdIndex ?? 0);
+    if (!seen.includes(0)) seen.unshift(0);
+    seen.sort((a, b) => a - b);
+    persistValue(evmSeenKey(seedGroup, chainKey), seen);
+    if (activeFamily() === 'evm' && svc.evmChainKey() === chainKey) {
+      set((s) => ({ evmAccountsOnChain: { ...s.evmAccountsOnChain, [seedGroup]: seen } }));
+    }
+  },
+
+  clearEvmAccountScan() {
+    set({ evmAccountScan: emptyEvmAccountScan() });
+  },
+
   // Show the onboarding flow in "add" mode over the still-unlocked active wallet.
   addWalletStart() {
-    set({ addingWallet: true, phase: 'onboarding', pendingMnemonic: null, error: null });
+    set({ addingWallet: true, phase: 'onboarding', pendingMnemonic: null, pendingMnemonicHasPassphrase: false, error: null });
   },
 
   // Abandon the add-wallet flow and return to the (still-unlocked) active wallet.
@@ -1984,6 +3242,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     set({
       addingWallet: false,
       pendingMnemonic: null,
+      pendingMnemonicHasPassphrase: false,
       error: null,
       phase: svc.isUnlocked() ? 'ready' : 'locked',
     });
@@ -1992,8 +3251,12 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   async renameWallet(id: string, name: string) {
     try {
       await svc.renameWallet(id, name);
-    } catch {
-      // ignore — invalid id / empty name keeps the old name
+    } catch (err) {
+      // An invalid id or an empty name genuinely keeps the old name, and saying
+      // so would be noise. A write that could not land is different: the rename
+      // did not happen, and this used to report it as done.
+      if (isStoreWriteFailed(err)) set({ error: err.message });
+      // else ignore — invalid id / empty name keeps the old name
     }
     await get().loadWallets();
   },
@@ -2014,8 +3277,18 @@ export const useLiveStore = create<LiveState>((set, get) => ({
 
     try {
       await svc.removeWallet(id);
-    } catch {
-      // ignore — unknown id is a no-op
+    } catch (err) {
+      // An unknown id is a no-op and there is nothing to say. A write that could
+      // not land means THE WALLET IS STILL THERE, so everything below is wrong
+      // for it: it reported the removal as done and then reclaimed the caches of
+      // a wallet that still exists (caches only, rebuilt on the next sync, but
+      // it is still work thrown away for something that did not happen).
+      if (isStoreWriteFailed(err)) {
+        set({ error: err.message });
+        await get().loadWallets();
+        return;
+      }
+      // else ignore — unknown id is a no-op
     }
 
     const wallets = await svc.listWallets();
@@ -2037,6 +3310,10 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       const addresses = Array.from(doomedAddresses).filter((a) => !kept.has(a));
       if (addresses.length > 0) {
         await clearTransactionCaches({ chainIds: chainIdAliases(doomed.network), addresses });
+        // The saved balance rows for those addresses go with them. Swept by
+        // address on every chain: one EVM account is the same address on all of
+        // them, so a per-chain sweep would leave entries behind.
+        await clearBalanceCaches(addresses);
       }
     }
 
@@ -2046,6 +3323,11 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       txSyncRun = null;
       set({
         phase: 'onboarding',
+        // The service dropped the app-password record with the last wallet (an
+        // app password with no wallets to open is only a lock on the next
+        // wallet the user creates), so the UI must stop believing in one.
+        appPasswordSet: false,
+        appUnlocked: false,
         wallets: [],
         activeWalletId: null,
         address: '',
@@ -2055,16 +3337,20 @@ export const useLiveStore = create<LiveState>((set, get) => ({
         activitySeen: emptyActivitySeen(),
         unreadActivity: 0,
         historyIssue: null,
+        historyLoading: false,
+        olderHistory: emptyOlderHistory(),
         stakingEvents: [],
         network: null,
         sendPlan: null,
         pendingMnemonic: null,
+        pendingMnemonicHasPassphrase: false,
         addingWallet: false,
         error: null,
         syncing: 'idle',
         syncProgress: null,
         lastSyncAt: null,
         staking: emptyStaking(),
+        addressScan: emptyAddressScan(),
       });
       return;
     }
@@ -2083,15 +3369,19 @@ export const useLiveStore = create<LiveState>((set, get) => ({
         activitySeen: emptyActivitySeen(),
         unreadActivity: 0,
         historyIssue: null,
+        historyLoading: false,
+        olderHistory: emptyOlderHistory(),
         stakingEvents: [],
         network: null,
         sendPlan: null,
         pendingMnemonic: null,
+        pendingMnemonicHasPassphrase: false,
         error: null,
         syncing: 'idle',
         syncProgress: null,
         lastSyncAt: null,
         staking: emptyStaking(),
+        addressScan: emptyAddressScan(),
       });
     }
     set({ wallets, activeWalletId: svc.activeWalletId() });
@@ -2122,6 +3412,182 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     if (!address) return;
     const silent = opts?.silent === true;
     if (!silent) set({ loadingRefresh: true, error: null });
+
+    // LAST KNOWN BALANCES FIRST (owner, 2026-08-25: "not all the tokens that
+    // were there always load, sometimes only the one main coin"). The popup is
+    // a fresh page every time it opens, so `assets` starts EMPTY and every
+    // "keep what we had" fallback below was keeping nothing on the first read
+    // of a session: one 429 from the gateway and the list collapsed to the
+    // single synthesized native row. The saved rows are put on screen before
+    // the network is asked, exactly as the tx cache already does for Activity,
+    // so a failed read now leaves the tokens where they were.
+    //
+    // `balanceCacheChain` doubles as the CHAIN half of the staleness guard
+    // below. Every commit in this function used to check the address alone,
+    // which is enough on UTXO (a chain switch there switches wallets) but not
+    // on EVM: one EVM account is the SAME address on every chain, so a read
+    // still in flight when the user switched chains passed the address check
+    // and landed the old chain's balances on the new chain's screen.
+    const balanceCacheChain = activeChainTarget();
+    const stillCurrent = () => get().address === address && activeChainTarget() === balanceCacheChain;
+    if (get().assets.length === 0) {
+      void loadBalanceCache(balanceCacheChain, address).then((cached) => {
+        if (!cached) return;
+        // Only while nothing better has landed: a read that finished first
+        // must never be overwritten by the cache behind it.
+        if (!stillCurrent() || get().assets.length > 0) return;
+        set({ assets: cached.rows });
+      });
+    }
+
+    // FAMILY FIRST. An EVM account is one address across every EVM chain and is
+    // read over JSON-RPC (src/store/evmBalances.ts), never over Electrum: none
+    // of the UTXO machinery below (address scan, UTXO balances, tx cache) has a
+    // meaning for it. Absent family = utxo, so every existing wallet takes the
+    // path it always took. History for EVM arrives in phase 4; until then an
+    // EVM refresh is balances + network status only, and `txs` is left alone.
+    // Asked of the SERVICE, not of `wallets` in state: the summaries load
+    // asynchronously and a refresh fired right after create/import/unlock must
+    // not race them into the UTXO path.
+    if (activeFamily() === 'evm') {
+      const chainKey = svc.evmChainKey() ?? undefined;
+      const { tracked, discovered } = get().evmTokens;
+      // The main read: native + default + user-tracked tokens (a short list).
+      // Discovered tokens are read afterwards, best-effort and chunked.
+      const result = await refreshEvmWallet(address, chainKey, tracked);
+      // A wallet OR chain switch mid-flight must not clobber the new state
+      // (see stillCurrent above: the address alone cannot tell EVM chains
+      // apart, because the account is the same address on all of them).
+      if (!stillCurrent()) return;
+      if (!result) {
+        // This build carries no EVM engine (flag off): the account cannot be
+        // read here. Offline is the honest state; nothing else is touched.
+        set({ loadingRefresh: false, offline: true });
+        return;
+      }
+      const ok = result.network.state !== 'offline' && result.assets !== null;
+      // Discovered tokens (seen by the indexer, never added by the user): a
+      // separate, chunked, best-effort read; shown automatically ONLY when
+      // TRUSTED (listed in the Trust Wallet registry) and holding a balance.
+      // Airdrop/spam contracts also move through an address, and without the
+      // trust check they filled the list with tokens the user never asked for
+      // (owner, 2026-08-19: "Chinese tokens keep appearing"). Untrusted ones
+      // stay remembered for "Import all". Tracked and default tokens always
+      // show. Skips contracts the user tracks or the chain lists by default.
+      let discoveredRows: LiveAssetBalance[] = [];
+      // A discovered token whose balance did not answer is MISSING from the
+      // rows, not known to be gone: tracked separately so the merge below can
+      // keep its last figure rather than dropping the row.
+      let discoveredComplete = true;
+      if (ok && discovered.length > 0) {
+        const mainAddrs = new Set([
+          ...tracked.map((t) => t.address.toLowerCase()),
+          ...(activeEvmChain(get())?.defaultTokens ?? []).map((t) => t.address.toLowerCase()),
+        ]);
+        const extra = discovered.filter((d) => d.trusted === true && !mainAddrs.has(d.address.toLowerCase()));
+        const read = await readEvmDiscoveredBalances(address, chainKey, extra);
+        discoveredRows = read.rows.filter((r) => r.amountBase > 0n);
+        discoveredComplete = read.complete;
+        if (!stillCurrent()) return;
+        // Trust check for discovered tokens not yet checked (best-effort,
+        // detached): the mark fetch doubles as the listing check.
+        if (discovered.some((d) => d.trusted === undefined)) void get().checkDiscoveredEvmTokens();
+      }
+      // THE RULE: a failed or partial read never blanks a token the wallet
+      // already knew about (src/store/balanceCache.ts). `complete` says whether
+      // this read is authoritative about every asset it was asked for; only
+      // then does a missing row mean the balance is gone.
+      const complete = result.complete && discoveredComplete;
+      const nextAssets = result.assets
+        ? mergeBalanceRows(get().assets, [...result.assets, ...discoveredRows], complete)
+        : get().assets;
+      set({
+        loadingRefresh: false,
+        offline: !ok,
+        network: result.network,
+        assets: nextAssets,
+        // Balances are the sync on this family; a successful read is "Synced".
+        ...(ok ? { lastSyncAt: Date.now() } : {}),
+      });
+      // Save what is on screen so the next popup opens with it, even if that
+      // open is answered with a 429. Only when the read actually answered:
+      // persisting a list built entirely from the cache would just rewrite it.
+      if (ok && result.assets) void saveBalanceCache(balanceCacheChain, address, nextAssets);
+      // History (phase 4): the indexer, when the chain has one, else the honest
+      // "cannot list" notice. Detached, like the UTXO classification: it must
+      // never gate the balance appearing. Local pending sends ride on top and
+      // retire when the indexer reports them.
+      const chain = activeEvmChain(get());
+      const historyKey = `${chain?.key ?? ''}:${address.toLowerCase()}`;
+      const historyDue =
+        !silent || Date.now() - (evmHistoryAskedAt.get(historyKey) ?? 0) >= EVM_HISTORY_MIN_INTERVAL_MS;
+      if (chain && historyDue) {
+        evmHistoryAskedAt.set(historyKey, Date.now());
+        set({ historyLoading: true });
+        // Saved history first: a fresh popup or a just-switched account shows
+        // what the indexer last answered at once, and the incremental read
+        // below only adds to it. Skipped when rows are already on screen.
+        if (get().txs.length === 0) {
+          void loadEvmHistoryCache(chain.key, address).then((cached) => {
+            if (!cached || cached.rows.length === 0) return;
+            if (!stillCurrent() || get().txs.length > 0) return;
+            set({ txs: withLocalPending(address, cached.rows), unreadActivity: countUnread(cached.rows, get().activitySeen) });
+          });
+        }
+        void refreshEvmHistory(chain, address, result.network.blockHeight || undefined).then((history) => {
+          if (stillCurrent()) set({ historyLoading: false });
+          if (!history || !stillCurrent()) return;
+          const next: Partial<LiveState> = {
+            historyIssue: history.issue
+              ? { address, message: history.issue.message, serverMessage: history.issue.detail }
+              : null,
+          };
+          if (history.txs !== null) {
+            // Older pages the user asked for live in memory only, so a refresh
+            // that replaced `txs` outright would silently undo every "Load
+            // older" click. Once any has been made, the fresh newest page is
+            // MERGED over what is on screen instead (fresh wins on identity,
+            // exactly as it does over the saved cache).
+            const pagedBack = get().olderHistory.cursor !== null;
+            const rows = pagedBack
+              ? mergeEvmHistory(get().txs, history.txs, EVM_HISTORY_IN_MEMORY_MAX_ROWS)
+              : history.txs;
+            next.txs = withLocalPending(address, rows);
+            next.unreadActivity = countUnread(rows, get().activitySeen);
+            // Can this account go further back than the page just read? The
+            // source knows only by being asked, so what is settled here is the
+            // CAPABILITY: a chain with a history source can be paged, a chain
+            // without one cannot and says so instead of offering the control.
+            // A click that comes back with no cursor turns this to false.
+            if (get().olderHistory.canLoadOlder === null) {
+              const pageable = chain.alchemy || chain.indexer !== null;
+              next.olderHistory = { ...get().olderHistory, canLoadOlder: pageable && rows.length > 0 };
+            }
+          }
+          set(next);
+          // Token discovery: contracts the indexer saw move through this
+          // address that the wallet does not know yet. Persist them and read
+          // their balances now, so a token that arrived shows without anyone
+          // having to type its contract address.
+          const id = svc.activeWalletId();
+          if (id && chainKey && history.tokensSeen.length > 0) {
+            const known = new Set(
+              [...get().evmTokens.tracked, ...get().evmTokens.discovered].map((t) => t.address.toLowerCase()),
+            );
+            const fresh = history.tokensSeen.filter((t) => !known.has(t.address.toLowerCase()));
+            if (fresh.length > 0) {
+              // Newest first, capped: an address that collected fifty airdrop
+              // contracts does not need fifty balanceOf calls per refresh.
+              const discoveredNext = [...fresh, ...get().evmTokens.discovered].slice(0, MAX_DISCOVERED_EVM_TOKENS);
+              persistValue(evmDiscoveredKey(id, chainKey), discoveredNext);
+              set((s) => ({ evmTokens: { ...s.evmTokens, discovered: discoveredNext } }));
+              void get().refresh({ silent: true });
+            }
+          }
+        });
+      }
+      return;
+    }
 
     // Every derived receive address of the active wallet — balances and activity
     // are aggregated across all of them (falls back to the primary alone until
@@ -2197,14 +3663,20 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       }
 
       const netOk = networkStatus.status === 'fulfilled';
+      // Electrum answers a balance read whole or not at all (one rejected
+      // address rejects the Promise.all above), so a FULFILLED read here is
+      // always complete: it may drop a token, and that is the truth about it.
+      const nextAssets = assets.status === 'fulfilled' ? assets.value : get().assets;
       set({
         loadingRefresh: false,
         // A balances rejection still marks the wallet offline (as before); a
         // tx-sync failure alone never does (handled in the background block).
         offline: !netOk || networkStatus.value.state === 'offline' || assets.status === 'rejected',
         network: netOk ? networkStatus.value : get().network,
-        assets: assets.status === 'fulfilled' ? assets.value : get().assets,
+        assets: nextAssets,
       });
+      // Saved for the next cold open, exactly as on the EVM path above.
+      if (assets.status === 'fulfilled') void saveBalanceCache(balanceCacheChain, address, nextAssets);
     } catch {
       clearInitial();
       if (get().address !== address) return;
@@ -2219,6 +3691,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     if (txSyncRun?.address === address) return;
     const run = { address };
     txSyncRun = run;
+    set({ historyLoading: true });
 
     // Per-address classification progress, summed for a single overall bar.
     const progressByAddr = new Map<string, { done: number; total: number }>();
@@ -2274,6 +3747,13 @@ export const useLiveStore = create<LiveState>((set, get) => ({
           unreadActivity: countUnread(nextTxs, get().activitySeen),
           lastSyncAt: Date.now(),
           syncProgress: null,
+          // NOTHING OLDER EXISTS on this family. Electrum's
+          // blockchain.scripthash.get_history answers with the address's WHOLE
+          // history in one call (a server that will not is the
+          // AddressHistoryRefusedError above, not a page boundary), and this
+          // run classified all of it. So Activity here is complete and the UI
+          // says so, rather than offering a "Load older" that has nowhere to go.
+          olderHistory: { canLoadOlder: false, cursor: null, loading: false, error: null },
           // Clear the warning ONLY when every address answered. A run where some
           // address was merely unreachable proves nothing about the refusal, so
           // the existing warning stands rather than flickering off and back on.
@@ -2295,9 +3775,85 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       } finally {
         // Only clear the marker if it still points at THIS run (a wallet switch
         // or lock/unlock cycle may have started a newer sync that now owns it).
-        if (txSyncRun === run) txSyncRun = null;
+        if (txSyncRun === run) {
+          txSyncRun = null;
+          set({ historyLoading: false });
+        }
       }
     })();
+  },
+
+  // --- older Activity -------------------------------------------------------
+  //
+  // "There is no pagination in activities, I checked for USDT on EVM BNB"
+  // (owner, live testing 2026-08-25). Verified live against the gateway the
+  // same day for his address on BNB Chain: the newest page is 100 transfers
+  // per direction and the API had a second page of 100 more, reaching back
+  // from block 109,745,356 to 34,208,015. All of it existed; none of it was
+  // reachable, because nothing ever asked for a second page.
+  //
+  // ONE request per click, never two at once, and the answer is honest in both
+  // directions: a page that comes back with no cursor sets `canLoadOlder` to
+  // false, which is what makes the UI say "that is the whole history" rather
+  // than keep offering a button that returns nothing.
+  async loadOlderActivity() {
+    const { address, olderHistory } = get();
+    if (!address) return;
+    // Rate-limit discipline: one page in flight at a time, and nothing at all
+    // once the source has said it has no more.
+    if (olderHistory.loading || olderHistory.canLoadOlder === false) return;
+
+    if (activeFamily() !== 'evm') {
+      // A UTXO chain has already served everything (see the sync commit
+      // above). Settling the flag here too keeps the control correct even if
+      // it is reached before the first sync has finished.
+      set((s) => ({ olderHistory: { ...s.olderHistory, canLoadOlder: false, loading: false, error: null } }));
+      return;
+    }
+
+    const chain = activeEvmChain(get());
+    if (!chain) return;
+    const chainTarget = activeChainTarget();
+    const stillCurrent = () => get().address === address && activeChainTarget() === chainTarget;
+    set((s) => ({ olderHistory: { ...s.olderHistory, loading: true, error: null } }));
+    // The oldest CONFIRMED block on screen. It starts the first page below what
+    // the wallet already holds, so the first click adds rows rather than
+    // re-serving the ones in front of the user. Pending rows have no height and
+    // are skipped.
+    const heights = get()
+      .txs.map((t) => t.blockHeight)
+      .filter((h): h is number => typeof h === 'number' && h > 0);
+    const result = await loadOlderEvmHistory(
+      chain,
+      address,
+      olderHistory.cursor ?? undefined,
+      get().network?.blockHeight || undefined,
+      heights.length > 0 ? Math.min(...heights) : undefined,
+    );
+    if (!stillCurrent()) return;
+    if (!result) {
+      // No EVM engine in this build: there is nothing to page.
+      set((s) => ({ olderHistory: { ...s.olderHistory, loading: false, canLoadOlder: false } }));
+      return;
+    }
+    if (result.rows === null) {
+      // The read failed. The cursor is untouched, so a retry resumes rather
+      // than starting over, and the rows on screen are left alone.
+      set((s) => ({
+        olderHistory: { ...s.olderHistory, loading: false, error: result.issue?.message ?? null },
+      }));
+      return;
+    }
+    // Older rows are APPENDED to what is on screen (mergeEvmHistory dedupes:
+    // the first older page deliberately overlaps the newest one, which is how
+    // the source's own cursor is obtained). They are NOT written to the
+    // history cache: paging back through years of transfers must not grow the
+    // extension's stored footprint, so they last for the session.
+    const merged = mergeEvmHistory(get().txs, result.rows, EVM_HISTORY_IN_MEMORY_MAX_ROWS);
+    set({
+      txs: withLocalPending(address, merged),
+      olderHistory: { canLoadOlder: result.hasMore, cursor: result.cursor, loading: false, error: null },
+    });
   },
 
   // --- prices ---------------------------------------------------------------
@@ -2307,36 +3863,70 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   // 60s, so calling this on every auto-refresh tick still fetches at most once/min.
   async loadPrices() {
     try {
-      // Only fetch the RVN/LTC/BTC/DOGE price when that wallet is active — other
-      // users add no extra ticker chatter. Merge so an asset whose fetch failed
-      // keeps its previous value. LTC, BTC and DOGE are fetched locally
-      // (fetchLtcPrice / fetchBtcPrice / fetchDogePrice, above) rather than
-      // through fetchPrices() — see their comments for why.
+      // ONE call. A gateway build gets every configured ticker back in a single
+      // document; a dev build with no gateway falls back to the direct sources
+      // and only asks for the optional ticker the ACTIVE chain needs, so a user
+      // who never touches RVN/LTC/BTC/DOGE adds no ticker chatter there.
       const ticker = nativeTickerFor();
-      const includeRvn = ticker === 'RVN';
-      const includeLtc = ticker === 'LTC';
-      const includeBtc = ticker === 'BTC';
-      const includeDoge = ticker === 'DOGE';
-      const [next, ltc, btc, doge] = await Promise.all([
-        fetchPrices({ includeRvn }),
-        includeLtc ? fetchLtcPrice() : Promise.resolve<number | undefined>(undefined),
-        includeBtc ? fetchBtcPrice() : Promise.resolve<number | undefined>(undefined),
-        includeDoge ? fetchDogePrice() : Promise.resolve<number | undefined>(undefined),
-      ]);
-      const prev = get().prices;
-      set({
-        prices: {
-          EVR: next.EVR ?? prev.EVR,
-          SATORIEVR: next.SATORIEVR ?? prev.SATORIEVR,
-          RVN: next.RVN ?? prev.RVN,
-          LTC: ltc ?? prev.LTC,
-          BTC: btc ?? prev.BTC,
-          DOGE: doge ?? prev.DOGE,
-        },
+      const next = await fetchPrices({
+        includeRvn: ticker === 'RVN',
+        includeLtc: ticker === 'LTC',
+        includeBtc: ticker === 'BTC',
+        includeDoge: ticker === 'DOGE',
       });
+      // MERGE, never replace: a ticker this round could not fill keeps whatever
+      // was on screen, so a transient blip never blanks a price or makes a
+      // change chip flicker away. Driven by the quote TABLE, not a fixed field
+      // list, so a ticker the gateway starts publishing needs no code here.
+      const prices: PriceMap = { ...get().prices };
+      const priceTable: Record<string, PriceQuote> = { ...get().priceTable };
+      const priceChanges24h = { ...get().priceChanges24h, ...next.changes24h };
+      for (const [name, quote] of Object.entries(next.quotes)) {
+        priceTable[name] = { ...priceTable[name], ...quote };
+        if (quote.usd !== undefined) prices[name] = quote.usd;
+      }
+      set({ prices, priceTable, priceChanges24h });
     } catch {
       // ignore — prices are decorative; never surface as a wallet error
     }
+  },
+
+  // --- notifications --------------------------------------------------------
+  // Owner-authored notices from the gateway. Best-effort, exactly like prices:
+  // never blocks or breaks a wallet flow. A build with NO gateway makes no
+  // request and has no notifications at all (HAS_GATEWAY folds to a literal, so
+  // the fetch code is dropped from that bundle).
+  async loadNotifications(opts) {
+    // Dev build: no gateway, no request, no notifications. Guarding here (not
+    // only in the service) is what the "non-gateway build never fetches" test
+    // pins — the store never even reaches the fetch.
+    if (!HAS_GATEWAY) return;
+    // Throttle: the auto-refresh tick fires every 20s, but a notice changes
+    // rarely and the gateway caches, so refetch at most once per NOTIF_REFRESH_MS
+    // (60s). `force` bypasses it: Home mount forces, so opening the popup right
+    // after the owner edits a notice shows the change at once.
+    if (!opts?.force && Date.now() - get().notificationsFetchedAt < NOTIF_REFRESH_MS) return;
+    const res = await fetchNotificationsResult();
+    // Only a SUCCESSFUL fetch replaces the list (and stamps the throttle clock):
+    // a transient failure leaves the last list on screen rather than blanking
+    // the banner.
+    if (res.ok) set({ notifications: res.notifications, notificationsFetchedAt: Date.now() });
+  },
+
+  async dismissNotification(key) {
+    // Normalised so a caller that still hands over a bare id (and every entry
+    // already in state) is recorded in the one `id@rev` format the selection
+    // compares against.
+    const entry = normalizeDismissalKey(key);
+    const current = get().dismissedNotificationKeys;
+    if (current.includes(entry)) return;
+    // Bounded (MAX_DISMISSED_KEYS, oldest dropped): every entry is a string the
+    // feed chose, and this list used to grow forever.
+    const next = capDismissedKeys([...current, entry]);
+    set({ dismissedNotificationKeys: next });
+    // This write is also what persists the migration: `current` is already the
+    // migrated list, so the legacy bare ids are replaced on disk here.
+    persistValue(NOTIF_DISMISSED_KEY, next);
   },
 
   // --- auto-refresh ---------------------------------------------------------
@@ -2344,8 +3934,16 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     if (autoRefreshTimer !== null) return; // already running — don't stack
     if (typeof setInterval === 'undefined') return; // non-DOM env guard
     autoRefreshTimer = setInterval(() => {
+      // A hidden page (a detached window behind others, a background tab) has
+      // nobody looking: skip the tick rather than spend metered provider calls
+      // and public-node goodwill on a screen no one sees. The next visible tick
+      // refreshes as usual.
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
       // Piggyback the price refresh on the poll tick (self-throttled to 60s).
       void get().loadPrices();
+      // Notifications ride the same tick (self-throttled to NOTIF_REFRESH_MS,
+      // and a no-op on a build with no gateway).
+      void get().loadNotifications();
       if (silentRefreshInFlight) return; // don't overlap slow polls
       silentRefreshInFlight = true;
       void get()
@@ -2366,6 +3964,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   // --- add / remove asset (MetaMask-style pin/hide) -------------------------
   async addAsset(name: string) {
     const nativeTicker = nativeTickerFor();
+    if (activeFamily() === 'evm') return get().addEvmToken(name);
     // Refuse outright on a chain with no asset protocol (e.g. Bitcoin Gold):
     // the UI already hides the "Add token" action, but the store refuses too
     // in case it is ever reached another way (same belt-and-suspenders pattern
@@ -2404,21 +4003,213 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     return { ok: true };
   },
 
-  removeAsset(name: string) {
-    const normalized = name.trim().toUpperCase();
-    // The active chain's protected assets are never removable (Evrmore: EVR +
-    // SATORIEVR; Ravencoin: RVN). The UI hides their remove controls; this refuses
-    // the call regardless.
-    if (!normalized || !isRemovableAsset(normalized, activeChainId())) return;
+  async addEvmToken(contractAddress: string) {
+    const chain = activeEvmChain(get());
     const id = svc.activeWalletId();
+    if (!chain || !id || activeFamily() !== 'evm') {
+      return { ok: false as const, error: 'The active wallet is not an EVM account.' };
+    }
+    const evm = await loadEvmModules();
+    const provider = await evmProviderFor(chain.key);
+    if (!evm || !provider) return { ok: false as const, error: 'This build of Satori GO has no EVM engine.' };
+    const input = contractAddress.trim();
+    if (!evm.isEvmAddress(input)) {
+      return {
+        ok: false as const,
+        error: 'Enter the token contract address: 0x followed by 40 hex characters (mixed case must carry a valid checksum).',
+      };
+    }
+    const address = evm.normalizeEvmAddress(input);
+    if (chain.defaultTokens.some((t) => t.address.toLowerCase() === address.toLowerCase())) {
+      return { ok: false as const, error: 'That token is already shown by default.' };
+    }
+    let ref: { address: string; symbol: string; decimals: number } | null;
+    try {
+      const resolved = await provider.resolveToken(address);
+      ref = resolved && resolved.symbol && resolved.decimals !== undefined
+        ? { address: resolved.address, symbol: resolved.symbol, decimals: resolved.decimals }
+        : null;
+    } catch {
+      return { ok: false as const, error: `${chain.displayName} is unreachable right now; try again.` };
+    }
+    if (!ref) {
+      return { ok: false as const, error: `No ERC-20 token answers at ${address} on ${chain.displayName}.` };
+    }
+    const { tracked, discovered } = get().evmTokens;
+    const nextTracked = tracked.some((t) => t.address.toLowerCase() === ref.address.toLowerCase())
+      ? tracked
+      : [...tracked, ref];
+    persistValue(evmTrackedKey(id, chain.key), nextTracked);
+    // A user-added token is shown even at 0, and un-hidden if it was hidden by symbol.
+    const nextHidden = get().hiddenAssets.filter((n) => n !== ref.symbol.toUpperCase() && n !== ref.symbol);
+    persistList(hiddenKey(id), nextHidden);
+    set({ evmTokens: { tracked: nextTracked, discovered }, hiddenAssets: nextHidden });
+    setTokenLogos(nextTracked);
+    void get().fetchEvmTokenLogos();
+    await get().refresh();
+    return { ok: true as const };
+  },
+
+  async searchEvmTokens(query: string) {
+    const chain = activeEvmChain(get());
+    if (!chain || activeFamily() !== 'evm') {
+      return { ok: false as const, error: 'The active wallet is not an EVM account.' };
+    }
+    if (!chain.tokenListSlug) return { ok: false as const, error: 'No token list for this chain' };
+    const evm = await loadEvmModules();
+    if (!evm) return { ok: false as const, error: 'This build of Satori GO has no EVM engine.' };
+    const list = await evm.fetchTokenList(chain.tokenListSlug);
+    if (!list.ok) return { ok: false as const, error: list.error };
+    return { ok: true as const, results: evm.searchTokenList(list.entries, query) };
+  },
+
+  async importEvmTokens(opts?: { trustedOnly?: boolean }) {
+    const chain = activeEvmChain(get());
+    const id = svc.activeWalletId();
+    const address = get().address;
+    if (!chain || !id || !address || activeFamily() !== 'evm') {
+      return { ok: false as const, error: 'The active wallet is not an EVM account.' };
+    }
+    if (!chain.alchemy) {
+      return {
+        ok: false as const,
+        error: `Importing tokens on ${chain.displayName} needs a token index this build's endpoint does not offer; add tokens by contract address instead.`,
+      };
+    }
+    const evm = await loadEvmModules();
+    const provider = await evmProviderFor(chain.key);
+    if (!evm || !provider) return { ok: false as const, error: 'This build of Satori GO has no EVM engine.' };
+    let held: { tokens: Array<{ address: string; symbol: string; decimals: number }>; skipped: number };
+    try {
+      held = await evm.listHeldTokens(provider.rpc, address);
+    } catch (err) {
+      const reason = err instanceof evm.EvmTokenApiError ? err.reason : 'unavailable';
+      const text =
+        reason === 'unsupported'
+          ? `Importing tokens on ${chain.displayName} needs a token index this build's endpoint does not offer; add tokens by contract address instead.`
+          : reason === 'rate-limited'
+            ? `${chain.displayName} token index is rate-limiting this wallet; try again in a moment.`
+            : `${chain.displayName} token index is unreachable right now; try again.`;
+      return { ok: false as const, error: text };
+    }
+    const defaults = new Set(chain.defaultTokens.map((t) => t.address.toLowerCase()));
+    const { tracked, discovered } = get().evmTokens;
+    const known = new Set(tracked.map((t) => t.address.toLowerCase()));
+    let fresh: EvmTrackedToken[] = held.tokens
+      .filter((t) => !defaults.has(t.address.toLowerCase()) && !known.has(t.address.toLowerCase()))
+      .map((t) => ({ address: t.address, symbol: t.symbol, decimals: t.decimals }));
+    let untrusted = 0;
+    if (opts?.trustedOnly) {
+      // "Trusted" here means exactly what the unlisted badge means everywhere
+      // else: the wallet is willing to vouch for the token under the rule in
+      // evm/tokenTrust.ts. Importing on a weaker test than the one the warning
+      // uses is how a button ends up adding tokens its own UI then warns about.
+      if (!evm.canVouchOnChain(chain)) {
+        return {
+          ok: false as const,
+          error: `Satori GO cannot vouch for tokens on ${chain.displayName} in this build; use Import all, or add a token by its contract address.`,
+        };
+      }
+      const lookup = await evm.openTokenListLookup(chain);
+      if (lookup.kind === 'unavailable') {
+        return {
+          ok: false as const,
+          error: `The ${chain.displayName} token list is unreachable right now, so this cannot tell a listed token from an airdrop; try again, or use Import all.`,
+        };
+      }
+      const vouched: EvmTrackedToken[] = [];
+      for (let i = 0; i < fresh.length; i += 4) {
+        const chunk = fresh.slice(i, i + 4);
+        const got = await Promise.all(
+          chunk.map(async (t) => {
+            const v = await evm.probeTokenTrust(chain, t.address, lookup);
+            return v.trusted === true ? { ...t, logo: v.logo, trusted: true, trustRule: TOKEN_TRUST_RULE } : null;
+          }),
+        );
+        for (const t of got) if (t) vouched.push(t);
+      }
+      untrusted = fresh.length - vouched.length;
+      fresh = vouched;
+    }
+    if (fresh.length > 0) {
+      const nextTracked = [...tracked, ...fresh];
+      persistValue(evmTrackedKey(id, chain.key), nextTracked);
+      // Imported tokens are shown even if they were hidden by symbol before.
+      const freshSymbols = new Set(fresh.map((t) => t.symbol.toUpperCase()));
+      const nextHidden = get().hiddenAssets.filter((n) => !freshSymbols.has(n.toUpperCase()));
+      persistList(hiddenKey(id), nextHidden);
+      set({ evmTokens: { tracked: nextTracked, discovered }, hiddenAssets: nextHidden });
+      setTokenLogos(nextTracked);
+      void get().fetchEvmTokenLogos();
+      await get().refresh();
+    }
+    return { ok: true as const, added: fresh.length, skipped: held.skipped, untrusted };
+  },
+
+  // ONE removal path. The asset detail screen's "Remove from list" and the
+  // list's own multi-select both land here, so "removed" means exactly the same
+  // thing wherever it is asked for.
+  removeAsset(name: string) {
+    get().removeAssets([name]);
+  },
+
+  removeAssets(names: readonly string[]) {
+    const chainId = activeChainTarget();
+    // The active chain's protected assets are never removable (Evrmore: EVR +
+    // SATORIEVR; Ravencoin: RVN; an EVM chain: its coin and default tokens). The
+    // UI hides their remove controls; this refuses them regardless.
+    const targets = [...new Set(names.map((n) => n.trim().toUpperCase()).filter(Boolean))].filter((n) =>
+      isRemovableAsset(n, chainId),
+    );
+    if (targets.length === 0) return;
+    const removed = new Set(targets);
+    const id = svc.activeWalletId();
+    // On an EVM chain the row is a token known by contract: forget it in the
+    // tracked and discovered lists too, so it does not come back on the next
+    // read (hiding by symbol alone would still cost a balanceOf per refresh).
+    const chainKey = svc.evmChainKey();
+    if (activeFamily() === 'evm' && id && chainKey) {
+      const { tracked, discovered } = get().evmTokens;
+      const keep = (t: EvmTrackedToken) => !removed.has(t.symbol.toUpperCase());
+      const nextTracked = tracked.filter(keep);
+      const nextDiscovered = discovered.filter(keep);
+      persistValue(evmTrackedKey(id, chainKey), nextTracked);
+      persistValue(evmDiscoveredKey(id, chainKey), nextDiscovered);
+      set({ evmTokens: { tracked: nextTracked, discovered: nextDiscovered } });
+      setTokenLogos(nextTracked);
+      set((s) => ({ assets: s.assets.filter((a) => a.isNative || !removed.has(a.name.toUpperCase())) }));
+      return;
+    }
     const { pinnedAssets, hiddenAssets } = get();
-    const nextHidden = hiddenAssets.includes(normalized) ? hiddenAssets : [...hiddenAssets, normalized];
-    const nextPinned = pinnedAssets.filter((n) => n !== normalized);
+    const nextHidden = [...hiddenAssets, ...targets.filter((n) => !hiddenAssets.includes(n))];
+    const nextPinned = pinnedAssets.filter((n) => !removed.has(n));
     if (id) {
       persistList(hiddenKey(id), nextHidden);
       persistList(pinnedKey(id), nextPinned);
     }
     set({ hiddenAssets: nextHidden, pinnedAssets: nextPinned });
+  },
+
+  setAssetOrder(names: readonly string[]) {
+    const next = [...new Set(names)];
+    const id = svc.activeWalletId();
+    if (id) persistValue(assetOrderKey(id, activeChainTarget()), next);
+    set({ assetOrder: next });
+  },
+
+  async loadAssetOrder() {
+    const id = svc.activeWalletId();
+    if (!id) {
+      set({ assetOrder: [] });
+      return;
+    }
+    const chainId = activeChainTarget();
+    const order = await readList(assetOrderKey(id, chainId));
+    // Guard against a wallet or chain switch that landed while the read was in
+    // flight: the answer belongs to ONE account on ONE chain (the same guard
+    // loadEvmTokens uses).
+    if (svc.activeWalletId() !== id || activeChainTarget() !== chainId) return;
+    set({ assetOrder: order });
   },
 
   // Load the ACTIVE wallet's own pin/hide lists. Migrates the legacy GLOBAL lists
@@ -2430,6 +4221,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       set({
         pinnedAssets: [],
         hiddenAssets: [],
+        assetOrder: [],
         activitySeen: emptyActivitySeen(),
         unreadActivity: 0,
         stakingEvents: [],
@@ -2465,8 +4257,19 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     // token" for the one asset the wallet exists for). On Ravencoin there are no
     // default pins. Applied only when the user has expressed NO opinion about it:
     // removeAsset() moves a name into `hidden`, so a deleted asset is never
-    // resurrected. Keyed to the ACTIVE chain.
-    const chainId = activeChainId();
+    // resurrected. Keyed to the ACTIVE chain (family-aware: an EVM chain has no
+    // default pins and protects only its native coin).
+    const chainId = activeChainTarget();
+    // Pins are UTXO asset NAMES. An EVM account has none (its tokens are the
+    // contract-keyed lists in evmTokens), and SATORIEVR is an Evrmore asset,
+    // so a pin of it that reached another chain (the one-time legacy migration
+    // copied the global list into every wallet) is dropped rather than shown as
+    // a phantom 0 row on Ravencoin or Base.
+    const sanitized = sanitizePins(pinned, chainId);
+    if (sanitized !== pinned) {
+      pinned = sanitized;
+      persistList(pinnedKey(id), pinned);
+    }
     const withDefaults = applyDefaultPins(pinned, chainId);
     if (withDefaults !== pinned) {
       pinned = withDefaults;
@@ -2479,6 +4282,106 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       persistList(hiddenKey(id), hidden);
     }
     set({ pinnedAssets: pinned, hiddenAssets: hidden });
+    // The manual row order is per wallet AND per chain, so it is read here (a
+    // wallet switch, an unlock) and again in switchEvmChain (same wallet, a
+    // different token set).
+    await get().loadAssetOrder();
+    await get().loadEvmTokens();
+  },
+
+  async loadEvmTokens() {
+    const id = svc.activeWalletId();
+    const chainKey = svc.evmChainKey();
+    if (!id || activeFamily() !== 'evm' || !chainKey) {
+      set({ evmTokens: { tracked: [], discovered: [] } });
+      return;
+    }
+    const [tracked, discovered] = await Promise.all([
+      readEvmTokens(evmTrackedKey(id, chainKey)),
+      readEvmTokens(evmDiscoveredKey(id, chainKey)),
+    ]);
+    // Guard against a chain switch that completed while the lists were read.
+    if (svc.evmChainKey() !== chainKey || svc.activeWalletId() !== id) return;
+    set({ evmTokens: { tracked, discovered } });
+    setTokenLogos([...tracked, ...discovered.filter((d) => d.trusted)]);
+    // Any tracked token still without a mark gets one fetched (best-effort).
+    void get().fetchEvmTokenLogos();
+  },
+
+  async fetchEvmTokenLogos() {
+    const chain = activeEvmChain(get());
+    const id = svc.activeWalletId();
+    if (!chain || !id || activeFamily() !== 'evm') return;
+    const evm = await loadEvmModules();
+    if (!evm) return;
+    // Tokens without a verdict yet. The rule lives in evm/tokenTrust.ts and is
+    // the same one "Import trusted" and the discovery check use.
+    const missing = get().evmTokens.tracked.filter((t) => t.trusted === undefined);
+    if (missing.length === 0) return;
+    // One token-list read for the whole batch, then the marks a few at a time:
+    // this is a popup talking to one host, not a crawler.
+    const lookup = await evm.openTokenListLookup(chain);
+    if (svc.activeWalletId() !== id || svc.evmChainKey() !== chain.key) return;
+    const verdicts = new Map<string, { trusted: boolean; logo?: string }>();
+    for (let i = 0; i < missing.length; i += 4) {
+      const chunk = missing.slice(i, i + 4);
+      const got = await Promise.all(
+        chunk.map(async (t) => [t.address.toLowerCase(), await evm.probeTokenTrust(chain, t.address, lookup)] as const),
+      );
+      // An undefined verdict is NOT recorded: the question could not be
+      // answered, so it is asked again next time.
+      for (const [addr, v] of got) if (v.trusted !== undefined) verdicts.set(addr, { trusted: v.trusted, logo: v.logo });
+      // The account or chain may have changed while fetching: stop, discard.
+      if (svc.activeWalletId() !== id || svc.evmChainKey() !== chain.key) return;
+    }
+    if (verdicts.size === 0) return;
+    const tracked = get().evmTokens.tracked.map((t) => {
+      const v = verdicts.get(t.address.toLowerCase());
+      return v ? { ...t, ...v, trustRule: TOKEN_TRUST_RULE } : t;
+    });
+    persistValue(evmTrackedKey(id, chain.key), tracked);
+    set((s) => ({ evmTokens: { ...s.evmTokens, tracked } }));
+    setTokenLogos([...tracked, ...get().evmTokens.discovered.filter((d) => d.trusted)]);
+  },
+
+  async checkDiscoveredEvmTokens() {
+    const chain = activeEvmChain(get());
+    const id = svc.activeWalletId();
+    if (!chain || !id || activeFamily() !== 'evm') return;
+    const evm = await loadEvmModules();
+    if (!evm) return;
+    const pending = get().evmTokens.discovered.filter((d) => d.trusted === undefined);
+    if (pending.length === 0) return;
+    const verdicts = new Map<string, { trusted: boolean; logo?: string }>();
+    if (!evm.canVouchOnChain(chain)) {
+      // This build has no way to vouch for anything on this chain (no mark
+      // source, or no token list to corroborate one). Discovery therefore shows
+      // nothing automatically here; import or the contract address is the way in.
+      for (const d of pending) verdicts.set(d.address.toLowerCase(), { trusted: false });
+    } else {
+      const lookup = await evm.openTokenListLookup(chain);
+      if (svc.activeWalletId() !== id || svc.evmChainKey() !== chain.key) return;
+      for (let i = 0; i < pending.length; i += 4) {
+        const chunk = pending.slice(i, i + 4);
+        const got = await Promise.all(
+          chunk.map(async (d) => [d.address.toLowerCase(), await evm.probeTokenTrust(chain, d.address, lookup)] as const),
+        );
+        for (const [addr, v] of got) if (v.trusted !== undefined) verdicts.set(addr, { trusted: v.trusted, logo: v.logo });
+        if (svc.activeWalletId() !== id || svc.evmChainKey() !== chain.key) return;
+      }
+    }
+    if (verdicts.size === 0) return;
+    const discovered = get().evmTokens.discovered.map((d) => {
+      const v = verdicts.get(d.address.toLowerCase());
+      return v ? { ...d, ...v, trustRule: TOKEN_TRUST_RULE } : d;
+    });
+    persistValue(evmDiscoveredKey(id, chain.key), discovered);
+    set((s) => ({ evmTokens: { ...s.evmTokens, discovered } }));
+    // Newly trusted tokens with a balance should appear: one more (silent) read.
+    if ([...verdicts.values()].some((v) => v.trusted)) {
+      setTokenLogos([...get().evmTokens.tracked, ...discovered.filter((d) => d.trusted)]);
+      void get().refresh({ silent: true });
+    }
   },
 
   markActivitySeen() {
@@ -2674,10 +4577,12 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   },
 
   // --- build send -----------------------------------------------------------
-  async buildSend(to: string, amountDecimal: number, assetId: string, feeRateSatPerByte?: bigint) {
+  async buildSend(amountText: string, to: string, assetId: string, feeRateSatPerByte?: bigint) {
     set({ loadingSend: true, error: null, sendPlan: null });
     try {
-      const amountSats = BigInt(Math.round(amountDecimal * 1e8));
+      // Text -> base units in one exact step, at the ACTIVE chain's scale.
+      // parseAmount throws a user-facing message, which the catch below surfaces.
+      const amountSats = parseAmount(amountText, networkFor(activeChainId()).decimals);
       // The chosen rate rides through as SendFeeOptions; the service re-clamps
       // it into the chain's policy band, so no store value can escape bounds.
       const feeOpts = feeRateSatPerByte !== undefined ? { feeRateSatPerByte } : undefined;
@@ -2707,9 +4612,16 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       const { maxSats, feeSats } = await svc.estimateMaxEvr(
         feeRateSatPerByte !== undefined ? { feeRateSatPerByte } : undefined,
       );
-      return { maxDecimal: Number(maxSats) / 1e8, feeDecimal: Number(feeSats) / 1e8 };
+      const d = networkFor(activeChainId()).decimals;
+      return {
+        maxDecimal: amountToNumber(maxSats, d),
+        feeDecimal: amountToNumber(feeSats, d),
+        // The Max button needs the EXACT figure to put in the field: a number
+        // round-trip here would be the very precision loss this layer removes.
+        maxText: formatAmount(maxSats, d),
+      };
     } catch {
-      return { maxDecimal: 0, feeDecimal: 0 };
+      return { maxDecimal: 0, feeDecimal: 0, maxText: '0' };
     }
   },
 
@@ -2731,6 +4643,367 @@ export const useLiveStore = create<LiveState>((set, get) => ({
 
   clearSendPlan() {
     set({ sendPlan: null, error: null });
+    svc.allowBroadcast = false;
+  },
+
+  // --- EVM send (family 'evm') ---------------------------------------------------
+  // Built and broadcast by src/store/evmSend.ts through the flag-guarded EVM
+  // modules; this store only holds the plan under review and the arming gate.
+  async quoteEvmSend(input: EvmSendInput) {
+    set({ loadingEvmSend: true, error: null, evmSend: null });
+    svc.allowBroadcast = false;
+    try {
+      const chain = activeEvmChain(get());
+      if (!chain || activeFamily() !== 'evm') throw new EvmSendError('unknown-asset', 'The active wallet is not an EVM account.');
+      const provider = await evmProviderFor(chain.key);
+      if (!provider) throw new EvmSendError('no-engine', 'This build of Satori GO has no EVM engine.');
+      const from = get().address;
+      if (!from) throw new EvmSendError('gated', 'The wallet is locked.');
+      const { tracked, discovered } = get().evmTokens;
+      const plan = await buildEvmSendPlan({
+        provider,
+        chain,
+        from,
+        assets: get().assets,
+        input,
+        extraTokens: [...tracked, ...discovered],
+      });
+      set({ loadingEvmSend: false, evmSend: plan });
+      return plan;
+    } catch (err) {
+      set({ loadingEvmSend: false, error: err instanceof Error ? err.message : String(err) });
+      return null;
+    }
+  },
+
+  async selectEvmFeeLevel(level: EvmFeeLevel) {
+    const plan = get().evmSend;
+    const chain = activeEvmChain(get());
+    if (!plan || !chain) return;
+    try {
+      set({ evmSend: await withEvmFeeLevel(plan, level, chain, get().assets) });
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : String(err) });
+    }
+  },
+
+  async estimateEvmMax(level: EvmFeeLevel = 'normal', to?: string) {
+    const zero = { maxText: '0', feeText: '0' };
+    try {
+      const chain = activeEvmChain(get());
+      const from = get().address;
+      if (!chain || !from || activeFamily() !== 'evm') return zero;
+      const provider = await evmProviderFor(chain.key);
+      const evm = await loadEvmModules();
+      if (!provider || !evm) return zero;
+      const native = get().assets.find((a) => a.isNative && a.name === chain.nativeTicker);
+      if (!native || native.amountBase <= 0n) return zero;
+      // A plain transfer costs the same gas whatever the value, so quote for
+      // half the balance (always fundable) and subtract the worst-case total at
+      // the chosen level from the whole balance. The RECIPIENT matters when it
+      // is a contract (more gas), so use it when the field already holds one.
+      const target = to && evm.isEvmAddress(to.trim()) ? evm.normalizeEvmAddress(to.trim()) : from;
+      const quotes = await evm.quoteEvmFees(provider.rpc, {
+        from,
+        to: target,
+        value: native.amountBase / 2n,
+        data: new Uint8Array(),
+      });
+      const q = quotes[level];
+      // The fee market moves between this quote and the one at Review (Base's
+      // base fee changes every block), and a Max amount that fitted here must
+      // still fit there: leave the worst-case fee PLUS a 25% margin aside. The
+      // margin is never charged, it stays in the account.
+      const reserve = (q.maxTotal * 125n) / 100n;
+      const max = native.amountBase - reserve;
+      return {
+        maxText: max > 0n ? formatAmount(max, chain.nativeDecimals) : '0',
+        feeText: formatAmount(reserve, chain.nativeDecimals),
+      };
+    } catch {
+      return zero;
+    }
+  },
+
+  async isEvmContractAddress(address: string) {
+    const addr = typeof address === 'string' ? address.trim() : '';
+    if (!addr) return null;
+    const chain = activeEvmChain(get());
+    if (!chain) return null;
+    const cacheKey = `${chain.key}:${addr.toLowerCase()}`;
+    const cached = evmCodeCache.get(cacheKey);
+    if (cached !== undefined) return cached;
+    try {
+      const provider = await evmProviderFor(chain.key);
+      if (!provider) return null;
+      // eth_getCode returns the deployed bytecode as DATA: '0x' (or an empty
+      // string on a sloppy node) means there is nothing there but a plain
+      // account. Anything else is code, and coins sent to code are gone unless
+      // the code was written to take them.
+      const code = await provider.rpc.call<string>('eth_getCode', [addr, 'latest']);
+      if (typeof code !== 'string') return null;
+      // '0x' is the canonical empty answer; '0x0' / '0x00' are what a sloppier
+      // node writes for the same thing, so an all-zero body is read as empty.
+      const body = code.replace(/^0x/i, '');
+      const isContract = /[^0]/.test(body);
+      evmCodeCache.set(cacheKey, isContract);
+      return isContract;
+    } catch {
+      // Offline, a refusing node, or a chain that does not know the method:
+      // unknown, never "safe".
+      return null;
+    }
+  },
+
+  async confirmEvmSend() {
+    const plan = get().evmSend;
+    const chain = activeEvmChain(get());
+    if (!plan || !chain) throw new EvmSendError('gated', 'Nothing to send.');
+    if (plan.chainKey !== chain.key) throw new EvmSendError('gated', 'The chain changed since this send was reviewed.');
+    const provider = await evmProviderFor(chain.key);
+    const evm = await loadEvmModules();
+    if (!provider || !evm) throw new EvmSendError('no-engine', 'This build of Satori GO has no EVM engine.');
+    evmNonces ??= new evm.EvmNonceTracker();
+    const result = await broadcastEvmPlan({
+      provider,
+      plan,
+      nonces: evmNonces,
+      sign: (request) => svc.signEvmTransaction(request),
+      allowBroadcast: svc.allowBroadcast,
+    });
+    // SHOW IT NOW, exactly as the UTXO path does: the indexer will not report
+    // the transaction for a while (and BNB Chain has no indexer at all), so the
+    // row is built from the plan and retired when a sync reports the real one.
+    const address = get().address;
+    if (address) {
+      const pending = evm.localPendingEvmTx({
+        txid: result.txid,
+        from: plan.from,
+        to: plan.to,
+        asset: plan.asset.kind === 'native' ? plan.asset.ticker : plan.asset.symbol,
+        decimals: plan.asset.decimals,
+        amountBase: plan.amountBase,
+        // The ESTIMATED total, not the worst case. maxTotal is what has to be
+        // AVAILABLE (it guards the balance check and the caps); what the
+        // transaction is expected to COST is estimatedTotal, and it is the
+        // figure the indexer's real gasUsed x gasPrice will replace. Showing
+        // maxTotal here made a fresh row claim a fee roughly twice the one the
+        // chain then charged (owner, 2026-08-24).
+        feeBase: plan.quote.estimatedTotal,
+        nativeDecimals: chain.nativeDecimals,
+        nativeTicker: chain.nativeTicker,
+        timestamp: Date.now(),
+      });
+      localPendingTxs = [
+        { address, tx: pending, at: Date.now() },
+        ...localPendingTxs.filter((p) => p.tx.txid !== pending.txid),
+      ];
+      set({ txs: [pending, ...get().txs.filter((t) => t.txid !== pending.txid)].sort(compareLiveTx) });
+    }
+    // One send at a time: the plan is consumed, the gate closes, balances refresh.
+    set({ evmSend: null });
+    svc.allowBroadcast = false;
+    void get().refresh({ silent: true });
+    if (typeof setTimeout !== 'undefined') {
+      setTimeout(() => void get().refresh({ silent: true }), 4000);
+      setTimeout(() => void get().refresh({ silent: true }), 12000);
+    }
+    return { txid: result.txid, explorerUrl: evmExplorerTxUrl(chain, result.txid), chainKey: chain.key };
+  },
+
+  clearEvmSend() {
+    set({ evmSend: null, error: null });
+    svc.allowBroadcast = false;
+  },
+
+  // --- EVM native staking ---------------------------------------------------
+  // A staking action is an ordinary EVM transaction to a precompile, so every
+  // step below is the send path with different bytes: buildEvmStakePlan makes
+  // the calldata and planEvmCall prices it, the same arming gate guards it, and
+  // broadcastEvmPlan is the one place a key meets a node.
+  async refreshEvmStaking() {
+    const chain = activeEvmChain(get());
+    const address = get().address;
+    if (!chain || !chain.staking || !address || activeFamily() !== 'evm') {
+      set({ evmStaking: { snapshot: null, loading: false, plan: get().evmStaking.plan, planning: false } });
+      return;
+    }
+    set((s) => ({ evmStaking: { ...s.evmStaking, loading: true } }));
+    const snapshot = await loadEvmStakingSnapshot(chain, address);
+    // The chain or the account can change while this is in flight; a snapshot
+    // for a chain the user has left must never land on screen.
+    const now = activeEvmChain(get());
+    if (!now || now.key !== chain.key || get().address !== address) {
+      set((s) => ({ evmStaking: { ...s.evmStaking, loading: false } }));
+      return;
+    }
+    set((s) => ({ evmStaking: { ...s.evmStaking, snapshot, loading: false } }));
+  },
+
+  async planEvmStake(input: EvmStakeInput) {
+    set((s) => ({ evmStaking: { ...s.evmStaking, planning: true, plan: null }, error: null }));
+    svc.allowBroadcast = false;
+    try {
+      const chain = activeEvmChain(get());
+      if (!chain || !chain.staking || activeFamily() !== 'evm') {
+        throw new EvmSendError('unknown-asset', 'The active account cannot stake on this chain.');
+      }
+      const provider = await evmProviderFor(chain.key);
+      if (!provider) throw new EvmSendError('no-engine', 'This build of Satori GO has no EVM engine.');
+      const from = get().address;
+      if (!from) throw new EvmSendError('gated', 'The wallet is locked.');
+      const native = get().assets.find((a) => a.isNative && a.name === chain.nativeTicker);
+      const plan = await buildEvmStakePlan({
+        provider,
+        chain,
+        from,
+        input,
+        nativeBalanceBase: native?.amountBase,
+      });
+      set((s) => ({ evmStaking: { ...s.evmStaking, plan, planning: false } }));
+      return plan;
+    } catch (err) {
+      set((s) => ({
+        evmStaking: { ...s.evmStaking, planning: false },
+        error: err instanceof Error ? err.message : String(err),
+      }));
+      return null;
+    }
+  },
+
+  async selectEvmStakeFeeLevel(level: EvmFeeLevel) {
+    const plan = get().evmStaking.plan;
+    const chain = activeEvmChain(get());
+    if (!plan || !chain) return;
+    try {
+      const native = get().assets.find((a) => a.isNative && a.name === chain.nativeTicker);
+      const repriced = await withEvmCallFeeLevel(plan, level, chain, native?.amountBase);
+      // withEvmCallFeeLevel is generic over a call plan, so the two staking
+      // facts (which action, which validator) are carried across explicitly.
+      set((s) => ({
+        evmStaking: { ...s.evmStaking, plan: { ...repriced, action: plan.action, valoper: plan.valoper } },
+      }));
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : String(err) });
+    }
+  },
+
+  async estimateEvmStakeMax(action: EvmStakeAction, valoper: string, level: EvmFeeLevel = 'normal') {
+    try {
+      const chain = activeEvmChain(get());
+      const from = get().address;
+      if (!chain || !chain.staking || !from || activeFamily() !== 'evm') return '0';
+      const provider = await evmProviderFor(chain.key);
+      const evm = await loadEvmModules();
+      if (!provider || !evm) return '0';
+
+      if (action !== 'delegate') {
+        // Unstaking and moving a stake are capped by the DELEGATION, not the
+        // balance: read the exact figure from the precompile, because a Max one
+        // base unit above it is a transaction the chain refuses after signing.
+        const exact = await readExactDelegation(provider, chain.key, from, valoper);
+        const fallback = get().evmStaking.snapshot?.delegations.find((d) => d.valoper === valoper)?.amountBase ?? 0n;
+        const amount = exact ?? fallback;
+        return amount > 0n ? formatAmount(amount, chain.nativeDecimals) : '0';
+      }
+
+      // Delegating is capped by the spendable balance minus what the fee can
+      // reach. The gas of a delegate is not the gas of a transfer, so the
+      // reserve is quoted on the REAL call: a 1 base-unit delegate to this
+      // validator, which costs the same gas as the full one.
+      const native = get().assets.find((a) => a.isNative && a.name === chain.nativeTicker);
+      if (!native || native.amountBase <= 0n) return '0';
+      const cfg = evm.evmChainByKey(chain.key)?.staking;
+      if (!cfg) return '0';
+      const quotes = await evm.quoteEvmFees(provider.rpc, {
+        from,
+        to: cfg.stakingPrecompile,
+        value: 0n,
+        data: evm.encodeDelegate(cfg, from, valoper, 1n),
+      });
+      // Same margin as the send path's Max: the fee market moves between this
+      // quote and the one at Review, and a Max that fitted here must still fit
+      // there. The margin is never charged, it stays in the account.
+      const reserve = (withCallGasHeadroom(quotes[level]).maxTotal * 125n) / 100n;
+      const max = native.amountBase - reserve;
+      return max > 0n ? formatAmount(max, chain.nativeDecimals) : '0';
+    } catch {
+      return '0';
+    }
+  },
+
+  async countEvmUnbondingEntries(valoper: string) {
+    const chain = activeEvmChain(get());
+    const from = get().address;
+    if (!chain || !chain.staking || !from) return null;
+    const provider = await evmProviderFor(chain.key);
+    if (!provider) return null;
+    return readUnbondingEntryCount(provider, chain.key, from, valoper);
+  },
+
+  async confirmEvmStake() {
+    const plan = get().evmStaking.plan;
+    const chain = activeEvmChain(get());
+    if (!plan || !chain) throw new EvmSendError('gated', 'Nothing to confirm.');
+    if (plan.chainKey !== chain.key) throw new EvmSendError('gated', 'The chain changed since this action was reviewed.');
+    const provider = await evmProviderFor(chain.key);
+    const evm = await loadEvmModules();
+    if (!provider || !evm) throw new EvmSendError('no-engine', 'This build of Satori GO has no EVM engine.');
+    evmNonces ??= new evm.EvmNonceTracker();
+    const result = await broadcastEvmPlan({
+      provider,
+      plan,
+      nonces: evmNonces,
+      sign: (request) => svc.signEvmTransaction(request),
+      allowBroadcast: svc.allowBroadcast,
+    });
+    // SHOW IT NOW, and show it LABELLED, exactly as a send shows its own row.
+    // The label is decoded from the bytes that were just broadcast, so Activity
+    // says "Staked with <validator>" the moment the action is sent instead of
+    // waiting for an indexer (whose row for this chain arrives with no calldata
+    // at all, see store/evmHistory.ts). `amountBase` is 0n on purpose: a
+    // delegation moves coins through the Cosmos module, not as the
+    // transaction's value, and the staked amount is carried by the label.
+    const address = get().address;
+    if (address) {
+      const decoded = evm.decodeStakingCall(plan.data);
+      const pending = evm.localPendingEvmTx({
+        txid: result.txid,
+        from: plan.from,
+        to: plan.to,
+        asset: chain.nativeTicker,
+        decimals: chain.nativeDecimals,
+        amountBase: 0n,
+        // The ESTIMATED total, exactly as the send path above: the pending row
+        // must not show a worst-case fee the chain is not going to charge.
+        feeBase: plan.quote.estimatedTotal,
+        nativeDecimals: chain.nativeDecimals,
+        nativeTicker: chain.nativeTicker,
+        timestamp: Date.now(),
+        ...(decoded ? { staking: decoded } : {}),
+      });
+      localPendingTxs = [
+        { address, tx: pending, at: Date.now() },
+        ...localPendingTxs.filter((p) => p.tx.txid !== pending.txid),
+      ];
+      set({ txs: [pending, ...get().txs.filter((t) => t.txid !== pending.txid)].sort(compareLiveTx) });
+    }
+    // One action at a time: the plan is consumed and the gate closes. The
+    // staking figures and the balance both moved, so both are re-read (the
+    // Cosmos LCD lags a block or two, hence the later ticks).
+    set((s) => ({ evmStaking: { ...s.evmStaking, plan: null } }));
+    svc.allowBroadcast = false;
+    void get().refresh({ silent: true });
+    void get().refreshEvmStaking();
+    if (typeof setTimeout !== 'undefined') {
+      setTimeout(() => void get().refreshEvmStaking(), 6000);
+      setTimeout(() => void get().refresh({ silent: true }), 6000);
+    }
+    return { txid: result.txid, explorerUrl: evmExplorerTxUrl(chain, result.txid), chainKey: chain.key };
+  },
+
+  clearEvmStake() {
+    set((s) => ({ evmStaking: { ...s.evmStaking, plan: null }, error: null }));
     svc.allowBroadcast = false;
   },
 
@@ -2786,6 +5059,363 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   },
 
   // --- password (verify / change) -------------------------------------------
+  // --- app password (the app-password design notes §5) --------------------------
+
+  /**
+   * The step AFTER the app password is accepted: open the active wallet when it
+   * is already migrated, or hand over to its own (transitional) prompt when it
+   * is not. Shared by unlockApp() and by init() re-entering an already-open app.
+   */
+  async openActiveWalletAfterAppUnlock() {
+    await get().loadWallets();
+    const active = get().wallets.find((w) => w.id === get().activeWalletId);
+    // Already migrated: the master key opens it, nothing to type.
+    if (active?.appProtected) {
+      if (await get().unlock('')) return;
+    }
+    // Still v1 (including a passwordless one, which §6 says must be told about
+    // the change rather than silently moved): LiveLock asks, once.
+    //
+    // NOTE THE STATE THIS LEAVES: phase 'locked' while the APP is unlocked, so
+    // the master key is in memory behind a screen that says the wallet is
+    // locked. That is deliberate (the wallet's own password is the next step),
+    // which is exactly why LiveApp arms the idle auto-lock on `appUnlocked` and
+    // not on `phase === 'ready'`, and why LiveLock offers a real Lock button
+    // here. `appUnlocked` is re-read rather than assumed: the service drops a
+    // stale key on its own.
+    set({ phase: 'locked', appUnlocked: svc.appUnlocked() });
+  },
+
+  /**
+   * §4 rule 5 applied to the APP lock screen: nothing is stranded.
+   *
+   * The design's rule says a wallet whose own password still works is never
+   * unreachable. The app lock screen was the exact inverse of it: one field, no
+   * wallet list, and no way to reach a wallet that never migrated, so a
+   * forgotten app password locked the user out of wallets it had nothing to do
+   * with. This selects a wallet that is still on its own password and hands over
+   * to that wallet's own lock screen.
+   *
+   * It gives nothing away: a v1 wallet still needs its own password, and a
+   * migrated wallet is not offered, because for one the app password IS the only
+   * password and there is no second route to invent.
+   */
+  async openWithWalletPassword() {
+    if (get().wallets.length === 0) await get().loadWallets();
+    const wallets = get().wallets;
+    const activeId = get().activeWalletId;
+    const candidate =
+      wallets.find((w) => w.id === activeId && !w.appProtected) ?? wallets.find((w) => !w.appProtected);
+    if (!candidate) return false;
+    set({ error: null });
+    if (candidate.id !== activeId) await get().switchWallet(candidate.id);
+    // switchWallet auto-opens a passwordless wallet, which lands on 'ready';
+    // only a wallet that still needs a password goes to its lock screen.
+    if (get().phase !== 'ready') set({ phase: 'locked' });
+    return true;
+  },
+
+  /** Back to the app lock screen. The inverse of openWithWalletPassword(), so
+   *  the two screens are a round trip rather than a one-way door.
+   *
+   *  IT REALLY LOCKS. This used to only set the phase, so the master key stayed
+   *  in memory behind a screen that asks for the app password, and the screen
+   *  was safe only by the convention that it renders under `!appUnlocked`. A
+   *  convention is not a control: any future path that rendered it while the app
+   *  was unlocked would be a lock screen with nothing behind it. Going to that
+   *  screen now means what it looks like, by calling the same user-facing lock()
+   *  the header button and the idle timer use: no seed, no master key. */
+  showAppLock() {
+    if (!get().appPasswordSet) return;
+    get().lock(); // drops the seed AND the master key; lands on 'app-locked'
+  },
+
+  // --- the FORCED setup (the app-password design notes §12) ---------------------
+  //
+  // A wallet with `passwordless: true` holds its seed under an EMPTY passphrase,
+  // i.e. effectively in the clear, and this is the flow that stops that from
+  // being a state the wallet can be left in. It is entered from init() alone and
+  // there is no action here that leaves it without setting the password.
+
+  async revealPasswordlessBackup(walletId: string) {
+    try {
+      return await svc.revealNoPasswordBackup(walletId);
+    } catch {
+      return null;
+    }
+  },
+
+  async completeForcedAppPassword(password: string) {
+    const none = { migrated: [] as string[], kept: [] as string[] };
+    try {
+      if (!password) return { ok: false, error: 'Enter an app password.', ...none };
+      // The wallets that open with no password, NAMED BEFORE THE MOVE: after it
+      // they are ordinary app-protected wallets and nothing on the entry says
+      // which ones this flow just protected.
+      const before = get().wallets;
+      const nameOf = new Map(before.map((w) => [w.id, w.name] as const));
+      const ok = await svc.setAppPassword(password);
+      if (!ok) {
+        // setAppPassword refuses for exactly two reasons, and the trigger for
+        // this screen rules both of them out, so reaching here means another
+        // page did one of them in the meantime. Say what is true either way.
+        const already = await svc.hasAppPassword();
+        return {
+          ok: false,
+          error: already
+            ? 'An app password was set in another window. Close this window and open the wallet again.'
+            : 'Could not set an app password on this device. Your wallets are unchanged.',
+          ...none,
+        };
+      }
+      // The session now holds the master key (setAppPassword keeps it), which is
+      // what lets these wallets move with nothing else typed.
+      const moved = await svc.migratePasswordlessWallets();
+      set({ appPasswordSet: true, appUnlocked: svc.appUnlocked() });
+      await get().loadWallets();
+      return {
+        ok: true,
+        migrated: moved.migrated.map((id) => nameOf.get(id) ?? 'Wallet'),
+        kept: moved.kept.map((id) => nameOf.get(id) ?? 'Wallet'),
+      };
+    } catch (err) {
+      // StoreWriteFailedError carries its own true sentence (nothing was
+      // written), and every other failure is reported as itself rather than as a
+      // guess about the password.
+      return { ok: false, error: err instanceof Error ? err.message : String(err), ...none };
+    }
+  },
+
+  async finishForcedAppPassword() {
+    // FORCED MEANS FORCED: this is the only door out of the screen, and it opens
+    // only once the password it demanded actually exists. The screen never calls
+    // it before then, but "the screen never does that" is a convention and this
+    // is a gate, so it is asked of the SERVICE (is there a record on disk?)
+    // rather than of a flag this page set.
+    if (!(await svc.hasAppPassword())) return;
+    // The same handover the app lock screen makes: a wallet that is now app-key
+    // protected opens with nothing typed, and one that still has its own
+    // password lands on its own prompt, which is exactly what the summary above
+    // this told the user to expect.
+    await get().openActiveWalletAfterAppUnlock();
+  },
+
+  async unlockApp(password: string) {
+    set({ error: null });
+    try {
+      const ok = await svc.unlockApp(password);
+      if (!ok) {
+        set({ error: 'Incorrect password' });
+        return false;
+      }
+      set({ appUnlocked: true, appPasswordSet: true });
+      await get().openActiveWalletAfterAppUnlock();
+      return true;
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : String(err) });
+      return false;
+    }
+  },
+
+  async setAppPassword(password: string) {
+    try {
+      if (!password) return { ok: false, error: 'Enter an app password.' };
+      const ok = await svc.setAppPassword(password);
+      if (!ok) {
+        // Two reasons the service refuses, and they need different answers.
+        const already = await svc.hasAppPassword();
+        return {
+          ok: false,
+          error: already
+            ? 'An app password is already set on this device. Change it instead.'
+            : 'Could not set an app password: some wallets on this device are already protected by one. Their recovery phrases are the way back.',
+        };
+      }
+      set({ appPasswordSet: true, appUnlocked: svc.appUnlocked() });
+      await get().loadWallets();
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  },
+
+  async changeAppPassword(oldPassword: string, newPassword: string) {
+    try {
+      const result = await svc.changeAppPassword(oldPassword, newPassword);
+      if (!result.ok) {
+        // "Incorrect current password." used to be shown for EVERY failure,
+        // including one that had nothing to do with the password: the user
+        // retyped a correct password forever while the wallet that was actually
+        // broken went unnamed.
+        const named = result.wallet ? `"${result.wallet}"` : 'One of your wallets';
+        const error =
+          result.reason === 'wrong-password'
+            ? 'Incorrect current password.'
+            : result.reason === 'empty-password'
+              ? 'Enter a new app password.'
+              : result.reason === 'no-app-password'
+                ? 'No app password is set on this device.'
+                : result.reason === 'wallet-unreadable'
+                  ? `${named} could not be moved to a new password, so nothing was changed. Your current app password still opens every other wallet.`
+                  : 'Could not save the change, so nothing was changed. Your current app password still works.';
+        return { ok: false, error };
+      }
+      // The service dropped the master key and locked, so the UI must follow it
+      // to the app lock screen rather than sit on a wallet it can no longer read.
+      get().lock();
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  },
+
+  // --- losing the app password (the app-password design notes §13) -------------
+
+  async createRecoveryCode(appPassword: string) {
+    try {
+      const result = await svc.createRecoveryCode(appPassword);
+      if (!result.ok) {
+        const named = result.wallet ? `"${result.wallet}"` : 'One of your wallets';
+        return {
+          ok: false as const,
+          error:
+            result.reason === 'wrong-password'
+              ? 'Incorrect app password.'
+              : result.reason === 'no-app-password'
+                ? 'Set an app password first. The code is a second way to it.'
+                : result.reason === 'wallet-unreadable'
+                  ? `${named} could not be re-keyed, so no code was made and nothing was changed.`
+                  : 'Could not save the code, so nothing was changed.',
+        };
+      }
+      // The upgrade path re-keys the session, so read the flags back rather
+      // than assuming them.
+      set({ recoveryCodeSet: true, appUnlocked: svc.appUnlocked() });
+      await get().loadWallets();
+      return { ok: true as const, code: result.code };
+    } catch (err) {
+      return { ok: false as const, error: err instanceof Error ? err.message : String(err) };
+    }
+  },
+
+  async removeRecoveryCode(appPassword: string) {
+    try {
+      const ok = await svc.removeRecoveryCode(appPassword);
+      if (!ok) return { ok: false, error: 'Incorrect app password.' };
+      set({ recoveryCodeSet: false });
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  },
+
+  async unlockWithRecoveryCode(code: string, newPassword: string) {
+    set({ error: null });
+    try {
+      const result = await svc.unlockWithRecoveryCode(code, newPassword);
+      if (!result.ok) {
+        return {
+          ok: false,
+          error:
+            result.reason === 'wrong-code'
+              ? 'That recovery code is not the one for this wallet.'
+              : result.reason === 'no-recovery-code'
+                ? 'There is no recovery code on this device.'
+                : result.reason === 'empty-password'
+                  ? 'Choose a new password.'
+                  : result.reason === 'no-app-password'
+                    ? 'No app password is set on this device.'
+                    : 'Could not save the new password, so nothing was changed.',
+        };
+      }
+      set({ appUnlocked: true, appPasswordSet: true, recoveryCodeSet: true });
+      // Exactly what a correct password does from here: open the active wallet
+      // when it has already moved over, or show its own prompt when it has not.
+      await get().openActiveWalletAfterAppUnlock();
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  },
+
+  async exportBackup(filePassword: string) {
+    try {
+      const { text, fileName } = await svc.exportBackup(filePassword);
+      return { ok: true as const, text, fileName };
+    } catch (err) {
+      return { ok: false as const, error: err instanceof Error ? err.message : String(err) };
+    }
+  },
+
+  async readBackupFile(text: string, filePassword: string) {
+    try {
+      const result = await svc.readBackupFile(text, filePassword);
+      if (!result.ok) {
+        return {
+          ok: false as const,
+          error:
+            result.reason === 'wrong-password'
+              ? 'Wrong password for this backup file.'
+              : result.reason === 'malformed'
+                ? 'This backup file is damaged, or it holds wallets nothing on this device could open.'
+                : (result.message ?? 'That file is not a Satori GO backup.'),
+        };
+      }
+      return { ok: true as const, preview: result.preview };
+    } catch (err) {
+      return { ok: false as const, error: err instanceof Error ? err.message : String(err) };
+    }
+  },
+
+  async applyRestore(mode: 'replace' | 'merge') {
+    try {
+      const result = await svc.applyRestore(mode);
+      if (!result.ok) {
+        return {
+          ok: false,
+          error:
+            result.reason === 'merge-unsafe'
+              ? 'These wallets were protected by a different app password, so they cannot be added alongside the ones here.'
+              : result.reason === 'no-pending'
+                ? 'Open the backup file again.'
+                : 'Could not write the restore, so nothing was changed.',
+        };
+      }
+      // Read every flag back from the service: after a replace this device's
+      // app password, its recovery code and its wallets are all the file's now.
+      const appPasswordSet = await svc.hasAppPassword();
+      set({
+        appPasswordSet,
+        recoveryCodeSet: appPasswordSet && (await svc.hasRecoveryCode()),
+        appUnlocked: svc.appUnlocked(),
+      });
+      await get().loadWallets();
+      // The service locked (a replace ends the session it was made from), so
+      // the UI follows it to the lock screen instead of sitting on a wallet it
+      // can no longer read.
+      if (mode === 'replace') get().lock();
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  },
+
+  cancelRestore() {
+    svc.cancelRestore();
+  },
+
+  async setNoSendPassword(enabled: boolean, password?: string) {
+    try {
+      const ok = await svc.setNoSendPassword(enabled, password);
+      if (ok) await get().loadWallets();
+      return { ok };
+    } catch (err) {
+      // A write that never happened is not a wrong password (see storeWrite.ts).
+      if (isStoreWriteFailed(err)) return { ok: false, error: err.message };
+      return { ok: false };
+    }
+  },
+
   async verifyPassword(password: string) {
     try {
       return await svc.verifyPassword(password);
@@ -2796,9 +5426,13 @@ export const useLiveStore = create<LiveState>((set, get) => ({
 
   async changePassword(oldPassword: string, newPassword: string) {
     try {
-      return await svc.changePassword(oldPassword, newPassword);
-    } catch {
-      return false;
+      return { ok: await svc.changePassword(oldPassword, newPassword) };
+    } catch (err) {
+      // The password screen renders a bare failure as "Current password is
+      // incorrect.", so a store write that could not land must arrive with its
+      // own words: nothing was changed, and the password was not the problem.
+      if (isStoreWriteFailed(err)) return { ok: false, error: err.message };
+      return { ok: false };
     }
   },
 
@@ -2815,10 +5449,11 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   },
 
   setChainHidden(chainId: string, hidden: boolean) {
-    const canonical = networkFor(chainId as LiveNetworkId).chainId;
+    // An `evm:<key>` target is stored as-is; a UTXO id in its canonical form.
+    const canonical = isEvmChainTarget(chainId) ? chainId : networkFor(chainId as LiveNetworkId).chainId;
     // Re-check the rule here, not only in the UI: a stale render or a future
     // caller must not be able to hide the home chain or the one in use.
-    if (hidden && chainHideBlockedReason(canonical, activeChainId()) !== null) return;
+    if (hidden && chainHideBlockedReason(canonical, activeChainTarget()) !== null) return;
     const current = get().hiddenChains;
     const next = hidden
       ? current.includes(canonical)
@@ -2833,6 +5468,16 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   setSettingsMode(mode: SettingsMode) {
     persistValue(SETTINGS_MODE_KEY, mode);
     set({ settingsMode: mode });
+  },
+
+  setHideZeroBalances(hide: boolean) {
+    persistValue(HIDE_ZERO_BALANCES_KEY, hide);
+    set({ hideZeroBalances: hide });
+  },
+
+  setHideBalances(hide: boolean) {
+    persistValue(HIDE_BALANCES_KEY, hide);
+    set({ hideBalances: hide });
   },
 
   setAutoLockMinutes(minutes: number) {
@@ -2879,6 +5524,11 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   },
 
   removeElectrumServer(url: string) {
+    // The Satori GO gateway bridge is not removable: on Ravencoin it is the only
+    // server there is, and on Evrmore it is how the owner's node is reached at
+    // all. Settings hides its Remove button; this is the same rule enforced
+    // where the list actually changes.
+    if (isGatewayElectrumUrl(url)) return;
     const current = get().electrumServers;
     // Never remove the LAST server — keep at least one so a pool always exists.
     if (current.length <= 1) return;
@@ -2941,6 +5591,9 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       address: '',
       addresses: [],
       assets: [],
+      pinnedAssets: [],
+      hiddenAssets: [],
+      assetOrder: [],
       txs: [],
       stakingEvents: [],
       network: null,
@@ -2949,12 +5602,15 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       addingWallet: false,
       sendPlan: null,
       pendingMnemonic: null,
+      pendingMnemonicHasPassphrase: false,
       error: null,
       offline: false,
       syncing: 'idle',
       syncProgress: null,
       lastSyncAt: null,
       staking: emptyStaking(),
+      addressScan: emptyAddressScan(),
+      evmStaking: { snapshot: null, loading: false, plan: null, planning: false },
     });
   },
 }));

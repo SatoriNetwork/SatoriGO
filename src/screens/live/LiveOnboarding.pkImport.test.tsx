@@ -8,6 +8,11 @@
  * (enabling a chain on a single-key wallet re-imports that wallet's own WIF onto
  * another chain, and that must keep working — see keys.importGuards.test.ts).
  *
+ * Three distinct outcomes, three distinct testids, on purpose (KNOWN_LIMITATIONS.md
+ * #10): live-pk-error blocks the import, live-pk-chain-warning does not, and
+ * live-pk-chain-notice is purely informational (the byte matches the selected
+ * chain, it just isn't proof, because other chains share it too).
+ *
  * The store action is replaced with a spy so the test asserts what the FORM does
  * about the key, without building a real scrypt vault.
  */
@@ -30,6 +35,12 @@ vi.mock('../../services/chain/liveWallet', () => {
     isUnlocked() {
       return false;
     }
+    activeWalletFamily() {
+      return 'utxo';
+    }
+    evmChainKey() {
+      return null;
+    }
     getProvider() {
       return {};
     }
@@ -45,6 +56,7 @@ import {
   BITCOIN_MAINNET,
   EVRMORE_MAINNET,
   LITECOIN_MAINNET,
+  RAVENCOIN_MAINNET,
   WOJAKCOIN_MAINNET,
 } from '../../services/chain/chainParams';
 import { encodeWif } from '../../services/chain/keys';
@@ -98,14 +110,37 @@ function submitWith(key: string) {
 }
 
 describe('private-key import: WIF version-byte notice', () => {
-  it('says NOTHING for a key whose prefix matches the selected chain', () => {
+  it('NOTICES (does not warn or block) when the matching byte is shared by several chains', async () => {
     openPkForm();
-    // Evrmore is preselected. An Evrmore WIF must produce no notice at all: byte
-    // 128 is also Bitcoin's and Ravencoin's, so a green "verified" message here
-    // would be a claim the wallet cannot back up.
+    // Evrmore is preselected. An Evrmore WIF's byte (128) is ALSO Bitcoin's and
+    // Ravencoin's, so "it matches" is not proof it came from here. That gets an
+    // informational notice, not silence and not the warning banner (which is for
+    // a byte that does NOT match the selected chain).
     fireEvent.change(byId('live-pk-input'), {
       target: { value: encodeWif(PRIV, EVRMORE_MAINNET, true) },
     });
+    const notice = byId('live-pk-chain-notice');
+    expect(notice.textContent).toContain(EVRMORE_MAINNET.displayName);
+    expect(notice.textContent).toContain(BITCOIN_MAINNET.displayName);
+    expect(notice.textContent).toContain(RAVENCOIN_MAINNET.displayName);
+    // It must not read as either existing state.
+    expect(screen.queryByTestId('live-pk-chain-warning')).toBeNull();
+    expect(screen.queryByTestId('live-pk-error')).toBeNull();
+
+    // Purely informational: the import proceeds exactly as it would without it.
+    submitWith(encodeWif(PRIV, EVRMORE_MAINNET, true));
+    await waitFor(() => expect(importSpy).toHaveBeenCalledTimes(1));
+  });
+
+  it('says nothing when the matching byte belongs to no other pickable chain', () => {
+    openPkForm();
+    // WojakCoin's WIF byte (201) is unique among the chains this wallet offers,
+    // so once WojakCoin is selected there is nothing ambiguous to flag.
+    fireEvent.click(byId('live-pk-chain-wojakcoin-mainnet'));
+    fireEvent.change(byId('live-pk-input'), {
+      target: { value: encodeWif(PRIV, WOJAKCOIN_MAINNET, true) },
+    });
+    expect(screen.queryByTestId('live-pk-chain-notice')).toBeNull();
     expect(screen.queryByTestId('live-pk-chain-warning')).toBeNull();
     expect(screen.queryByTestId('live-pk-error')).toBeNull();
   });

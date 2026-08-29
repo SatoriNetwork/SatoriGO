@@ -297,8 +297,135 @@
 //   could mislead. Dogecoin is unchanged.
 //   The P2PKH prefixes do NOT collide: Dogecoin 'D' (30) vs BTGS 'G' (38).
 
+// NEOXA (NEOX) — NeoxaChain/Neoxa, verified 2026-08-25 against `main` (the repo's
+// default branch; `master` was fetched too and is byte-identical for this file).
+//
+//   ITS BACKEND WENT LIVE 2026-08-26. The gateway's `neox` Electrum row points
+//   at a third-party ElectrumX the owner was given, probed clean first and then
+//   verified end to end THROUGH the public bridge (tip 2,233,350, the right
+//   genesis, an asset-scoped balance answered). The NEOX block in network.ts
+//   records exactly what was checked and what the server costs us. Nothing may
+//   be added there that has not been probed the same way: that block also
+//   records the two live traps found while searching for a public server.
+//
+//   src/chainparams.cpp (CMainParams):
+//     line 454  base58Prefixes[PUBKEY_ADDRESS] = 38   -> addresses begin with 'G'
+//     line 455  base58Prefixes[SCRIPT_ADDRESS] = 122
+//     line 456  base58Prefixes[SECRET_KEY]     = 112  (WIF; compressed -> 'H…')
+//     line 457  base58Prefixes[EXT_PUBLIC_KEY] = {0x04,0x88,0xB2,0x1E}  <- STANDARD
+//     line 458  base58Prefixes[EXT_SECRET_KEY] = {0x04,0x88,0xAD,0xE4}  <- STANDARD
+//       Bitcoin's own bytes, kept unchanged exactly as Evrmore/Ravencoin/Litecoin/
+//       WojakCoin keep them. This was checked SPECIFICALLY because BTGS bumped its
+//       last bytes to 0x1F/0xE5 and Dogecoin uses the whole "dgub"/"dgpv" family;
+//       Neoxa does neither. Do NOT "align" these with BTGS or Dogecoin. Confirmed
+//       twice over: the project's own developer portal (dev.neoxa.net, "Chain
+//       parameters") states `xpub magic 76067358`, which is 0x0488B21E.
+//     lines 434-437  pchMessageStart = 0x47,0x41,0x4d,0x45 ("GAME")
+//     line 438  nDefaultPort = 8788
+//     line 461  nExtCoinType = 1668
+//     line 444  consensus.hashGenesisBlock = genesis.GetX16RHash();
+//     line 446  assert(consensus.hashGenesisBlock ==
+//       0000000a50fdaaf22f1c98b8c61559e15ab2269249aa1fb20683180703cdbf07)
+//       Confirmed AGAINST THE LIVE CHAIN, not just the source: the project's own
+//       explorer answers that exact hash for
+//       https://explorer.neoxa.net/api/getblockhash?index=0 (tip 2,231,317 at the
+//       time of writing).
+//   src/validation.cpp:119  strMessageMagic = "Neoxa Signed Message:\n"
+//   coinType 1668: confirmed TWICE and guessed nowhere. It is in the chain's own
+//     source (nExtCoinType above) AND in the official satoshilabs/slips
+//     slip-0044.md registry ("| 1668 | NEOX | Neoxa |"), and the project's
+//     developer portal repeats it as `slip44 1668 (path m/44'/1668'/0'/0/i)`.
+//     A third, independent party agrees: AltbaseWallet/module-neoxa declares
+//     p2pkhPrefix 38, p2shPrefix 122, wifPrefix 112, derivationPath
+//     m/44'/1668'/0'/0/0. Unlike BTGS's project-supplied 18888, this is a real
+//     registered SLIP-44 value, and it is unique here, so Neoxa shares derivation
+//     with no other chain in this file (chainsShareDerivation is false against
+//     all of them even though the BIP32 version bytes match five of them).
+//
+//   *** IT HAS THE RAVENCOIN ASSET PROTOCOL. This is the consequential fact. ***
+//   A grep of chainparams.cpp alone finds nothing, which proves nothing; the
+//   asset layer lives elsewhere and it is all there:
+//     - src/assets/ carries the FULL Ravencoin suite: assets.cpp (215 KB),
+//       assets.h with IsAssetNameValid() and class CAssetsCache, assetdb,
+//       myassetsdb, restricteddb, messages, assetsnapshotdb, rewards.
+//     - src/rpc/assets.cpp exists, i.e. the asset RPCs are exposed.
+//     - src/script/script.h:185  OP_NEOX_ASSET = 0xc0 — the SAME opcode value as
+//       OP_EVR_ASSET / OP_RVN_ASSET, so `OP_EVR_ASSET` in assetScript.ts already
+//       is Neoxa's opcode.
+//     - src/assets/assets.h:21-26 defines NEOX_N 114, NEOX_E 118, NEOX_X 110,
+//       NEOX_Q 113, NEOX_T 116, NEOX_O 111. THE MACROS WERE REBRANDED, THE BYTES
+//       WERE NOT: 114/118/110 are ASCII 'r'/'v'/'n'. assets.cpp pushes them in the
+//       order N,E,X + type (issue 527-530, owner 542-545, transfer 1638-1641,
+//       reissue 1664-1667), so the marker on the wire is literally "rvnq"/"rvno"/
+//       "rvnt"/"rvnr" — byte-identical to Ravencoin's. Hence assetMarkerPrefix
+//       'rvn' below is not an approximation, it is what the chain emits.
+//   CONSEQUENCE: Neoxa is SINGLE-DIALECT like Evrmore and Ravencoin, not plain
+//   like BTC/LTC/DOGE. Any future server pool for it must be asset-aware
+//   ElectrumX only, and must never be blended with a plain pool. That rule and
+//   why it exists are spelled out in network.ts; the NEOX pool there repeats it.
+//
+//   NO BECH32 ADDRESS FORM, so `bech32Hrp` is absent and addressFormat is 'p2pkh'
+//   (m/44'/1668'/0'/0/i). Note this is NOT the WojakCoin/Dogecoin trap and must
+//   not be described as one: chainparams.cpp:374 really does set
+//   consensus.nSegwitEnabled = true, and validation.cpp gates SCRIPT_VERIFY_WITNESS
+//   on it, so witness rules ARE enforced and a P2WPKH output here would NOT be
+//   anyone-can-spend. The reason there is no bech32 address is simpler and just as
+//   binding: chainparams defines no bech32_hrp at all, and the tree contains no
+//   bech32 encoder (no bech32.cpp/.h anywhere in src/), so the chain has no
+//   bech32 address format to encode to. Nothing to add, and nothing to "complete".
+//
+//   ITS BLOCK ID IS A PoW HASH, NOT sha256d — matters for whoever verifies a
+//   future server. src/primitives/block.cpp CBlockHeader::GetHash() returns
+//   HashX16R(...) while nTime < 1651444217 and KAWPOWHash_OnlyMix(...) after, and
+//   src/primitives/block.h:36-62 shows the header itself changes shape at that
+//   time (nNonce -> nHeight + nNonce64 + mix_hash, i.e. 80 bytes before, 120
+//   after). That is Ravencoin's exact scheme. So the usual "sha256d of
+//   blockchain.block.header(0)" cross-check used for LTC/BTC/DOGE DOES NOT WORK
+//   here: a server's genesis claim can only be read from server.features and
+//   compared with the assert above.
+//
+//   TWO PREFIX OVERLAPS, HANDLED DIFFERENTLY BECAUSE THEY ARE DIFFERENT PROBLEMS.
+//
+//   1. SCRIPT_ADDRESS 122 IS RAVENCOIN'S OWN, so Neoxa fails closed on P2SH.
+//      Ravencoin has used 122 since 2018 and Neoxa is a 2022 fork of it, so by
+//      the directional ownership rule written out in the BITCOIN header (the
+//      chain that owns a prefix accepts it; the borrower fails closed — exactly
+//      as WojakCoin does with Bitcoin's 5 and BTGS with Dogecoin's 22), the
+//      verified value is recorded in `scriptHashLegacy` and `scriptHash` is the
+//      NO_ACCEPTED_P2SH sentinel. Safe for the same two reasons as there:
+//      isValidAddress() is leniency-only, and isSpendableAddress() refuses EVERY
+//      P2SH form on EVERY chain (the builder cannot construct a P2SH output at
+//      all), so a refused P2SH address can never become an unspendable output.
+//      Net effect: a Neoxa P2SH address is reported "not a Neoxa address".
+//      Stricter than consensus, never more permissive. Ravencoin is unchanged.
+//
+//   2. PUBKEY_ADDRESS 38 IS THE SAME BYTE BTGS USES, AND NEITHER CHAIN CAN GIVE
+//      IT UP. This one CANNOT be fixed the way the P2SH overlaps were, and
+//      pretending otherwise would be the dangerous move. 38 is Neoxa's own P2PKH
+//      prefix and it is also BTGS's own; it is how each chain writes its
+//      addresses, so neither side can refuse it without refusing its own users.
+//      The consequence is real and is pinned in chainParams.neoxa.test.ts in both
+//      directions: a Neoxa 'G…' address passes isValidAddress()/isSpendableAddress()
+//      on BTGS and vice versa, because the two byte strings are indistinguishable
+//      (same version byte, same base58check checksum, same length).
+//      Three things bound the damage, none of which is a fix:
+//        - BTGS's addressFormat is 'p2wpkh' with segwit active from genesis, so
+//          this wallet never HANDS OUT a 'G…' address on BTGS; the overlap can
+//          only be reached by pasting one in.
+//        - The coin types differ (1668 vs 18888), so the two chains derive
+//          different keys from one seed: this is a paste-the-wrong-address risk,
+//          never a case of one wallet silently owning both addresses.
+//        - Coins misdirected this way are not destroyed. The recipient's private
+//          key controls that hash160 on any chain, so recovery is a manual key
+//          import (the WIF version bytes differ, 112 vs 176, so it is an import,
+//          not a copy-paste).
+//      This is the honest state of it: a documented, tested cross-chain confusion
+//      risk, not a defect that a version-byte edit could remove. Do not "resolve"
+//      it by demoting either chain's PUBKEY_ADDRESS — that would stop the losing
+//      chain from validating its own addresses.
+
 /** Ticker of a chain's native coin. Widen this (and networkFor) to add a chain. */
-export type NativeTicker = 'EVR' | 'RVN' | 'BTGS' | 'LTC' | 'WJK' | 'BTC' | 'DOGE';
+export type NativeTicker = 'EVR' | 'RVN' | 'BTGS' | 'LTC' | 'WJK' | 'BTC' | 'DOGE' | 'NEOX';
 
 /** Canonical identity of a supported chain+network. */
 export type ChainId =
@@ -309,7 +436,8 @@ export type ChainId =
   | 'litecoin-mainnet'
   | 'wojakcoin-mainnet'
   | 'bitcoin-mainnet'
-  | 'dogecoin-mainnet';
+  | 'dogecoin-mainnet'
+  | 'neoxa-mainnet';
 
 /**
  * `scriptHash` sentinel meaning "this chain accepts NO P2SH address form".
@@ -394,6 +522,22 @@ export interface EvrmoreNetwork {
   messageMagic: string;
   /** Native-coin ticker symbol. */
   ticker: NativeTicker;
+  /**
+   * Decimal places between one whole coin and one base unit: 1 coin =
+   * 10**decimals base units. Every chain shipped today is 8, like Bitcoin, and
+   * the code used to hardcode that.
+   *
+   * It is a FIELD rather than a constant because it is a property of the chain,
+   * not of this wallet, and the assumption breaks the moment a chain with a
+   * different scale is considered: an EVM chain is 18, where a single coin no
+   * longer fits in a JS number at all (1e18 > Number.MAX_SAFE_INTEGER). Reading
+   * it from here keeps that a data change instead of a hunt through the code.
+   *
+   * NOT to be confused with two neighbouring things that stay 1e8 on purpose:
+   * an Evrmore/Ravencoin ASSET's own `divisions`, and the on-chain base unit
+   * those assets are always quoted in (see ASSET_BASE_UNIT in electrumProvider).
+   */
+  decimals: number;
   /** Human-readable chain name (informational; not a user-facing i18n string). */
   displayName: string;
   /**
@@ -408,23 +552,47 @@ export interface EvrmoreNetwork {
    */
   homepage: string;
   /**
-   * Set on a chain whose network is YOUNG and THIN: little mining power, few
-   * independent nodes, short history. Drives a marker in the chain list and a
-   * caution notice on entering, because the risk is real and not obvious from
-   * the UI: such a chain can slow down or stop producing blocks entirely, which
-   * strands funds in an unconfirmed state through no fault of the wallet. This
-   * is a PROPERTY OF THE NETWORK, not a judgement about the project.
+   * Set on a chain whose network is YOUNG and THIN: few independent nodes or
+   * validators, short history. Drives a marker in the chain list and a caution
+   * notice on entering, because the risk is real and not obvious from the UI:
+   * such a chain can slow down or stop producing blocks entirely, which strands
+   * funds in an unconfirmed state through no fault of the wallet. This is a
+   * PROPERTY OF THE NETWORK, not a judgement about the project.
+   *
+   * DELIBERATELY SAYS NOTHING ABOUT MINING (owner, 2026-08-26). The same flag
+   * now marks EVM chains, and a claim about hash power would be false on a
+   * proof-of-stake chain. The consequence is what the user needs; how the chain
+   * reaches consensus is not.
    *
    * Absent means established. Set it for a new chain unless its network is
    * demonstrably mature, and remove it once that stops being true.
    */
   young?: boolean;
+  /**
+   * Recently added TO THIS WALLET. A fact about Satori GO, not about the chain.
+   *
+   * IT EXISTS BECAUSE `young` IS A CLAIM, AND THE TWO ARE NOT THE SAME THING.
+   * `young` says the network is thin and can stop producing blocks; it drives
+   * the caution notice. A chain can be new here and perfectly mature out there
+   * (Neoxa: mainnet since 2022, over 2.2M blocks), and marking it `young` to
+   * get a "New" label would print a warning about someone else's project that
+   * is simply untrue.
+   *
+   * Both flags show the "New" chip in the chain list. Only `young` warns.
+   */
+  recentlyAdded?: boolean;
 }
 
 /** Whether this chain's network is young/thin enough to warrant the caution
- *  marker. Params-driven so the UI never tests a chain id. */
+ *  NOTICE. Params-driven so the UI never tests a chain id. */
 export function isYoungChain(net: EvrmoreNetwork): boolean {
   return net.young === true;
+}
+
+/** Whether the chain list marks this chain "New": either it is new here, or its
+ *  network is young (which is also worth flagging at the moment of choosing). */
+export function isNewChain(net: EvrmoreNetwork): boolean {
+  return net.recentlyAdded === true || net.young === true;
 }
 
 /** Alias for the generalised (multi-chain) network type. The `EvrmoreNetwork`
@@ -446,6 +614,7 @@ export const EVRMORE_MAINNET: EvrmoreNetwork = {
   addressFormat: 'p2pkh',
   messageMagic: 'Evrmore Signed Message:\n',
   ticker: 'EVR',
+  decimals: 8,
   displayName: 'Evrmore',
   homepage: 'https://evrmore.com', // verified 2026-08-14
 };
@@ -464,6 +633,7 @@ export const EVRMORE_TESTNET: EvrmoreNetwork = {
   addressFormat: 'p2pkh',
   messageMagic: 'Evrmore Signed Message:\n',
   ticker: 'EVR',
+  decimals: 8,
   displayName: 'Evrmore Testnet',
   homepage: 'https://evrmore.com', // same project as mainnet
 };
@@ -486,6 +656,7 @@ export const RAVENCOIN_MAINNET: EvrmoreNetwork = {
   addressFormat: 'p2pkh',
   messageMagic: 'Raven Signed Message:\n', // validation.cpp:129
   ticker: 'RVN',
+  decimals: 8,
   displayName: 'Ravencoin',
   homepage: 'https://ravencoin.org', // verified 2026-08-14
 };
@@ -517,6 +688,7 @@ export const BITCOINGOLD_MAINNET: EvrmoreNetwork = {
   addressFormat: 'p2wpkh', // segwit active from genesis; receive addrs are bcg1…
   messageMagic: 'Bitcoin Signed Message:\n', // src/common/signmessage.cpp
   ticker: 'BTGS',
+  decimals: 8,
   // "BitcoinGold", ONE WORD, and not a typo for "Bitcoin Gold". The single word
   // is the project's own spelling and is the only thing separating it, in a
   // label, from the 2017 Bitcoin Gold (BTG) it would otherwise be taken for.
@@ -558,6 +730,7 @@ export const LITECOIN_MAINNET: EvrmoreNetwork = {
   addressFormat: 'p2wpkh', // segwit active on mainnet; receive addrs are ltc1…
   messageMagic: 'Litecoin Signed Message:\n', // src/util/message.cpp MESSAGE_MAGIC
   ticker: 'LTC',
+  decimals: 8,
   displayName: 'Litecoin',
   taprootActive: true, // chainparams.cpp: taproot nStartHeight 2161152, long since active (tip > 3.1M)
   homepage: 'https://litecoin.org', // verified 2026-08-14
@@ -596,6 +769,7 @@ export const WOJAKCOIN_MAINNET: EvrmoreNetwork = {
   addressFormat: 'p2pkh', // legacy chain -> BIP44 purpose 44'
   messageMagic: 'Bitcoin Signed Message:\n', // src/util/message.cpp MESSAGE_MAGIC
   ticker: 'WJK',
+  decimals: 8,
   displayName: 'WojakCoin',
   // The site itself sits behind a Cloudflare challenge that refuses automated
   // requests, so it could not be fetch-verified. The DOMAIN is confirmed as the
@@ -634,6 +808,7 @@ export const BITCOIN_MAINNET: EvrmoreNetwork = {
   addressFormat: 'p2wpkh', // segwit active on mainnet; receive addrs are bc1…
   messageMagic: 'Bitcoin Signed Message:\n', // src/common/signmessage.cpp MESSAGE_MAGIC
   ticker: 'BTC',
+  decimals: 8,
   displayName: 'Bitcoin',
   taprootActive: true, // activated at block 709632 (BIP341); chainparams cites 711648 as taproot activation + window
   homepage: 'https://bitcoin.org', // verified 2026-08-14 (responds; the project's own site)
@@ -671,13 +846,63 @@ export const DOGECOIN_MAINNET: EvrmoreNetwork = {
   addressFormat: 'p2pkh', // legacy chain -> BIP44 purpose 44'
   messageMagic: 'Dogecoin Signed Message:\n', // src/validation.cpp strMessageMagic
   ticker: 'DOGE',
+  decimals: 8,
   displayName: 'Dogecoin',
   homepage: 'https://dogecoin.com', // verified 2026-08-15 (HTTP 200; the project's own site)
   // NOT young: mainnet since 2013, tip past 6.3M blocks, deep independent mining.
 };
 
-/** Asset script opcode (OP_EVR_ASSET / OP_RVN_ASSET); marks an asset
- *  transfer/issuance output. Both chains use the SAME value 0xc0. */
+// Neoxa mainnet. THE THIRD ASSET-CAPABLE CHAIN, after Evrmore and Ravencoin: it
+// carries the full Ravencoin asset protocol and emits byte-identical "rvnt"/"rvnq"/
+// "rvnr"/"rvno" markers, so assetMarkerPrefix is 'rvn' and supportsAssets() is
+// true. Legacy-only (no bech32 address form exists on the chain at all — which is
+// NOT the WojakCoin "hrp defined but segwit never activates" trap; see the header
+// block). BIP32 version bytes are the STANDARD Bitcoin ones and coinType 1668 is a
+// real registered SLIP-44 value, so this chain shares derivation with none of the
+// others. `id:'mainnet'` is the Electrum server ROLE (as for RVN/BTGS/LTC/WJK/BTC/
+// DOGE); `chainId` is the identity. Every value is from NeoxaChain/Neoxa
+// src/chainparams.cpp (see the NEOXA header block for the exact source lines).
+//
+// ITS SERVER IS LIVE since 2026-08-26, through the gateway's `neox` Electrum
+// row. See the NEOX block in network.ts for what that server is, what was
+// verified against it, and the one thing it costs (no TLS on the gateway's hop).
+export const NEOXA_MAINNET: EvrmoreNetwork = {
+  id: 'mainnet',
+  chainId: 'neoxa-mainnet',
+  bip32: { public: 0x0488b21e, private: 0x0488ade4 }, // chainparams.cpp:457/458 — STANDARD
+  pubKeyHash: 38, // chainparams.cpp:454 -> 'G'. SAME BYTE AS BTGS; see the header block.
+  // SCRIPT_ADDRESS is 122, i.e. RAVENCOIN'S OWN P2SH prefix. Neoxa is the later
+  // fork, so per the directional ownership rule it fails closed and accepts no
+  // P2SH form; the verified value is kept in scriptHashLegacy.
+  scriptHash: NO_ACCEPTED_P2SH,
+  scriptHashLegacy: 122, // chainparams.cpp:455 (verified; deliberately not validated)
+  wif: 112, // chainparams.cpp:456
+  coinType: 1668, // chainparams.cpp:461 + SLIP-44 registry ("1668 | NEOX | Neoxa")
+  messageStart: 0x47, // chainparams.cpp:434 pchMessageStart[0] = 0x47 ('G' of "GAME")
+  defaultPort: 8788, // chainparams.cpp:438
+  assetMarkerPrefix: 'rvn', // assets.h:21-26 + assets.cpp: the bytes are 'r','v','n'
+  // bech32Hrp INTENTIONALLY ABSENT: the chain defines no bech32_hrp and the tree
+  // ships no bech32 encoder, so there is no segwit address format to encode to.
+  addressFormat: 'p2pkh', // legacy chain -> BIP44 purpose 44'
+  messageMagic: 'Neoxa Signed Message:\n', // src/validation.cpp:119 strMessageMagic
+  ticker: 'NEOX',
+  decimals: 8, // dev.neoxa.net "Chain parameters": 1 NEOX = 100 000 000 satoshis
+  displayName: 'Neoxa',
+  homepage: 'https://neoxa.net', // verified 2026-08-25 (HTTP 200; the project's own site)
+  // Marked "New" in the chain list (owner, 2026-08-26). NOT `young`: this
+  // network has been mainnet since 2022 with a tip past 2.2M blocks, so the
+  // caution notice about a chain that can stop producing blocks would be a
+  // false statement about it. What Neoxa is waiting on is its own server, which
+  // is a fact about this wallet and is said where it belongs.
+  recentlyAdded: true,
+  // NOT young: mainnet since 2022, tip past 2.2M blocks at ~60 s spacing, a live
+  // smartnode network and an active GPU mining pool set. The thing this chain is
+  // waiting on is its own server, not network maturity, so the caution marker
+  // would be the wrong signal.
+};
+
+/** Asset script opcode (OP_EVR_ASSET / OP_RVN_ASSET / OP_NEOX_ASSET); marks an
+ *  asset transfer/issuance output. All three chains use the SAME value 0xc0. */
 export const OP_EVR_ASSET = 0xc0;
 
 /** True when the chain implements the Ravencoin-style asset protocol, i.e. its
@@ -713,12 +938,15 @@ export function supportsTaproot(net: EvrmoreNetwork): boolean {
  *   equal coinType  — the BIP44/BIP84 derivation path's coin index, AND
  *   equal bip32 version bytes — the master-key serialization the tree starts from.
  * Today that makes exactly Evrmore <-> Ravencoin true (both coinType 175, both
- * 0x0488B21E/0x0488ADE4). Bitcoin (0), Litecoin (2), Dogecoin (3), Bitcoin Gold
- * (18888) and WojakCoin (20760) each have their own coin type, so none is linkable this way —
+ * 0x0488B21E/0x0488ADE4). Bitcoin (0), Litecoin (2), Dogecoin (3), Neoxa (1668),
+ * Bitcoin Gold (18888) and WojakCoin (20760) each have their own coin type, so none is linkable this way —
  * and adding a future chain that reuses another's coin type will start returning
- * true here with no code change. Note that four of the six chains DO share
+ * true here with no code change. Note that five of the seven chains DO share
  * Bitcoin's BIP32 version bytes; that alone is not a link, because the coin index
- * still separates their derivation paths.
+ * still separates their derivation paths. Neoxa is the clearest illustration: it
+ * is a RAVENCOIN FORK and carries Ravencoin's asset protocol and its P2SH prefix,
+ * yet coinType 1668 vs 175 means one seed derives entirely different keys on the
+ * two chains, so this correctly returns false for that pair.
  *
  * Deliberately NOT part of the test: `addressFormat` (which picks purpose 44' vs
  * 84'). A differing purpose would in fact yield different keys, so including it
@@ -787,6 +1015,8 @@ export function networkFor(id: ChainId | EvrmoreNetwork['id']): EvrmoreNetwork {
       return BITCOIN_MAINNET;
     case 'dogecoin-mainnet':
       return DOGECOIN_MAINNET;
+    case 'neoxa-mainnet':
+      return NEOXA_MAINNET;
     case 'testnet':
     case 'evrmore-testnet':
       return EVRMORE_TESTNET;
@@ -963,6 +1193,29 @@ export const CHAIN_FEE_POLICIES: Record<ChainId, ChainFeePolicy> = {
     defaultSatPerByte: 1200n, // above the floor and above every measured 6/25-block estimate (801-968)
     ceilingSatPerByte: 10_000n, // 10x params floor; clamps the ~50,412 2-block spike (see above)
     maxTxFeeSats: 100_000_000n, // 1 DOGE ≥ ceiling x ~3-kB worst-case tx (30M); value-trivial on DOGE
+  },
+  // Neoxa: THE ONLY ROW WITH NO MEASURED COLUMN IN THE TABLE ABOVE, and it says so
+  // rather than borrowing a neighbour's numbers. There is no ElectrumX server for
+  // Neoxa to probe (see the NEOX block in network.ts), so `blockchain.estimatefee`
+  // and `blockchain.relayfee` could not be read at all. Every value here therefore
+  // comes from the chain's OWN SOURCE, which is the same footing Dogecoin's floor
+  // stands on and a stricter one than a single probe would give:
+  //   - src/validation.h:64  DEFAULT_MIN_RELAY_TX_FEE = 1000000 satoshis per kB
+  //     -> 1000 sat/byte. That is Ravencoin's and Evrmore's exact relay floor, and
+  //     it is why this row looks like theirs and nothing like Bitcoin's.
+  //   - The default sits just above the floor because there is no estimate to sit
+  //     above; it is NOT a measurement and must be replaced with one the day a
+  //     server exists.
+  //   - The ceiling keeps the 10x-floor headroom ratio used for EVR/RVN/DOGE.
+  // WHEN A SERVER APPEARS: probe estimatefee across targets and relayfee, and
+  // revisit `defaultSatPerByte` first. The floor should be left alone unless the
+  // chain's own source changes, for the reason given in the header above (a
+  // server-supplied floor is a fee-raising lever in a hostile server's hands).
+  'neoxa-mainnet': {
+    floorSatPerByte: 1000n, // DEFAULT_MIN_RELAY_TX_FEE 1000000/kB (validation.h:64) — NOT server data
+    defaultSatPerByte: 1200n, // just above the floor; no measured estimate exists yet
+    ceilingSatPerByte: 10_000n, // 10x params floor, same headroom ratio as EVR/RVN/DOGE
+    maxTxFeeSats: 100_000_000n, // 1 NEOX >= ceiling x ~3-kB worst-case tx (30M)
   },
 };
 

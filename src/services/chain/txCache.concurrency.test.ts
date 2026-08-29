@@ -5,8 +5,9 @@
 //     data (see the constant's comment in txCache.ts).
 //   - MAX_CONCURRENT_CLASSIFY is per WALLET. A refresh runs one cache loop per
 //     receive address, all at once, all over ONE socket, so without this the
-//     batch size would multiply by the address count (up to 20) and a server
-//     would see a burst five times larger than anything that was measured.
+//     batch size would multiply by the address count (now up to
+//     MAX_RECEIVE_ADDRESSES = 100, raised for the gap-limit scan) and a server
+//     would see a burst far larger than anything that was measured.
 //
 // These tests watch the FAKE PROVIDER, i.e. the requests that would actually
 // reach a server, rather than asserting the constants back at themselves.
@@ -103,8 +104,10 @@ describe('classify concurrency', () => {
   });
 
   it('MANY addresses at once stay under the wallet-wide ceiling', async () => {
-    // 20 addresses is MAX_RECEIVE_ADDRESSES: the worst case a real wallet can
-    // reach. Without the ceiling this would be 20 x 25 = 500 concurrent requests.
+    // 20 addresses: no longer the cap (that is 100 now), but already enough to
+    // prove the clamp, since without the ceiling this alone would be
+    // 20 x 25 = 500 concurrent requests. A wallet at the real cap would want
+    // 2500, which the same single ceiling holds at 100.
     const rec = newRecorder();
     const addresses = Array.from({ length: 20 }, (_, i) => `Eaddr${i}`);
     await Promise.all(
@@ -120,10 +123,13 @@ describe('classify concurrency', () => {
   });
 
   it('the wallet-wide worst case is no larger than it was before the batch was raised', async () => {
-    // The old behaviour was batch 5 x up to 20 addresses = 100 concurrent. That
-    // number is the ceiling now, so no server sees a bigger burst than this
-    // wallet already sent, whatever the address count.
-    expect(MAX_PER_WALLET).toBe(5 * 20);
+    // The old behaviour was batch 5 x the old cap of 20 addresses = 100
+    // concurrent. That number is the ceiling now, so no server sees a bigger
+    // burst than this wallet already sent, whatever the address count grows to.
+    // Written as the literal it is: the old factors no longer describe anything
+    // live (the batch is 25 and the cap is 100), so multiplying them here would
+    // read like a derivation that still holds.
+    expect(MAX_PER_WALLET).toBe(100);
   });
 
   it('slots are released when classification FAILS, so a later refresh is not starved', async () => {

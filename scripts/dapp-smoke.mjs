@@ -19,7 +19,7 @@
 // No funds move; keys never leave the extension windows.
 import { chromium } from 'playwright';
 import http from 'node:http';
-import { rmSync } from 'node:fs';
+import { existsSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import os from 'node:os';
@@ -60,7 +60,12 @@ function recoverEvrAddress(message, sigB64) {
 }
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
-const distDir = path.join(root, 'dist', 'chrome');
+// The dApp provider ships in every build, so this smoke runs against whichever
+// package exists: the loaded EVM dist/chrome first, else the store build at
+// dist/store/chrome (the two split on 2026-08-25, see scripts/build.mjs).
+const distDir = existsSync(path.join(root, 'dist', 'chrome', 'manifest.json'))
+  ? path.join(root, 'dist', 'chrome')
+  : path.join(root, 'dist', 'store', 'chrome');
 const userDataDir = path.join(os.tmpdir(), `evrdemo-dapp-${Date.now()}`);
 
 const VECTOR_MNEMONIC = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
@@ -110,6 +115,48 @@ const check = (ok, label) => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}`);
 async function extId() {
   const w = context.serviceWorkers()[0] ?? (await context.waitForEvent('serviceworker', { timeout: 15_000 }));
   return new URL(w.url()).host;
+}
+
+/**
+ * WALLET CREATION: the recovery-phrase backup step (mirrors the helper in
+ * live-extension-smoke.mjs). A created wallet shows its words, then asks three
+ * of them back at random positions before it opens, so a smoke that creates a
+ * wallet has to answer the quiz to get anywhere. Reads the phrase off the
+ * screen while it is still visible, ticks "I saved it", continues, works out
+ * which blanks are asked from the live-mnemonic-slot-<position> testids, taps
+ * the matching chips and submits. The wrong-answer path is covered once, in
+ * live-extension-smoke; here the point is only that creation still completes.
+ */
+async function answerMnemonicQuiz(pg, label = 'create') {
+  const id = (t) => pg.getByTestId(t);
+  await id('live-mnemonic').waitFor({ timeout: 30_000 });
+  const words = new Map();
+  for (const el of await pg.locator('[data-testid^="live-mnemonic-word-"]').all()) {
+    const tid = (await el.getAttribute('data-testid')) || '';
+    words.set(Number(tid.replace('live-mnemonic-word-', '')), (await el.innerText()).trim());
+  }
+  await id('live-mnemonic-saved').click({ timeout: 15_000 });
+  await pg.getByRole('button', { name: /Continue to wallet/i }).click({ timeout: 10_000 });
+  await id('live-mnemonic-verify').waitFor({ timeout: 20_000 });
+
+  const positions = [];
+  for (const el of await pg.locator('[data-testid^="live-mnemonic-slot-"]').all()) {
+    const tid = (await el.getAttribute('data-testid')) || '';
+    positions.push(Number(tid.replace('live-mnemonic-slot-', '')));
+  }
+  // Chips are re-read per word: a used one is disabled, which is what makes a
+  // repeated word resolve to a second, still-available chip.
+  for (const word of positions.map((p) => words.get(p))) {
+    let picked = null;
+    for (const el of await pg.locator('[data-testid^="live-mnemonic-choice-"]').all()) {
+      if ((await el.innerText()).trim() === word && !(await el.isDisabled())) { picked = el; break; }
+    }
+    if (!picked) throw new Error(`mnemonic quiz: no chip left in the bank for "${word}"`);
+    await picked.click({ timeout: 10_000 });
+  }
+  await id('live-mnemonic-verify-submit').click({ timeout: 10_000 });
+  await id('live-mnemonic-verify').waitFor({ state: 'detached', timeout: 30_000 });
+  check(positions.length === 3, `${label}: recovery-phrase quiz answered (#${positions.join(', #')})`);
 }
 
 try {
@@ -255,8 +302,7 @@ try {
   await popupSw.getByTestId('live-password').fill(WALLET2_PASS);
   await popupSw.getByTestId('live-password-confirm').fill(WALLET2_PASS);
   await popupSw.getByTestId('live-create-submit').click();
-  await popupSw.getByTestId('live-mnemonic-saved').click({ timeout: 15_000 });
-  await popupSw.getByRole('button', { name: /Continue to wallet/i }).click({ timeout: 10_000 });
+  await answerMnemonicQuiz(popupSw, 'wallet 2');
   await popupSw.getByTestId('live-home').waitFor({ timeout: 20_000 });
   const activeName = (await popupSw.getByTestId('live-wallet-switcher').innerText()).trim();
   check(/second wallet/i.test(activeName), `created + switched to Wallet 2 (active switcher -> "${activeName}")`);

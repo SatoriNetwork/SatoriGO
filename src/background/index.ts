@@ -17,11 +17,14 @@
 //   still works if this worker is torn down and restarted in between.
 
 import { getStorage } from '../services/storage';
+import { handleActionClickForSidebar, restoreSidePanelPreference } from '../services/sidePanel';
 import { createElectrumClient } from '../services/chain/electrumClient';
 import { ElectrumWalletDataProvider } from '../services/chain/electrumProvider';
 import { applyAllStoredElectrumServers } from '../services/chain/network';
 import { networkFor } from '../services/chain/chainParams';
 import { diffDeposits, type BalanceMap } from './deposits';
+import { formatAmount, amountToNumber } from '../services/chain/amounts';
+import { displaySymbol } from '../services/displaySymbol';
 import {
   addApproval,
   isOriginApproved,
@@ -257,19 +260,22 @@ async function getWatchTargets(): Promise<{ address: string; name: string; chain
   return out;
 }
 
-/** Format a whole-unit amount with up to 8 decimals, trimming trailing zeros. */
-function fmtAmount(n: number): string {
-  return n.toLocaleString('en-US', { maximumFractionDigits: 8, useGrouping: false });
-}
-
-function showDepositNotification(walletName: string, asset: string, delta: number): void {
+function showDepositNotification(
+  walletName: string,
+  asset: string,
+  deltaBase: bigint,
+  scale: number,
+): void {
   if (typeof chrome === 'undefined' || !chrome.notifications) return;
   try {
     chrome.notifications.create({
       type: 'basic',
       iconUrl: chrome.runtime.getURL('icons/icon128.png'),
       title: 'Received funds',
-      message: `+${fmtAmount(delta)} ${asset} · ${walletName}`,
+      // The asset name reaches the OS notification centre, outside every CSS
+      // guard the wallet has, so it is drawn through the same sanitiser the UI
+      // uses (services/displaySymbol.ts).
+      message: `+${formatAmount(deltaBase, scale)} ${displaySymbol(asset)} · ${walletName}`,
       priority: 1,
     });
   } catch {
@@ -299,12 +305,20 @@ async function checkDeposits(): Promise<void> {
     } catch {
       continue; // address/chain unreachable this cycle — try again next tick
     }
+    // Base units as strings: exact, and JSON-safe for storage (a BigInt would
+    // throw in JSON.stringify).
     const current: BalanceMap = {};
-    for (const b of balances) current[b.name] = b.amount;
+    const scales = new Map<string, number>();
+    for (const b of balances) {
+      current[b.name] = b.amountBase.toString();
+      scales.set(b.name, b.scale);
+    }
 
     // First sight of an address => diffDeposits returns [] (baseline only).
-    for (const { asset, delta } of diffDeposits(snapshot[address], current)) {
-      showDepositNotification(name, asset, delta);
+    for (const { asset, deltaBase, scale } of diffDeposits(snapshot[address], current, (a) =>
+      scales.get(a) ?? 8,
+    )) {
+      showDepositNotification(name, asset, deltaBase, scale);
     }
     // Always update the baseline (first sight sets it silently; later diffs alert).
     snapshot[address] = current;
@@ -425,7 +439,18 @@ async function handleDappRequest(
       // ticker). No unlock, no keys — the page gets [{name, amount, decimals}].
       const balances = await getProviderForChain(active.network).getAllAssetBalances(active.address);
       return {
-        result: balances.map((b) => ({ name: b.name, amount: b.amount, decimals: b.decimals })),
+        // `amount` stays a NUMBER: this is a public API that sites already
+        // consume, and changing its type would break them. `amountBase` is
+        // added alongside as an exact decimal string in base units, with the
+        // `scale` to read it by, so a new consumer can be precise without any
+        // existing one having to change.
+        result: balances.map((b) => ({
+          name: b.name,
+          amount: amountToNumber(b.amountBase, b.scale),
+          decimals: b.decimals,
+          amountBase: b.amountBase.toString(),
+          scale: b.scale,
+        })),
       };
     }
     case 'sendEvr':
@@ -527,6 +552,20 @@ chrome.runtime.onMessage.addListener(
 chrome.runtime.onInstalled.addListener(() => {
   // Register the deposit-poll alarm on install/update.
   ensureDepositAlarm();
+  // A fresh install has no stored window mode, and the side panel is the
+  // default: this is where a Chrome/Edge install is switched over to it. An
+  // update reloads the extension and can reset the action popup / panel
+  // registration, so the same call puts an explicit choice back.
+  void restoreSidePanelPreference();
+});
+// Every worker boot (browser start included): the window mode is re-applied
+// from storage, so it does not depend on what the browser persists, and the
+// default reaches users whose onInstalled fired before this code shipped.
+void restoreSidePanelPreference();
+// Firefox: with the popup cleared (side panel preference on) the toolbar click
+// arrives here; toggle the sidebar. Chrome/Edge never fire this for the panel.
+chrome.action?.onClicked?.addListener(() => {
+  void handleActionClickForSidebar();
 });
 
 // Re-register the alarm when the browser (re)starts the worker, and fire the

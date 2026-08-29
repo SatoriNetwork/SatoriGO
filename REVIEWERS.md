@@ -24,16 +24,23 @@ All dependencies are installed from the public npm registry through
 
 ```sh
 npm ci                  # installs the exact pinned dependencies from package-lock.json
-npm run build:firefox   # runs: node scripts/build.mjs --target=firefox
+npm run build:firefox   # runs: node scripts/build.mjs --target=firefox --evm --package
 ```
 
-The unpacked extension is written to `dist/firefox`. **The submitted add-on is the
-contents of `dist/firefox`, zipped.** Running `npm run package:firefox` produces
-that zip directly, at `release/satori-go-firefox.zip`.
+The unpacked extension is written to `dist/store/firefox`. **The submitted add-on
+is the contents of `dist/store/firefox`, zipped.** Running `npm run
+package:firefox` produces that zip directly, at `release/satori-go-firefox.zip`.
 
 `scripts/build.mjs` type-checks the project, runs the Vite build, then copies
 `platforms/firefox/manifest.json` and any files under
-`platforms/firefox/overrides/` into `dist/firefox`.
+`platforms/firefox/overrides/` into `dist/store/firefox`. It also writes
+`build-info.json` next to the manifest recording the version, the target and
+whether the EVM engine is included, so the built directory states what it is.
+
+The two flags are not optional and the script will refuse some combinations:
+`--evm` includes the EVM network engine, which every released package carries;
+`--package` selects the `dist/store/<target>` output directory, which keeps a
+package build from overwriting a development build loaded in a browser.
 
 Chrome and Edge are built the same way with `--target=chrome` / `--target=edge`.
 

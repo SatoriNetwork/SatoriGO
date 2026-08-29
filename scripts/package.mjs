@@ -1,11 +1,20 @@
 // Builds every target (or the ones passed via --target) and packs each
-// dist/<target> into release/satori-go-<target>.zip.
+// dist/store/<target> into release/satori-go-<target>.zip.
 //
 //   node scripts/package.mjs                 # all three
 //   node scripts/package.mjs --target=chrome # just one
 //
 // Assumes the dist output already exists is NOT safe here, so it invokes
 // scripts/build.mjs first for the requested target(s).
+//
+// IT PACKS dist/store/<target>, AND IT PASSES --evm --package TO GET IT THERE.
+// Both halves were wrong and it went unnoticed because nothing runs this script
+// in the gate. When store builds moved to dist/store/<target> (2026-08-25) this
+// kept zipping dist/<target>, which for chrome is the LOADED development
+// directory and for the other two targets does not exist: the chrome package
+// would have been the wrong artefact and the other two would have failed at the
+// manifest check. And a package must now carry the EVM engine (owner, 2026-08-27),
+// which a build without --evm does not.
 import AdmZip from 'adm-zip';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, statSync } from 'node:fs';
@@ -27,19 +36,23 @@ for (const t of targets) {
 }
 
 // Build first (typecheck runs once inside build.mjs).
-const build = spawnSync(process.execPath, [path.join(root, 'scripts', 'build.mjs'), `--target=${requested}`], {
-  cwd: root,
-  stdio: 'inherit',
-});
+const build = spawnSync(
+  process.execPath,
+  [path.join(root, 'scripts', 'build.mjs'), `--target=${requested}`, '--evm', '--package'],
+  {
+    cwd: root,
+    stdio: 'inherit',
+  },
+);
 if (build.status !== 0) process.exit(build.status ?? 1);
 
 const releaseDir = path.join(root, 'release');
 mkdirSync(releaseDir, { recursive: true });
 
 for (const target of targets) {
-  const dist = path.join(root, 'dist', target);
+  const dist = path.join(root, 'dist', 'store', target);
   if (!existsSync(path.join(dist, 'manifest.json'))) {
-    console.error(`dist/${target}/manifest.json not found after build.`);
+    console.error(`dist/store/${target}/manifest.json not found after build.`);
     process.exit(1);
   }
   const zipPath = path.join(releaseDir, `satori-go-${target}.zip`);

@@ -29,6 +29,12 @@ import type {
   ElectrumUtxo,
 } from './electrumTypes';
 import { addressToElectrumScripthash } from './keys';
+// TYPE ONLY, and it must stay that way: the EVM engine sits behind the build
+// flag, so a VALUE import here would pull it into a package built without --evm
+// (vite.config.ts fails such a build). A type annotation is erased by tsc and
+// reaches no bundle. LiveTransaction is the ONE Activity-row type both families
+// produce, which is why the EVM-only field below lives on it.
+import type { StakingCallInfo } from './evm/cosmosStaking';
 import { ELECTRUM_METHODS, SATORI_ASSET } from './network';
 import { EVRMORE_MAINNET, supportsAssets, type EvrmoreNetwork } from './chainParams';
 
@@ -112,9 +118,28 @@ const HISTORY_TOO_LARGE_RE = /history (is )?too (large|long|big)|too many (histo
 export interface LiveAssetBalance {
   /** On-chain asset name, uppercase (e.g. "SATORI"). "EVR" for the native coin. */
   name: string;
-  /** Balance in whole units (raw sats / 1e8). */
-  amount: number;
-  /** Divisions / decimal places for display precision only (8 for EVR). */
+  /**
+   * Balance in BASE UNITS, exactly as the chain counts them. bigint, so a large
+   * balance cannot lose its last digits the way the old whole-unit `number`
+   * could past 2^53 base units.
+   *
+   * Divide by 10**`scale` to get whole units. Do NOT use `decimals` for that:
+   * see the two fields below, which are different things that happen to be
+   * equal for the native coin.
+   */
+  amountBase: bigint;
+  /**
+   * How many decimals `amountBase` is scaled by. For the NATIVE coin this is
+   * the chain's own scale. For an ASSET it is always 8 on Evrmore/Ravencoin,
+   * because the chain quotes every asset in 1e8 base units on-chain WHATEVER
+   * that asset's own divisions are.
+   */
+  scale: number;
+  /**
+   * Divisions: how many decimal places to SHOW. Display precision only, never
+   * a scale. An asset with divisions 0 is still stored in 1e8 base units; it
+   * simply must not be rendered with a fraction.
+   */
   decimals: number;
   /** True for the native EVR coin, false for issued assets. */
   isNative: boolean;
@@ -170,6 +195,12 @@ export interface LiveTransaction {
   blockHeight?: number;
   timestamp: number;
   counterparty: string;
+  /** EVM ONLY, and always absent on a UTXO row: what a native-staking call did,
+   *  decoded from its calldata (which validator, how much, stake / unstake /
+   *  move / claim). Its absence is the normal case and every renderer must read
+   *  exactly as it did before when it is missing. Nothing on the UTXO path
+   *  reads, writes or is affected by this field. */
+  staking?: StakingCallInfo;
 }
 
 /**
@@ -224,6 +255,17 @@ const NATIVE_DECIMALS = 8;
  *  1 token. Dividing by 10^divisions (the previous bug) over-reported low-division
  *  assets by 10^(8-divisions). */
 const ASSET_BASE_UNIT = 1e8;
+/** ASSET_BASE_UNIT expressed as decimals, for the bigint side of the same fact. */
+const ASSET_BASE_UNIT_DECIMALS = 8;
+
+/** A server-reported base-unit count -> bigint. Electrum quotes these as whole
+ *  integers; a non-integer means a broken or hostile server, and truncating is
+ *  the safe reading (never invent value that is not there). Never throws: a
+ *  balance read must not take the whole refresh down. */
+function toBase(rawBaseUnits: number): bigint {
+  if (!Number.isFinite(rawBaseUnits)) return 0n;
+  return BigInt(Math.trunc(rawBaseUnits));
+}
 
 /** Whether a listunspent `asset` field denotes the native coin (EVR). Defensive:
  *  live data uses `null`, but tolerate ""/"rvn"/"evr" too. */
@@ -337,6 +379,7 @@ export class ElectrumWalletDataProvider implements WalletDataProvider {
   /** Active chain params. Mutable via setNetwork() so a single shared provider
    *  follows the active wallet's chain (the live service retargets it on switch). */
   private net: EvrmoreNetwork;
+
   private readonly prices: Partial<Record<AssetId, { priceUsd: number; change24hPct: number }>>;
 
   /** Native coin name for the ACTIVE chain ('EVR' / 'RVN'). */
@@ -522,8 +565,8 @@ export class ElectrumWalletDataProvider implements WalletDataProvider {
       // also the ONLY form a plain (non-asset) server accepts.
       if (!this.isEvrmore) {
         const bal = await this.client.request<ElectrumBalance>(ELECTRUM_METHODS.getBalance, [sh]);
-        const amount = ((bal.confirmed ?? 0) + (bal.unconfirmed ?? 0)) / 1e8;
-        return [{ assetId: this.nativeName as AssetId, amount }];
+        const amountBase = toBase((bal.confirmed ?? 0) + (bal.unconfirmed ?? 0));
+        return [{ assetId: this.nativeName as AssetId, amountBase, scale: this.net.decimals }];
       }
 
       const [evrBalance, satoriBalance] = await Promise.all([
@@ -531,13 +574,16 @@ export class ElectrumWalletDataProvider implements WalletDataProvider {
         this.client.request<ElectrumBalance>(ELECTRUM_METHODS.getBalance, [sh, 'SATORI']),
       ]);
 
-      const evrAmount = ((evrBalance.confirmed ?? 0) + (evrBalance.unconfirmed ?? 0)) / 1e8;
-      const satoriAmount =
-        ((satoriBalance.confirmed ?? 0) + (satoriBalance.unconfirmed ?? 0)) / 1e8;
+      const evrBase = toBase((evrBalance.confirmed ?? 0) + (evrBalance.unconfirmed ?? 0));
+      // ASSETS stay on ASSET_BASE_UNIT, not the chain's scale: every
+      // Evrmore/Ravencoin asset is quoted in 1e8 on-chain whatever its own
+      // `divisions`. The two happen to be equal today and must not be conflated.
+      const satoriBase = toBase((satoriBalance.confirmed ?? 0) + (satoriBalance.unconfirmed ?? 0));
 
       return [
-        { assetId: 'EVR', amount: evrAmount },
-        { assetId: 'SATORI', amount: satoriAmount },
+        { assetId: 'EVR', amountBase: evrBase, scale: this.net.decimals },
+        // An ASSET: its scale is the on-chain asset base unit, not the chain's.
+        { assetId: 'SATORI', amountBase: satoriBase, scale: ASSET_BASE_UNIT_DECIMALS },
       ];
     } catch {
       // Re-throw network errors as NetworkOfflineError so the store can handle them.
@@ -584,7 +630,8 @@ export class ElectrumWalletDataProvider implements WalletDataProvider {
       const results: LiveAssetBalance[] = [
         {
           name: this.nativeName,
-          amount: evrSats / ASSET_BASE_UNIT,
+          amountBase: toBase(evrSats),
+          scale: this.net.decimals,
           decimals: NATIVE_DECIMALS,
           isNative: true,
         },
@@ -597,7 +644,10 @@ export class ElectrumWalletDataProvider implements WalletDataProvider {
         const sats = satsByAsset.get(name) ?? 0;
         results.push({
           name,
-          amount: sats / ASSET_BASE_UNIT,
+          amountBase: toBase(sats),
+          // NOT `decimals`: an asset's own divisions are display precision, while
+          // the chain stores every asset in ASSET_BASE_UNIT regardless.
+          scale: ASSET_BASE_UNIT_DECIMALS,
           decimals,
           isNative: false,
         });
