@@ -972,6 +972,13 @@ export const DEFAULT_EXPLORER_URL_WJK = 'https://explorer.wojakcoin.cash/tx/{txi
  *  exists because a WojakCoin transaction once opened on Evrmore's explorer. */
 export const DEFAULT_EXPLORER_URL_NEOX = 'https://explorer.neoxa.net/tx/{txid}';
 
+/** Default BITCOIN BLAKE2b block-explorer URL template. VERIFIED LIVE 2026-09-07:
+ *  mempool.guide is a mempool.space-style explorer indexing the BLAKE2b chain
+ *  (its tip and raw headers match electrum.bitcoinxor.org block for block, and
+ *  /api/block/<hash> carries the fork's header_v2 fields). Same URL shape as
+ *  mempool.space, so a txid resolves at https://mempool.guide/tx/<txid>. */
+export const DEFAULT_EXPLORER_URL_BTCB2 = 'https://mempool.guide/tx/{txid}';
+
 /** Block-explorer template default for a chain (default = active chain). '' on
  *  a chain with no known explorer (see the WOJAKCOIN comment above) — callers
  *  must treat an empty template as "no explorer available", not fall through
@@ -990,6 +997,7 @@ function defaultExplorerFor(chainId: string = activeChainTarget()): string {
   if (ticker === 'DOGE') return DEFAULT_EXPLORER_URL_DOGE;
   if (ticker === 'WJK') return DEFAULT_EXPLORER_URL_WJK;
   if (ticker === 'NEOX') return DEFAULT_EXPLORER_URL_NEOX;
+  if (ticker === 'BTCB2') return DEFAULT_EXPLORER_URL_BTCB2;
   if (ticker === 'EVR') return DEFAULT_EXPLORER_URL;
   // A chain with no known explorer fails closed rather than borrowing another
   // chain's, which would resolve a foreign txid on the wrong chain and read to

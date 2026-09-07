@@ -61,6 +61,9 @@ import baseLogoUrl from '../assets/base-logo.svg';
 // already 256x256 with transparent corners, the same shape as the marks above,
 // so no resize was needed.
 import epixLogoUrl from '../assets/epix-logo.png';
+// Bitcoin BLAKE2b (BTCB2) mark, drawn in-repo (assets/btcb2-logo.svg): the fork
+// publishes no logo of its own. A coin with the Bitcoin B and a "2b" tag.
+import btcb2LogoUrl from '../assets/btcb2-logo.svg';
 
 export function officialLogoUrl(slot: LogoSlot): string {
   if (slot === 'satori') return satoriLogoUrl;
@@ -71,6 +74,7 @@ export function officialLogoUrl(slot: LogoSlot): string {
   if (slot === 'btc') return btcLogoUrl;
   if (slot === 'doge') return dogeLogoUrl;
   if (slot === 'neox') return neoxLogoUrl;
+  if (slot === 'btcb2') return btcb2LogoUrl;
   return evrLogoUrl;
 }
 
@@ -205,6 +209,7 @@ export function TokenIcon({ assetId, size = 38 }: TokenIconProps) {
   if (name === 'BTC') return <BrandLogo slot="btc" size={size} alt="BTC" />;
   if (name === 'DOGE') return <BrandLogo slot="doge" size={size} alt="DOGE" />;
   if (name === 'NEOX') return <BrandLogo slot="neox" size={size} alt="NEOX" />;
+  if (name === 'BTCB2') return <BrandLogo slot="btcb2" size={size} alt="BTCB2" />;
   if (name.includes('SATORI')) return <BrandLogo slot="satori" size={size} alt={label} />;
   return <GenericTokenBadge name={name} size={size} />;
 }

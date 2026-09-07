@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!-- Bitcoin BLAKE2b (BTCB2) mark, drawn here: the fork has no published logo.
+       A Bitcoin-orange coin with the B glyph and a "2b" tag, so it reads as
+       "a Bitcoin" and is still told apart from BTC at a glance. -->
+  <circle cx="128" cy="128" r="124" fill="#5b3df5"/>
+  <circle cx="128" cy="128" r="112" fill="none" stroke="#ffffff" stroke-opacity="0.18" stroke-width="6"/>
+  <text x="122" y="168" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-weight="700" font-size="132" fill="#ffffff">&#8383;</text>
+  <rect x="150" y="150" width="82" height="52" rx="14" fill="#ffffff"/>
+  <text x="191" y="189" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-weight="700" font-size="38" fill="#5b3df5">2b</text>
+</svg>

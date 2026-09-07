@@ -45,6 +45,7 @@ import {
   PUBLIC_BTC_ELECTRUM_SERVERS,
   PUBLIC_DOGE_ELECTRUM_SERVERS,
   PUBLIC_NEOX_ELECTRUM_SERVERS,
+  PUBLIC_BTCB2_ELECTRUM_SERVERS,
   DEFAULT_ELECTRUM_SERVER_URLS,
   DEFAULT_RVN_ELECTRUM_SERVER_URLS,
   DEFAULT_BTGS_ELECTRUM_SERVER_URLS,
@@ -53,6 +54,7 @@ import {
   DEFAULT_BTC_ELECTRUM_SERVER_URLS,
   DEFAULT_DOGE_ELECTRUM_SERVER_URLS,
   DEFAULT_NEOX_ELECTRUM_SERVER_URLS,
+  DEFAULT_BTCB2_ELECTRUM_SERVER_URLS,
   GATEWAY_ELECTRUM_PROTOCOL,
   buildEvrElectrumPool,
   buildRvnElectrumPool,
@@ -84,6 +86,7 @@ const DOGE_BRIDGE = 'wss://network.satorigo.app/electrum/doge';
 const BTGS_BRIDGE = 'wss://network.satorigo.app/electrum/btgs';
 const WJK_BRIDGE = 'wss://network.satorigo.app/electrum/wjk';
 const NEOX_BRIDGE = 'wss://network.satorigo.app/electrum/neox';
+const BTCB2_BRIDGE = 'wss://network.satorigo.app/electrum/btcb2';
 const EVR_FALLBACK_1 = 'wss://electrum1-mainnet.evrmorecoin.org:50004';
 const EVR_FALLBACK_2 = 'wss://electrum2-mainnet.evrmorecoin.org:50004';
 
@@ -201,6 +204,20 @@ describe('gateway build: per-chain pool shapes', () => {
     expect(NEOX_BRIDGE).not.toBe(RVN_BRIDGE);
     expect(NEOX_BRIDGE).not.toBe(EVR_BRIDGE);
     expect(gatewayElectrumUrl('neox')).toBe(NEOX_BRIDGE);
+  });
+
+  it('BTCB2 (Bitcoin BLAKE2b) = [bridge] alone: its one server has no wss listener (1.4.2)', () => {
+    // electrum.bitcoinxor.org serves TCP 50001 / SSL 50002 only (verified
+    // 2026-09-07), so a browser cannot reach it and the gateway bridge is the
+    // whole pool, the Neoxa shape. Its own route, never another chain's.
+    expect(PUBLIC_BTCB2_ELECTRUM_SERVERS).toHaveLength(1);
+    expect(electrumWssUrl(PUBLIC_BTCB2_ELECTRUM_SERVERS[0])).toBe(BTCB2_BRIDGE);
+    expect(PUBLIC_BTCB2_ELECTRUM_SERVERS[0].gateway).toBe(true);
+    expect(DEFAULT_BTCB2_ELECTRUM_SERVER_URLS).toEqual([BTCB2_BRIDGE]);
+    expect(getElectrumServerPool('bitcoinblake2b-mainnet')).toEqual(PUBLIC_BTCB2_ELECTRUM_SERVERS);
+    expect(defaultServerUrlsFor('bitcoinblake2b-mainnet')).toEqual([BTCB2_BRIDGE]);
+    expect(BTCB2_BRIDGE).not.toBe(BTC_BRIDGE);
+    expect(gatewayElectrumUrl('btcb2')).toBe(BTCB2_BRIDGE);
   });
 
   it('BTC / LTC / DOGE / BTGS / WJK = [bridge, ...their public pool unchanged] (1.4.0)', () => {

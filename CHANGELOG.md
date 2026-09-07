@@ -9,6 +9,28 @@ and release commits.
 
 ---
 
+## 1.4.2
+
+### Bitcoin BLAKE2b
+
+A new network: Bitcoin BLAKE2b, the Bitcoin Knots proof-of-work fork that split
+from Bitcoin at the end of August 2026. It is marked new in the chain list. It
+is Bitcoin's history under a different proof of work, so your Bitcoin addresses
+are also your addresses there, and a coin you held before the fork sits at the
+same address on both chains.
+
+Sends on it are signed with the fork's own signature format (SIGHASH_UNIFIED),
+which Bitcoin does not accept, so nothing you send there can be replayed onto
+Bitcoin. The other direction is not in the wallet's hands: spending a pre-fork
+coin on Bitcoin moves its BLAKE2b twin too, unless you have first sent the
+BLAKE2b coins to yourself once. The send review says so.
+
+The network is young, with little mining power, and reaches the wallet through
+one server behind the Satori GO gateway. Its price comes from the NonKYC
+BTCB2/USDT market.
+
+---
+
 ## 1.4.1
 
 ### Connecting to a website works the way you would expect

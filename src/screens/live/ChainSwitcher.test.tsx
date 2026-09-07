@@ -96,6 +96,13 @@ const CHAIN_INFO = vi.hoisted(
         homepage: 'https://neoxa.net',
         recentlyAdded: true,
       },
+      'bitcoinblake2b-mainnet': {
+        ticker: 'BTCB2',
+        displayName: 'Bitcoin BLAKE2b',
+        homepage: 'https://bitcoin-blake2b.org',
+        recentlyAdded: true,
+        young: true,
+      },
     }) as Record<
       string,
       {
@@ -203,6 +210,7 @@ vi.mock('../../services/chain/chainParams', () => ({
   BITCOIN_MAINNET: { id: 'bitcoin-mainnet', ...CHAIN_INFO['bitcoin-mainnet'] },
   DOGECOIN_MAINNET: { id: 'dogecoin-mainnet', ...CHAIN_INFO['dogecoin-mainnet'] },
   NEOXA_MAINNET: { id: 'neoxa-mainnet', ...CHAIN_INFO['neoxa-mainnet'] },
+  BITCOIN_BLAKE2B_MAINNET: { id: 'bitcoinblake2b-mainnet', ...CHAIN_INFO['bitcoinblake2b-mainnet'] },
 }));
 
 import { ChainSwitcher } from './ChainSwitcher';

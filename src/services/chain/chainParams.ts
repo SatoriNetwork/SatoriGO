@@ -425,7 +425,7 @@
 //      chain from validating its own addresses.
 
 /** Ticker of a chain's native coin. Widen this (and networkFor) to add a chain. */
-export type NativeTicker = 'EVR' | 'RVN' | 'BTGS' | 'LTC' | 'WJK' | 'BTC' | 'DOGE' | 'NEOX';
+export type NativeTicker = 'EVR' | 'RVN' | 'BTGS' | 'LTC' | 'WJK' | 'BTC' | 'DOGE' | 'NEOX' | 'BTCB2';
 
 /** Canonical identity of a supported chain+network. */
 export type ChainId =
@@ -437,7 +437,8 @@ export type ChainId =
   | 'wojakcoin-mainnet'
   | 'bitcoin-mainnet'
   | 'dogecoin-mainnet'
-  | 'neoxa-mainnet';
+  | 'neoxa-mainnet'
+  | 'bitcoinblake2b-mainnet';
 
 /**
  * `scriptHash` sentinel meaning "this chain accepts NO P2SH address form".
@@ -518,6 +519,15 @@ export interface EvrmoreNetwork {
    * activation in the chain's own consensus rules.
    */
   taprootActive?: boolean;
+  /**
+   * Which signature hash the builder signs with. Absent means the chain's
+   * ordinary one (legacy for bare/P2SH, BIP143 for segwit v0). 'unified' is
+   * the Bitcoin Knots opt-in SIGHASH_UNIFIED (hash type bit 0x20): one tagged
+   * message over every input's amount and script, invalid on any chain that
+   * does not implement it. That last property is why a chain sets it: it is
+   * how a spend on a shared-history fork stays off the chain it forked from.
+   */
+  sighash?: 'unified';
   /** Bitcoin-style signed-message magic (byte-exact; interoperability-critical). */
   messageMagic: string;
   /** Native-coin ticker symbol. */
@@ -814,6 +824,58 @@ export const BITCOIN_MAINNET: EvrmoreNetwork = {
   homepage: 'https://bitcoin.org', // verified 2026-08-14 (responds; the project's own site)
 };
 
+// BITCOIN BLAKE2b (BTCB2) — the Bitcoin Knots proof-of-work hardfork, verified
+// 2026-09-07 against bitcoinknots/bitcoin v29.4.1.knots20260508, its
+// doc/unified-sighash.md, bitcoin-blake2b.org and the live chain.
+//   - IT IS BITCOIN WITH ANOTHER PROOF OF WORK. The chain shares Bitcoin's history
+//     up to the split (chain split at height 961632, the BLAKE2b rules active
+//     from 961640, 2026-08-30). Its Electrum server (Fulcrum, 164-byte v2
+//     headers) reports BITCOIN'S genesis and Bitcoin's block 0/1 headers, on
+//     purpose. Every address parameter below is therefore Bitcoin's, byte for
+//     byte, and a seed produces the SAME addresses here as on Bitcoin: that is
+//     the point, since a pre-fork coin sits at the same address on both chains.
+//     `coinType` 0 for the same reason (a fresh coin type would hide every
+//     forked coin behind an address the user never funded).
+//   - REPLAY. A transaction signed the ordinary way is valid on BOTH chains and
+//     anyone can rebroadcast it across. The fork's answer is opt-in per
+//     signature: SIGHASH_UNIFIED (`sighash: 'unified'` below), which the
+//     builder ALWAYS uses on this chain, so nothing this wallet sends here can be
+//     replayed onto Bitcoin. The reverse is not in this wallet's hands: a Bitcoin
+//     spend of the same coin, from any wallet, moves the BTCB2 twin too until the
+//     coins are split (a send-to-self here does that). Message signing stays
+//     legacy, exactly as Knots does (a message signature is verified against
+//     SIGHASH_ALL).
+//   - NO ASSET PROTOCOL, no public wss:// server (Fulcrum listens on TCP/SSL
+//     only), so the pool is the gateway bridge alone (see network.ts).
+//   - Ticker BTCB2, confirmed by the owner 2026-09-07 with the NonKYC market
+//     BTCB2/USDT (https://nonkyc.io/market/BTCB2_USDT), which is also the price
+//     source behind the gateway. The project itself calls the coin "Bitcoin".
+//     The ticker is a display/price key only: nothing persisted uses it.
+//   - THE NETWORK IS YOUNG (little hashrate, few miners): `young` keeps the
+//     caution notice on, and `recentlyAdded` marks it New in the chain list.
+export const BITCOIN_BLAKE2B_MAINNET: EvrmoreNetwork = {
+  id: 'mainnet',
+  chainId: 'bitcoinblake2b-mainnet',
+  bip32: { public: 0x0488b21e, private: 0x0488ade4 }, // Bitcoin's, unchanged by the fork
+  pubKeyHash: 0, // '1…', Bitcoin's
+  scriptHash: 5, // '3…', Bitcoin's (accepted as a real prefix, like BITCOIN_MAINNET)
+  wif: 128,
+  coinType: 0, // SAME keys and addresses as Bitcoin: forked coins live there
+  messageStart: 0xf9, // Bitcoin's; informational here
+  defaultPort: 8333,
+  bech32Hrp: 'bc',
+  addressFormat: 'p2wpkh',
+  messageMagic: 'Bitcoin Signed Message:\n', // message signing stays legacy (Knots)
+  ticker: 'BTCB2',
+  decimals: 8,
+  displayName: 'Bitcoin BLAKE2b',
+  taprootActive: true,
+  sighash: 'unified',
+  recentlyAdded: true,
+  young: true,
+  homepage: 'https://bitcoin-blake2b.org', // verified 2026-09-07 (the fork's own site)
+};
+
 // Dogecoin mainnet. A PLAIN (non-asset) ElectrumX chain that is LEGACY-ONLY like
 // WojakCoin, but for a different reason worth keeping straight: WojakCoin defines
 // an hrp while never activating segwit (SegwitHeight = INT_MAX), whereas Dogecoin
@@ -1017,6 +1079,8 @@ export function networkFor(id: ChainId | EvrmoreNetwork['id']): EvrmoreNetwork {
       return DOGECOIN_MAINNET;
     case 'neoxa-mainnet':
       return NEOXA_MAINNET;
+    case 'bitcoinblake2b-mainnet':
+      return BITCOIN_BLAKE2B_MAINNET;
     case 'testnet':
     case 'evrmore-testnet':
       return EVRMORE_TESTNET;
@@ -1172,6 +1236,16 @@ export const CHAIN_FEE_POLICIES: Record<ChainId, ChainFeePolicy> = {
     // cap (1000 sat/byte) allowed ~1000× the measured next-block rate.
     ceilingSatPerByte: 500n,
     maxTxFeeSats: 2_000_000n, // 0.02 BTC — the old global cap here was 1 WHOLE BTC
+  },
+  // Bitcoin BLAKE2b: measured 2026-09-07 on electrum.bitcoinxor.org (Fulcrum):
+  // estimatefee(2) = 0.0000101 BTC/kB ≈ 1.01 sat/B, relayfee 0.000001 (0.1
+  // sat/B). Bitcoin's policy fits; the coin is worth far less, so the ceiling
+  // and the cap are value-trivial and are kept for the hostile-server bound.
+  'bitcoinblake2b-mainnet': {
+    floorSatPerByte: 1n,
+    defaultSatPerByte: 2n, // above the measured 1.01
+    ceilingSatPerByte: 500n,
+    maxTxFeeSats: 2_000_000n, // 0.02 BTCB2
   },
   // Dogecoin: THE ONLY chain whose server estimates come back BELOW the network's
   // own fee floor, so the floor here comes from the CHAIN PARAMS, never the server.

@@ -68,7 +68,7 @@ export const GATEWAY_ELECTRUM_PROTOCOL = 'satori-v1';
  *  SAME keys the gateway is configured with; adding a chain here without the
  *  matching gateway route just means the bridge attempt fails and the chain's
  *  public pool serves it, which is the designed fallback, not a breakage. */
-export type GatewayElectrumChainKey = 'evr' | 'rvn' | 'btc' | 'ltc' | 'doge' | 'btgs' | 'wjk' | 'neox';
+export type GatewayElectrumChainKey = 'evr' | 'rvn' | 'btc' | 'ltc' | 'doge' | 'btgs' | 'wjk' | 'neox' | 'btcb2';
 const GATEWAY_ELECTRUM_CHAIN_KEYS: readonly GatewayElectrumChainKey[] = [
   'evr',
   'rvn',
@@ -80,6 +80,8 @@ const GATEWAY_ELECTRUM_CHAIN_KEYS: readonly GatewayElectrumChainKey[] = [
   // 'neox' has carried an upstream since 2026-08-26; before that the route
   // simply refused, which the client handles as an unreachable server.
   'neox',
+  // Bitcoin BLAKE2b: gateway upstream electrum.bitcoinxor.org:50002 since 2026-09-07.
+  'btcb2',
 ];
 
 /** The bridge URL for a chain, '' when this build has no gateway. https -> wss
@@ -580,6 +582,28 @@ export function buildNeoxElectrumPool(
 
 export const PUBLIC_NEOX_ELECTRUM_SERVERS: ElectrumEndpoint[] = buildNeoxElectrumPool();
 
+// ---------------------------------------------------------------------------
+// BITCOIN BLAKE2b (BTCB2): the Bitcoin Knots BLAKE2b hardfork. Its one public
+// Electrum server, electrum.bitcoinxor.org (Fulcrum 2.1.2, TCP 50001 / SSL
+// 50002, verified 2026-09-07: Bitcoin's genesis, balances, history, merkle
+// proofs and fee estimates all answered), has NO wss:// listener (50003/50004/
+// 50006/443 all time out), so a browser cannot reach it directly. The gateway
+// bridges it at /electrum/btcb2, which makes the pool the bridge alone, the
+// Neoxa shape. A public fallback goes here the day the project runs one.
+// ---------------------------------------------------------------------------
+const BTCB2_PUBLIC_FALLBACKS: ElectrumEndpoint[] = [];
+
+/** The Bitcoin BLAKE2b pool: [bridge] in a gateway build, empty without one. */
+export function buildBtcb2ElectrumPool(
+  gateway: string = GATEWAY_URL,
+  token: string = GATEWAY_CLIENT_TOKEN,
+): ElectrumEndpoint[] {
+  const bridge = gatewayElectrumEndpoint('btcb2', gateway, token);
+  return bridge ? [bridge] : BTCB2_PUBLIC_FALLBACKS;
+}
+
+export const PUBLIC_BTCB2_ELECTRUM_SERVERS: ElectrumEndpoint[] = buildBtcb2ElectrumPool();
+
 /** The URL a client opens for an endpoint. The gateway bridge carries its own
  *  full URL (it lives behind a path); every plain node is `host:port`. */
 export function electrumWssUrl(endpoint: ElectrumEndpoint): string {
@@ -683,7 +707,8 @@ type PoolKey =
   // be handed the EVRMORE server pool — a different chain, on asset-aware
   // servers whose responses have the same SHAPE as Neoxa's would, so the
   // mistake would not announce itself. See the NEOX pool block above.
-  | 'neoxa-mainnet';
+  | 'neoxa-mainnet'
+  | 'bitcoinblake2b-mainnet';
 function poolKey(chainId?: string): PoolKey {
   if (!chainId) return 'evrmore';
   // networkFor falls back to Evrmore mainnet for any unrecognised id, so an
@@ -696,6 +721,7 @@ function poolKey(chainId?: string): PoolKey {
   if (resolved === 'bitcoin-mainnet') return 'bitcoin-mainnet';
   if (resolved === 'dogecoin-mainnet') return 'dogecoin-mainnet';
   if (resolved === 'neoxa-mainnet') return 'neoxa-mainnet';
+  if (resolved === 'bitcoinblake2b-mainnet') return 'bitcoinblake2b-mainnet';
   return 'evrmore';
 }
 
@@ -716,6 +742,7 @@ export function electrumServersStorageKey(chainId?: string): string {
   if (key === 'bitcoin-mainnet') return `${ELECTRUM_SERVERS_STORAGE_KEY}:bitcoin-mainnet`;
   if (key === 'dogecoin-mainnet') return `${ELECTRUM_SERVERS_STORAGE_KEY}:dogecoin-mainnet`;
   if (key === 'neoxa-mainnet') return `${ELECTRUM_SERVERS_STORAGE_KEY}:neoxa-mainnet`;
+  if (key === 'bitcoinblake2b-mainnet') return `${ELECTRUM_SERVERS_STORAGE_KEY}:bitcoinblake2b-mainnet`;
   return ELECTRUM_SERVERS_STORAGE_KEY;
 }
 
@@ -736,6 +763,8 @@ export const DEFAULT_DOGE_ELECTRUM_SERVER_URLS: string[] = PUBLIC_DOGE_ELECTRUM_
 /** The built-in default NEOXA pool as `wss://host:port` URL strings (UI/reset).
  *  EMPTY, like the pool it is derived from: no Neoxa ElectrumX server exists. */
 export const DEFAULT_NEOX_ELECTRUM_SERVER_URLS: string[] = PUBLIC_NEOX_ELECTRUM_SERVERS.map(electrumWssUrl);
+/** The built-in default BITCOIN BLAKE2b pool as `wss://host:port` URL strings (UI/reset). */
+export const DEFAULT_BTCB2_ELECTRUM_SERVER_URLS: string[] = PUBLIC_BTCB2_ELECTRUM_SERVERS.map(electrumWssUrl);
 
 /** Built-in default endpoints for a chain (Evrmore vs Ravencoin vs Bitcoin Gold
  *  vs Litecoin vs WojakCoin vs Bitcoin vs Dogecoin). */
@@ -747,6 +776,7 @@ function defaultPoolFor(key: PoolKey): ElectrumEndpoint[] {
   if (key === 'bitcoin-mainnet') return PUBLIC_BTC_ELECTRUM_SERVERS;
   if (key === 'dogecoin-mainnet') return PUBLIC_DOGE_ELECTRUM_SERVERS;
   if (key === 'neoxa-mainnet') return PUBLIC_NEOX_ELECTRUM_SERVERS;
+  if (key === 'bitcoinblake2b-mainnet') return PUBLIC_BTCB2_ELECTRUM_SERVERS;
   return PUBLIC_ELECTRUM_SERVERS;
 }
 
@@ -778,6 +808,8 @@ function bridgeKeyFor(key: PoolKey): GatewayElectrumChainKey {
       return 'doge';
     case 'neoxa-mainnet':
       return 'neox';
+    case 'bitcoinblake2b-mainnet':
+      return 'btcb2';
     case 'evrmore':
       return 'evr';
   }

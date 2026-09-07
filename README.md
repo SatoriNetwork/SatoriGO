@@ -47,6 +47,7 @@ have, with its own servers, block explorer and fee rules.
 | BitcoinGold | BTGS | native segwit | no | **confirmed** | [bitcoingold.site](https://bitcoingold.site) |
 | WojakCoin | WJK | legacy | no | **confirmed** | [wojakcoin.cash](https://wojakcoin.cash) |
 | Neoxa | NEOX | legacy | yes | **confirmed** | [neoxa.net](https://neoxa.net) |
+| Bitcoin BLAKE2b | BTCB2 | native segwit | no | not yet | [bitcoin-blake2b.org](https://bitcoin-blake2b.org) |
 
 **EVM networks.** One account across all of them: the same seed gives the same
 address everywhere, so switching network changes what you are looking at and
@@ -61,11 +62,22 @@ name, or imported from what the account already holds.
 | Epix | EPIX | 1916 | native staking (cosmos/evm) | **confirmed** | [epix.zone](https://epix.zone) |
 
 BitcoinGold is a new Bitcoin Core fork and is **not** the 2017 Bitcoin Gold
-(BTG). It, WojakCoin and Epix are young or thin networks: such a chain can stop
-producing blocks, leaving a payment unconfirmed until it recovers, and the
-wallet marks them and says so when you open one. Neoxa is marked as new here
-without that warning, because it is new to this wallet rather than a young
-network.
+(BTG). It, WojakCoin, Epix and Bitcoin BLAKE2b are young or thin networks: such
+a chain can stop producing blocks, leaving a payment unconfirmed until it
+recovers, and the wallet marks them and says so when you open one. Neoxa is
+marked as new here without that warning, because it is new to this wallet rather
+than a young network.
+
+Bitcoin BLAKE2b is the Bitcoin Knots proof-of-work fork (active from block
+961640, 30 August 2026): Bitcoin's history under a different proof of work, so
+a Bitcoin address is also an address there and a coin held before the fork sits
+at the same address on both chains. Sends on it are signed with the fork's own
+signature format (SIGHASH_UNIFIED), which Bitcoin does not accept, so nothing
+sent there can be replayed onto Bitcoin. The reverse is outside the wallet's
+control until the coins have been sent to yourself once on the BLAKE2b chain.
+It reaches the wallet through a single server behind the gateway, is priced from
+the NonKYC BTCB2/USDT market, and a funded send has not been confirmed by the
+owner yet.
 
 Any network can be hidden from the switcher in expert Settings, so a wallet that
 only uses two of them need not scroll past the rest.
@@ -94,7 +106,7 @@ offline while it is unreachable. You can add your own server for either in
 Settings > Network. `KNOWN_LIMITATIONS.md` records which networks are currently
 reaching the chain some other way and what that costs.
 
-Version **1.4.1**. (The canonical version lives in each target's manifest under
+Version **1.4.2**. (The canonical version lives in each target's manifest under
 `platforms/<target>/manifest.json`; this line is informational and can lag —
 check the manifest if in doubt.)
 

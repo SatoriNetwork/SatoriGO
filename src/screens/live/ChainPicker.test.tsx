@@ -142,6 +142,7 @@ describe('ChainPicker', () => {
       'bitcoingold-mainnet',
       'wojakcoin-mainnet',
       'neoxa-mainnet',
+      'bitcoinblake2b-mainnet',
     ]);
   });
 
@@ -247,7 +248,7 @@ describe('hidden networks', () => {
     render(
       <ChainPicker value="mainnet" onChange={() => {}} testIdPrefix="test-chain" secretKind="phrase" />,
     );
-    expect(screen.getAllByTestId(/^test-chain-/).length).toBe(8);
+    expect(screen.getAllByTestId(/^test-chain-/).length).toBe(9);
   });
 });
 
@@ -268,7 +269,7 @@ describe('EVM chains', () => {
 
     render(<Harness evmChains={[]} />);
     expect(screen.queryByTestId('test-chain-evm:base')).toBeNull();
-    expect(screen.getAllByTestId(/^test-chain-/).length).toBe(8);
+    expect(screen.getAllByTestId(/^test-chain-/).length).toBe(9);
   });
 
   it('offers a row per EVM chain when evmChains is non-empty, and selecting one emits its evm:<key> target', () => {

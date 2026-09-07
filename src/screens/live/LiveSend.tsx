@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronLeft, AlertTriangle, CheckCircle, BookUser, Check, Wallet } from 'lucide-react';
+import { ChevronLeft, AlertTriangle, CheckCircle, BookUser, Check, Wallet, ShieldCheck } from 'lucide-react';
 import { Button } from '../../components/Button';
 import { RecipientRiskBanners } from '../../components/RecipientRiskBanners';
 import { SyncStatusPill } from '../../components/SyncStatusPill';
@@ -685,6 +685,19 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
             <AlertTriangle size={14} />
             This broadcasts a real {amountUnit} transaction to the {chainNetworkName}. Sends cannot be undone.
           </div>
+          {activeNet.sighash === 'unified' && (
+            // A shared-history fork: say what protects the user and what does not.
+            // The signature is the fork's own (SIGHASH_UNIFIED), so Bitcoin rejects
+            // it; the other direction is out of this wallet's hands.
+            <div className="banner info" style={{ marginBottom: 14, alignItems: 'flex-start' }} data-testid="live-review-replay-note">
+              <ShieldCheck size={14} style={{ flexShrink: 0, marginTop: 2 }} />
+              <span>
+                Signed with this chain's replay protection: the transaction is valid on {chainNetworkName} only
+                and cannot be replayed on Bitcoin. Coins you also hold on Bitcoin stay linked until you send
+                them to yourself here once.
+              </span>
+            </div>
+          )}
 
           <div className="card solid" style={{ marginBottom: 14 }}>
             <div className="summary-table">

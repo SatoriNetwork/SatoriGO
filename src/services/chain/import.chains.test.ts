@@ -40,6 +40,7 @@ import * as secp from '@noble/secp256k1';
 import {
   BITCOINGOLD_MAINNET,
   BITCOIN_MAINNET,
+  BITCOIN_BLAKE2B_MAINNET,
   EVRMORE_MAINNET,
   LITECOIN_MAINNET,
   RAVENCOIN_MAINNET,
@@ -262,6 +263,7 @@ const CHAINS: EvrmoreNetwork[] = [
   LITECOIN_MAINNET,
   WOJAKCOIN_MAINNET,
   BITCOIN_MAINNET,
+  BITCOIN_BLAKE2B_MAINNET,
 ];
 
 let seed: Uint8Array;
@@ -339,6 +341,11 @@ describe('A) seed import: derivation path matches the advertised address format'
     'litecoin-mainnet': { purpose: 84, coin: 2, prefix: 'ltc1' },
     'wojakcoin-mainnet': { purpose: 44, coin: 20760, prefix: 'W' },
     'bitcoin-mainnet': { purpose: 84, coin: 0, prefix: 'bc1' },
+    // Bitcoin BLAKE2b IS Bitcoin's key space: same purpose, coin type and
+    // addresses, so a coin held before the fork is reachable at the same
+    // address on both chains. Replay protection is in the signature, not the
+    // address (see the BTCB2 block in chainParams and txBuilder.unified.test).
+    'bitcoinblake2b-mainnet': { purpose: 84, coin: 0, prefix: 'bc1' },
   };
 
   for (const net of CHAINS) {
@@ -391,15 +398,21 @@ describe('A) seed import: derivation path matches the advertised address format'
     }
   });
 
-  it('every chain lands on a DISTINCT address except EVR/RVN, which share key material', () => {
+  it('every chain lands on a DISTINCT address except EVR/RVN (shared key material) and BTC/BTCB2 (one chain, two proofs of work)', () => {
     const byChain = new Map(CHAINS.map((n) => [n.chainId, deriveAddress(seed, n, 0, 0, 0)]));
     const evr = byChain.get('evrmore-mainnet')!;
     const rvn = byChain.get('ravencoin-mainnet')!;
     // Same coinType (175) + same bip32 bytes -> identical key, different version byte.
     expect(bytesToHex(evr.privateKey)).toBe(bytesToHex(rvn.privateKey));
     expect(evr.address).not.toBe(rvn.address);
+    // Bitcoin BLAKE2b is Bitcoin's history with another proof of work: same key,
+    // same address, on purpose (a pre-fork coin sits at that address on both).
+    const btc = byChain.get('bitcoin-mainnet')!;
+    const btcb2 = byChain.get('bitcoinblake2b-mainnet')!;
+    expect(bytesToHex(btcb2.privateKey)).toBe(bytesToHex(btc.privateKey));
+    expect(btcb2.address).toBe(btc.address);
     const addresses = [...byChain.values()].map((k) => k.address);
-    expect(new Set(addresses).size).toBe(CHAINS.length);
+    expect(new Set(addresses).size).toBe(CHAINS.length - 1);
   });
 });
 

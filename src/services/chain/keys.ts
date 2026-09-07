@@ -20,6 +20,7 @@ import type { EvrmoreNetwork } from './chainParams';
 import {
   BITCOINGOLD_MAINNET,
   BITCOIN_MAINNET,
+  BITCOIN_BLAKE2B_MAINNET,
   DOGECOIN_MAINNET,
   EVRMORE_MAINNET,
   EVRMORE_TESTNET,
@@ -426,6 +427,7 @@ const KNOWN_NETWORKS: readonly EvrmoreNetwork[] = [
   BITCOIN_MAINNET,
   DOGECOIN_MAINNET,
   NEOXA_MAINNET,
+  BITCOIN_BLAKE2B_MAINNET,
 ];
 
 /**

@@ -46,7 +46,7 @@
 
 import { sha256 } from '@noble/hashes/sha256';
 import { hmac } from '@noble/hashes/hmac';
-import { concatBytes, hexToBytes, bytesToHex } from '@noble/hashes/utils';
+import { concatBytes, hexToBytes, bytesToHex, utf8ToBytes } from '@noble/hashes/utils';
 import * as secp256k1 from '@noble/secp256k1';
 import { p2pkhScript, addressToHash160, addressToScript, hash160 } from './keys';
 import { supportsSegwit, type ChainNetwork } from './chainParams';
@@ -128,6 +128,23 @@ export const DUST_THRESHOLD_SATS = 546n;
 
 // SIGHASH_ALL, appended as a 4-byte little-endian uint32 to the preimage.
 const SIGHASH_ALL = 0x01;
+const SIGHASH_NONE = 0x02;
+const SIGHASH_SINGLE = 0x03;
+const SIGHASH_ANYONECANPAY = 0x80;
+/**
+ * Bitcoin Knots' opt-in unified signature hash (doc/unified-sighash.md in
+ * bitcoinknots/bitcoin v29.4.1.knots20260508): a bit in the hash type byte that
+ * selects ONE tagged message for every input type, committing to every spent
+ * amount and script. A chain that carries it (`net.sighash === 'unified'`,
+ * Bitcoin BLAKE2b) has the builder set it on every signature, because the
+ * message is distinct from the legacy and BIP143 ones and so a signature made
+ * with it does not verify on the chain the fork split from: that is what keeps
+ * a spend here from being replayed onto Bitcoin.
+ */
+export const SIGHASH_UNIFIED = 0x20;
+
+/** How the builder signs: the chain's ordinary sighash, or the unified one. */
+export type SighashScheme = 'legacy' | 'unified';
 
 const TX_VERSION = 2;
 const SEQUENCE_FINAL = 0xffffffff;
@@ -525,6 +542,106 @@ export function bip143Sighash(
 }
 
 // ---------------------------------------------------------------------------
+// Unified opt-in sighash (SIGHASH_UNIFIED)
+// ---------------------------------------------------------------------------
+//
+// Specification: bitcoinknots/bitcoin doc/unified-sighash.md ("Message"). In
+// short, with sha = single SHA256:
+//   sha_prevouts, sha_amounts, sha_scripts, sha_sequences, sha_outputs over the
+//   whole transaction and its spent outputs, then
+//   msg = epoch 0 | hash type | version LE | locktime as 5 bytes LE |
+//         [aggregates unless ANYONECANPAY] | [sha_outputs unless NONE/SINGLE] |
+//         script type | [this input's outpoint+spent output+sequence, or its
+//         index] | scriptCode (types 0/1) | [sha256(output[i]) for SINGLE]
+//   digest = TaggedHash("UnifiedSighash", msg) = sha(sha(tag)|sha(tag)|msg)
+// Script types: 0 bare/P2SH (scriptCode = prevout script, or redeemScript),
+// 1 segwit v0 (scriptCode as BIP143: the P2PKH script for P2WPKH). Types 2/3
+// (taproot) are not implemented: this builder cannot spend those outputs.
+// Checked against the 166 vectors Knots ships (src/test/data/unified_sighash.json,
+// the script-type 0 and 1 rows) in txBuilder.unified.test.ts.
+
+/** One spent output, in input order; the unified message commits to all of them. */
+export interface SpentOutput {
+  valueSats: bigint;
+  scriptPubKey: Uint8Array;
+}
+
+/** 0 = bare/P2SH, 1 = segwit v0. */
+export type UnifiedScriptType = 0 | 1;
+
+interface UnifiedMidstate {
+  shaPrevouts: Uint8Array;
+  shaAmounts: Uint8Array;
+  shaScripts: Uint8Array;
+  shaSequences: Uint8Array;
+  shaOutputs: Uint8Array;
+}
+
+function unifiedMidstate(tx: SighashTx, spent: readonly SpentOutput[]): UnifiedMidstate {
+  if (spent.length !== tx.inputs.length) {
+    throw new Error(`unified sighash: ${tx.inputs.length} inputs but ${spent.length} spent outputs`);
+  }
+  return {
+    shaPrevouts: sha256(concatBytes(...tx.inputs.map((i) => serializeOutpoint(i.txid, i.vout)))),
+    shaAmounts: sha256(concatBytes(...spent.map((o) => u64LE(o.valueSats)))),
+    shaScripts: sha256(concatBytes(...spent.map((o) => concatBytes(varint(o.scriptPubKey.length), o.scriptPubKey)))),
+    shaSequences: sha256(concatBytes(...tx.inputs.map((i) => u32LE(i.sequence)))),
+    shaOutputs: sha256(concatBytes(...tx.outputs.map((o) => serializeOutput(o)))),
+  };
+}
+
+const UNIFIED_TAG = sha256(utf8ToBytes('UnifiedSighash'));
+
+/**
+ * The unified signature hash for input `index`. `hashType` MUST carry
+ * SIGHASH_UNIFIED; `spent` is every input's prevout (value + scriptPubKey), in
+ * input order; `scriptCode` is passed RAW (the compact-size prefix is added
+ * here). Exported for the vector test and for anything that verifies a
+ * signature this builder made.
+ */
+export function unifiedSighash(
+  tx: SighashTx,
+  spent: readonly SpentOutput[],
+  index: number,
+  hashType: number,
+  scriptType: UnifiedScriptType,
+  scriptCode: Uint8Array,
+  mid: UnifiedMidstate = unifiedMidstate(tx, spent),
+): Uint8Array {
+  if ((hashType & SIGHASH_UNIFIED) === 0) {
+    throw new Error('unified sighash: hash type does not set SIGHASH_UNIFIED');
+  }
+  const input = tx.inputs[index];
+  if (!input) throw new Error(`unified sighash: no input at index ${index}`);
+  const anyoneCanPay = (hashType & SIGHASH_ANYONECANPAY) !== 0;
+  const outType = hashType & 0x1f;
+  const parts: Uint8Array[] = [
+    Uint8Array.of(0x00), // epoch
+    Uint8Array.of(hashType & 0xff),
+    u32LE(tx.version),
+    u32LE(tx.locktime), // locktime as 5 bytes: 4 LE + a zero byte
+    Uint8Array.of(0x00),
+  ];
+  if (!anyoneCanPay) parts.push(mid.shaPrevouts, mid.shaAmounts, mid.shaScripts, mid.shaSequences);
+  if (outType !== SIGHASH_NONE && outType !== SIGHASH_SINGLE) parts.push(mid.shaOutputs);
+  parts.push(Uint8Array.of(scriptType));
+  if (anyoneCanPay) {
+    const so = spent[index];
+    if (!so) throw new Error(`unified sighash: no spent output at index ${index}`);
+    parts.push(serializeOutpoint(input.txid, input.vout), serializeOutput(so), u32LE(input.sequence));
+  } else {
+    parts.push(u32LE(index));
+  }
+  parts.push(varint(scriptCode.length), scriptCode);
+  if (outType === SIGHASH_SINGLE) {
+    const out = tx.outputs[index];
+    if (!out) throw new Error('unified sighash: SIGHASH_SINGLE with no output at the input index');
+    parts.push(sha256(serializeOutput(out)));
+  }
+  return sha256(concatBytes(UNIFIED_TAG, UNIFIED_TAG, concatBytes(...parts)));
+}
+
+// ---------------------------------------------------------------------------
 // txid
 // ---------------------------------------------------------------------------
 
@@ -734,22 +851,28 @@ export function selectCoins(
 // ---------------------------------------------------------------------------
 
 /**
- * Sign a digest and return DER || SIGHASH_ALL, the exact byte string that goes
+ * Sign a digest and return DER || hashType, the exact byte string that goes
  * into a scriptSig push or a witness item. RFC6979-deterministic k with canonical
- * low-S (malleability-safe).
+ * low-S (malleability-safe). The hash type byte is SIGHASH_ALL, or
+ * SIGHASH_ALL|SIGHASH_UNIFIED on a chain that signs the unified message.
  */
-function signDigest(sighash: Uint8Array, privateKey: Uint8Array): Uint8Array {
+function signDigest(sighash: Uint8Array, privateKey: Uint8Array, hashType: number = SIGHASH_ALL): Uint8Array {
   const sig = secp256k1.sign(sighash, privateKey, { lowS: true });
   const der = derEncodeSignature(sig.r, sig.s);
-  return concatBytes(der, Uint8Array.of(SIGHASH_ALL));
+  return concatBytes(der, Uint8Array.of(hashType & 0xff));
 }
 
 /**
  * Produce the scriptSig for a signed P2PKH input:
- *   <push(DERsig || SIGHASH_ALL)> <push(compressedPubkey)>
+ *   <push(DERsig || hashType)> <push(compressedPubkey)>
  */
-function signInput(sighash: Uint8Array, privateKey: Uint8Array, publicKey: Uint8Array): Uint8Array {
-  return concatBytes(pushData(signDigest(sighash, privateKey)), pushData(publicKey));
+function signInput(
+  sighash: Uint8Array,
+  privateKey: Uint8Array,
+  publicKey: Uint8Array,
+  hashType: number = SIGHASH_ALL,
+): Uint8Array {
+  return concatBytes(pushData(signDigest(sighash, privateKey, hashType)), pushData(publicKey));
 }
 
 /**
@@ -813,7 +936,11 @@ function toInputs(utxos: SignableUtxo[]): TxInput[] {
  * actually present — a legacy-only transaction does not hash anything extra and
  * therefore cannot be perturbed by this code path at all.
  */
-function signAllInputs(tx: Tx, utxos: SignableUtxo[]): void {
+function signAllInputs(tx: Tx, utxos: SignableUtxo[], scheme: SighashScheme = 'legacy'): void {
+  if (scheme === 'unified') {
+    signAllInputsUnified(tx, utxos);
+    return;
+  }
   let midstate: Bip143Midstate | undefined;
 
   for (let i = 0; i < tx.inputs.length; i++) {
@@ -848,6 +975,43 @@ function signAllInputs(tx: Tx, utxos: SignableUtxo[]): void {
 
     const sighash = legacySighash(tx, i, prevoutScript);
     tx.inputs[i].scriptSig = signInput(sighash, utxo.privateKey, utxo.publicKey);
+  }
+}
+
+/**
+ * The unified scheme: every input signs the unified message with hash type
+ * ALL|UNIFIED (0x21). The routing by prevout script is the same as above; what
+ * changes is the message (and the byte after the DER signature). The midstate
+ * covers every spent output, which this builder always has: it only ever spends
+ * the wallet's own UTXOs, whose value and script came from the server.
+ */
+function signAllInputsUnified(tx: Tx, utxos: SignableUtxo[]): void {
+  const spent: SpentOutput[] = utxos.map((u) => ({ valueSats: u.valueSats, scriptPubKey: hexToBytes(u.scriptPubKeyHex) }));
+  const mid = unifiedMidstate(tx, spent);
+  const hashType = SIGHASH_ALL | SIGHASH_UNIFIED;
+
+  for (let i = 0; i < tx.inputs.length; i++) {
+    const utxo = utxos[i];
+    const prevoutScript = spent[i].scriptPubKey;
+
+    if (isP2wpkhScript(prevoutScript)) {
+      const program = prevoutScript.slice(2);
+      const keyHash = hash160(utxo.publicKey);
+      if (bytesToHex(keyHash) !== bytesToHex(program)) {
+        throw new Error(
+          `input ${i}: P2WPKH witness program does not match hash160(publicKey); wrong key for this UTXO`,
+        );
+      }
+      const scriptCode = p2wpkhScriptCode(keyHash);
+      const digest = unifiedSighash(tx, spent, i, hashType, 1, scriptCode, mid);
+      tx.inputs[i].scriptSig = new Uint8Array(0);
+      tx.inputs[i].witness = [signDigest(digest, utxo.privateKey, hashType), utxo.publicKey];
+      continue;
+    }
+
+    // Bare P2PKH: scriptCode is the prevout script itself (script type 0).
+    const digest = unifiedSighash(tx, spent, i, hashType, 0, prevoutScript, mid);
+    tx.inputs[i].scriptSig = signInput(digest, utxo.privateKey, utxo.publicKey, hashType);
   }
 }
 
@@ -900,9 +1064,11 @@ export function buildAndSignEvrTx(params: {
   outputs: TxOutput[];
   changeAddress: string;
   feeSats: bigint;
-  /** Optional active chain. When supplied it is used ONLY as a safety assertion
-   *  (a P2WPKH input on a chain without segwit is refused); the signing path is
-   *  still chosen per input from the prevout script, never from the chain. */
+  /** Optional active chain. Two uses: a safety assertion (a P2WPKH input on a
+   *  chain without segwit is refused), and the SIGHASH SCHEME: a chain with
+   *  `sighash: 'unified'` signs the unified message. The per-input algorithm
+   *  (legacy scriptSig vs segwit witness) is still chosen from the prevout
+   *  script, never from the chain. */
   net?: ChainNetwork;
 }): BuiltTx {
   const { inputs, outputs, changeAddress, feeSats } = params;
@@ -945,7 +1111,7 @@ export function buildAndSignEvrTx(params: {
     locktime: LOCKTIME,
   };
 
-  signAllInputs(tx, inputs);
+  signAllInputs(tx, inputs, params.net?.sighash === 'unified' ? 'unified' : 'legacy');
 
   // Effective fee = everything not paid out to explicit outputs.
   const emittedOutputSum = txOuts.reduce((acc, o) => acc + o.valueSats, 0n);

@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Satori GO",
   "short_name": "Satori GO",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "description": "Non-custodial multi-chain crypto wallet made by Satori Network. Your keys never leave your device.",
   "author": "Satori Network",
   "action": {

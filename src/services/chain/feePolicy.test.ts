@@ -36,6 +36,9 @@ const UNMEASURABLE_CHAIN_IDS: readonly ChainId[] = [
 
 const MEASURED_ESTIMATE_SAT_PER_BYTE: Partial<Record<ChainId, number>> = {
   'bitcoin-mainnet': 0.47,
+  // Bitcoin BLAKE2b, measured 2026-09-07 on electrum.bitcoinxor.org (Fulcrum):
+  // estimatefee(2) = 0.0000101 BTC/kB.
+  'bitcoinblake2b-mainnet': 1.01,
   'litecoin-mainnet': 1.0,
   'bitcoingold-mainnet': 1.04,
   'wojakcoin-mainnet': 20.03,
@@ -67,11 +70,11 @@ const toCoinPerKb = (satPerByte: number) => (satPerByte * 1000) / 1e8;
 /** A typical 1-input / 2-output legacy tx is 226 bytes (10 + 148 + 2×34). */
 const TYPICAL_TX_BYTES = 226n;
 
-describe('CHAIN_FEE_POLICIES invariants (all eight chains + testnet)', () => {
+describe('CHAIN_FEE_POLICIES invariants (all nine chains + testnet)', () => {
   it('covers every ChainId exactly once', () => {
     // Record<ChainId, …> already enforces this at compile time; this pins the
     // runtime count so a type-system workaround would still fail a test.
-    expect(ALL_CHAIN_IDS).toHaveLength(9);
+    expect(ALL_CHAIN_IDS).toHaveLength(10);
   });
 
   it('has a measured estimate for every chain except the closed unmeasurable list', () => {

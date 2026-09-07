@@ -17,6 +17,7 @@ import {
   DEFAULT_EXPLORER_URL_DOGE,
   DEFAULT_EXPLORER_URL_WJK,
   DEFAULT_EXPLORER_URL_NEOX,
+  DEFAULT_EXPLORER_URL_BTCB2,
 } from './liveStore';
 import { resolveExplorerUrl } from '../screens/live/LiveTxDetail';
 
@@ -30,6 +31,7 @@ const CHAINS: { chainId: string; template: string }[] = [
   { chainId: 'bitcoin-mainnet', template: DEFAULT_EXPLORER_URL_BTC },
   { chainId: 'dogecoin-mainnet', template: DEFAULT_EXPLORER_URL_DOGE },
   { chainId: 'neoxa-mainnet', template: DEFAULT_EXPLORER_URL_NEOX },
+  { chainId: 'bitcoinblake2b-mainnet', template: DEFAULT_EXPLORER_URL_BTCB2 },
 ];
 
 const TXID = '8d393b5a304d2ba25b9a50aaf817a784b992025fa7aec173943e268120790356';

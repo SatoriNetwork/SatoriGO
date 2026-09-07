@@ -1,6 +1,6 @@
 # Known limitations
 
-Current, honest limitations of the wallet (v1.4.1).
+Current, honest limitations of the wallet (v1.4.2).
 
 Satori GO is a non-custodial multi-chain wallet. Eight coin networks and four
 EVM networks ship in this version, and every one of them has had a funded send
@@ -340,6 +340,17 @@ confirmed by the owner on mainnet (item 7). Nothing below is marketing.
     than left for someone to infer from a listing that promises otherwise.
 
 ## Not implemented (ideas, not promises)
+
+38. **Bitcoin BLAKE2b is new and thin, and its replay protection is one-way.**
+    The chain is Bitcoin's history under the Knots BLAKE2b proof of work, with
+    little mining power behind it, one public Electrum server (Fulcrum, reached
+    only through the gateway bridge: it has no browser-usable listener), one
+    thin price source (the NonKYC BTCB2/USDT market), and a ticker that only
+    that exchange uses so far. Every send
+    the wallet makes there is signed with SIGHASH_UNIFIED, so it is invalid on
+    Bitcoin; but a Bitcoin spend of a pre-fork coin, from any wallet, also moves
+    the BLAKE2b twin of that coin until the BLAKE2b side has been sent to
+    yourself once. A funded send has not yet been confirmed by the owner.
 
 Real P2SH output support, taproot key ownership, inscription and BGC-20
 awareness, gap-limit address discovery, BIP39 passphrases at wallet creation,

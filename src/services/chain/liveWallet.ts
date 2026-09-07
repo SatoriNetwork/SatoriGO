@@ -16,6 +16,7 @@ import {
   LITECOIN_MAINNET,
   WOJAKCOIN_MAINNET,
   BITCOIN_MAINNET,
+  BITCOIN_BLAKE2B_MAINNET,
   DOGECOIN_MAINNET,
   NEOXA_MAINNET,
   supportsAssets,
@@ -125,7 +126,8 @@ export type LiveNetworkId =
   // The `default` arm below silently resolves anything unknown to EVRMORE, so a
   // missing case here would make a Neoxa wallet sign with Evrmore's params
   // rather than fail. That exact bug shipped once, for Dogecoin.
-  | 'neoxa-mainnet';
+  | 'neoxa-mainnet'
+  | 'bitcoinblake2b-mainnet';
 
 /** Re-exported from engine.ts (its home): the `network` sentinel of an EVM account. */
 export { EVM_NETWORK };
@@ -1070,6 +1072,8 @@ export class LiveWalletService implements WalletEngine {
         return DOGECOIN_MAINNET;
       case 'neoxa-mainnet':
         return NEOXA_MAINNET;
+      case 'bitcoinblake2b-mainnet':
+        return BITCOIN_BLAKE2B_MAINNET;
       case 'mainnet':
       default:
         return EVRMORE_MAINNET;
