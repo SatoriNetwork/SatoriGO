@@ -43,6 +43,10 @@ const GENESIS = {
   btgs: '0000000d1c5a497963a46c0348cb4346779c52d9e1d7cc8b5efb1be0a4a0f964',
   ltc: '12a765e31ffd4059bada1e25190f6e98c99d9714d334efa41a195a7e7e04bfe2',
   doge: '1a91e3dace36e2be3bf030a65679fe821aa1d6ef92e7c9902eb318182c355691',
+  // Bitcoin BLAKE2b shares Bitcoin's history: its server reports BITCOIN'S
+  // genesis, and that is the correct answer for this key (verified 2026-09-07,
+  // Fulcrum on electrum.bitcoinxor.org). The chain is told apart by its tip.
+  btcb2: '000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f',
   // evr and rvn are ABSENT ON PURPOSE. This repo records no sourced genesis for
   // either, and a value written here from memory is worse than none: the first
   // draft of this file carried a guess that was actually BitcoinGold's, and it
@@ -50,7 +54,7 @@ const GENESIS = {
   // chain's own chainparams.cpp, the way network.ts documents every other one.
 };
 
-const CHAINS = ['evr', 'rvn', 'neox', 'btc', 'ltc', 'doge', 'btgs', 'wjk'];
+const CHAINS = ['evr', 'rvn', 'neox', 'btc', 'ltc', 'doge', 'btgs', 'wjk', 'btcb2'];
 
 function check(chain) {
   return new Promise((resolve) => {
