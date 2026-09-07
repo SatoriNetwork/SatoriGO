@@ -21,7 +21,8 @@ rather than a special case.
 
 Every one of them has had a funded send confirmed on mainnet by the project
 owner's own testing (the first seven coin networks on 2026-08-16, Base and BNB
-Chain on 2026-08-18, and Neoxa, Ethereum and Epix on 2026-08-27), on top of the
+Chain on 2026-08-18, Neoxa, Ethereum and Epix on 2026-08-27, and Bitcoin
+BLAKE2b on 2026-09-07), on top of the
 automated verification of derivation, address validation, balance reading, fee
 estimation and transaction building.
 See `KNOWN_LIMITATIONS.md` for what is and is not covered by that.
@@ -47,7 +48,7 @@ have, with its own servers, block explorer and fee rules.
 | BitcoinGold | BTGS | native segwit | no | **confirmed** | [bitcoingold.site](https://bitcoingold.site) |
 | WojakCoin | WJK | legacy | no | **confirmed** | [wojakcoin.cash](https://wojakcoin.cash) |
 | Neoxa | NEOX | legacy | yes | **confirmed** | [neoxa.net](https://neoxa.net) |
-| Bitcoin BLAKE2b | BTCB2 | native segwit | no | not yet | [bitcoin-blake2b.org](https://bitcoin-blake2b.org) |
+| Bitcoin BLAKE2b | BTCB2 | native segwit | no | **confirmed** | [bitcoin-blake2b.org](https://bitcoin-blake2b.org) |
 
 **EVM networks.** One account across all of them: the same seed gives the same
 address everywhere, so switching network changes what you are looking at and
@@ -75,9 +76,9 @@ at the same address on both chains. Sends on it are signed with the fork's own
 signature format (SIGHASH_UNIFIED), which Bitcoin does not accept, so nothing
 sent there can be replayed onto Bitcoin. The reverse is outside the wallet's
 control until the coins have been sent to yourself once on the BLAKE2b chain.
-It reaches the wallet through a single server behind the gateway, is priced from
-the NonKYC BTCB2/USDT market, and a funded send has not been confirmed by the
-owner yet.
+It reaches the wallet through a single server behind the gateway and is priced
+from the NonKYC BTCB2/USDT market. A funded send to a legacy address was
+confirmed by the owner on 2026-09-07, the day the network shipped.
 
 Any network can be hidden from the switcher in expert Settings, so a wallet that
 only uses two of them need not scroll past the rest.

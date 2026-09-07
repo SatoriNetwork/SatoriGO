@@ -350,7 +350,7 @@ confirmed by the owner on mainnet (item 7). Nothing below is marketing.
     the wallet makes there is signed with SIGHASH_UNIFIED, so it is invalid on
     Bitcoin; but a Bitcoin spend of a pre-fork coin, from any wallet, also moves
     the BLAKE2b twin of that coin until the BLAKE2b side has been sent to
-    yourself once. A funded send has not yet been confirmed by the owner.
+    yourself once.
 
 Real P2SH output support, taproot key ownership, inscription and BGC-20
 awareness, gap-limit address discovery, BIP39 passphrases at wallet creation,
