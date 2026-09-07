@@ -115,3 +115,40 @@ export function addApproval(
   }
   return [...entries, { origin, walletId }];
 }
+
+/**
+ * The wallet an origin is CONNECTED to, or null. One wallet per origin: the
+ * connection is to the wallet the user picked in the approval, and it stays
+ * that wallet whatever the wallet UI is currently showing. Where the list
+ * still carries several entries for one origin (pre-picker installs), the
+ * LAST one is the most recent consent and wins.
+ */
+export function approvedWalletId(entries: readonly ApprovedEntry[], origin: string): string | null {
+  for (let i = entries.length - 1; i >= 0; i -= 1) {
+    if (entries[i].origin === origin) return entries[i].walletId;
+  }
+  return null;
+}
+
+/** Bind `origin` to `walletId`, REPLACING any earlier binding for that origin,
+ *  so a site is connected to exactly one wallet at a time. */
+export function setApproval(
+  entries: readonly ApprovedEntry[],
+  origin: string,
+  walletId: string,
+): ApprovedEntry[] {
+  return [...entries.filter((e) => e.origin !== origin), { origin, walletId }];
+}
+
+/**
+ * Collapse a list that still carries several entries for one origin (a 1.4.0
+ * install that approved a site once per wallet) down to ONE per origin, the
+ * LAST one, which is the most recent consent. Returns the same array when
+ * nothing needed collapsing, so a caller can skip the write.
+ */
+export function collapseToOnePerOrigin(entries: readonly ApprovedEntry[]): { entries: ApprovedEntry[]; changed: boolean } {
+  const last = new Map<string, ApprovedEntry>();
+  for (const e of entries) last.set(e.origin, e);
+  if (last.size === entries.length) return { entries: [...entries], changed: false };
+  return { entries: [...last.values()], changed: true };
+}

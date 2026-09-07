@@ -8,8 +8,14 @@
 // its OWN LiveWalletService instance, entirely inside this extension page —
 // keys never reach the background worker, the content script or the page.
 // The outcome goes back as {type:'evr-dapp-approve-result'} and the window closes.
+//
+// HOSTED MODE: when a wallet window is already open (side panel, toolbar popup,
+// detached window) the worker asks that window to show the request instead of
+// opening a popup on top of it; App.tsx then renders this component as an
+// overlay with `hosted` set. Same gate, same messages; only "close the window"
+// becomes "tell the host to drop the overlay".
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Globe, SendHorizonal, ShieldCheck } from 'lucide-react';
 import { Button } from '../../components/Button';
 import { PasswordField } from '../../components/TextField';
@@ -37,9 +43,14 @@ interface PendingDappRequest {
   origin: string;
   method: string;
   params?: { to?: unknown; amount?: unknown; asset?: unknown; message?: unknown };
+  /** Set by the worker. For sign/send: the wallet this origin is CONNECTED to;
+   *  the page acts on that wallet, not on whichever one the wallet UI shows.
+   *  For connect: the currently connected wallet, preselected in the picker. */
+  walletId?: string;
 }
 
 interface PublicWalletInfo {
+  id: string;
   name: string;
   address: string;
   passwordless: boolean;
@@ -63,6 +74,8 @@ interface PublicWalletsRecord {
     address?: string;
     passwordless?: boolean;
     network?: string;
+    /** Chain family; absent means 'utxo'. An EVM account never signs for `window.evrmore`. */
+    family?: string;
     /** Version only. The vault's ciphertext is never read on this page. */
     vault?: { version?: number };
   }[];
@@ -87,6 +100,32 @@ function setupRequired(record: PublicWalletsRecord | null | undefined): boolean 
   if (record?.appKey) return false;
   if (wallets.some((w) => w.vault?.version === 2)) return false;
   return wallets.some((w) => w.passwordless === true);
+}
+
+type PublicWalletRecordEntry = PublicWalletsRecord['wallets'][number];
+
+/**
+ * `window.evrmore` is an EVRMORE provider, so the only wallets a site may be
+ * offered are Evrmore-mainnet ones. Every chain is its own entry ("Wallet 1
+ * (Bitcoin)" beside "Wallet 1"), so this is a filter, not a chain switch. Before
+ * this gate, whichever chain happened to be active was handed out, and a site
+ * that got a Bitcoin address from an Evrmore provider called it "could not
+ * reach the wallet" (satorisignals.app, 2026-09-04). Same predicate as the
+ * worker's isEvrmoreEntry.
+ */
+function isEvrmoreWallet(w: PublicWalletRecordEntry): boolean {
+  return (w.family ?? 'utxo') === 'utxo' && (w.network ?? 'mainnet') === 'mainnet';
+}
+
+function toWalletInfo(w: PublicWalletRecordEntry): PublicWalletInfo {
+  return {
+    id: w.id,
+    name: w.name || 'Wallet',
+    address: w.address || '',
+    passwordless: w.passwordless ?? false,
+    appProtected: w.vault?.version === 2,
+    network: w.network || 'mainnet',
+  };
 }
 
 /** What to hand LiveWalletService.unlock() for this wallet: the empty passphrase
@@ -138,9 +177,41 @@ function friendlyError(msg: string, rawAssetName: string, native: NativeTicker, 
   }
 }
 
-export function DappApproval({ requestId }: { requestId: string }) {
+/**
+ * What a HOSTING wallet page lends the approval: its own wallet service and
+ * whether the user has unlocked it there. With the wallet unlocked and showing
+ * the very wallet the site is connected to, a sign request is answered with
+ * that unlocked service and asks for no password (the user just typed it to
+ * unlock), and a send follows the wallet's own send-screen rule. With the
+ * wallet locked, the approval waits behind the lock screen (a strip says a
+ * site is waiting) instead of putting a second password box over it. Absent
+ * in the popup window, which has no unlocked service to lend.
+ */
+export interface DappHostSession {
+  service: LiveWalletService;
+  unlocked: boolean;
+  activeWalletId: string | null;
+  /** The wallet's own send rule: verify the password before broadcasting. */
+  sendNeedsPassword: boolean;
+  verifyPassword(password: string): Promise<boolean>;
+}
+
+export interface DappApprovalProps {
+  requestId: string;
+  /** Rendered inside an already-open wallet window (see the header comment).
+   *  Settling then calls onDone instead of closing the window. */
+  hosted?: boolean;
+  onDone?: () => void;
+  session?: DappHostSession;
+}
+
+export function DappApproval({ requestId, hosted = false, onDone, session }: DappApprovalProps) {
   const [pending, setPending] = useState<PendingDappRequest | null>(null);
+  /** The wallet this request acts on: for connect, the one the user picked
+   *  (preselected below); for sign/send, the one the origin is connected to. */
   const [wallet, setWallet] = useState<PublicWalletInfo | null>(null);
+  /** Evrmore wallets the user may connect (connect requests only). */
+  const [choices, setChoices] = useState<PublicWalletInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
   /** True when the wallet UI is currently BLOCKED on the forced app-password
@@ -152,7 +223,14 @@ export function DappApproval({ requestId }: { requestId: string }) {
   // A built+reviewed send: the plan (with its REAL fee) plus the still-unlocked
   // service that will broadcast it. Holding this lets us show the fee/total
   // BEFORE the user commits to broadcasting.
-  const [review, setReview] = useState<{ plan: LiveSendPlan; service: LiveWalletService; client: { close(): void } } | null>(null);
+  // `owned`: the service was built here for this request and must be locked
+  // and its client closed when done; a service lent by the hosting page is not.
+  const [review, setReview] = useState<{
+    plan: LiveSendPlan;
+    service: LiveWalletService;
+    client: { close(): void } | null;
+    owned: boolean;
+  } | null>(null);
   const settled = useRef(false);
   // Mirror `review` into a ref so the pagehide handler can zero the unlocked
   // service if the window is closed via the OS mid-review (defense-in-depth).
@@ -180,7 +258,8 @@ export function DappApproval({ requestId }: { requestId: string }) {
         const found = await chrome.storage.session.get(key);
         const req = found[key] as PendingDappRequest | undefined;
         const record = await getStorage().get<PublicWalletsRecord>('liveWallets');
-        const entry = record?.wallets?.find((w) => w.id === record.activeId);
+        const wallets = Array.isArray(record?.wallets) ? record.wallets : [];
+        const evrmore = wallets.filter(isEvrmoreWallet);
         if (cancelled) return;
         if (!req) {
           setLoadError('This request has expired or was already handled.');
@@ -188,14 +267,21 @@ export function DappApproval({ requestId }: { requestId: string }) {
           setPending(req);
         }
         setNeedsSetup(setupRequired(record));
-        if (entry) {
-          setWallet({
-            name: entry.name || 'Wallet',
-            address: entry.address || '',
-            passwordless: entry.passwordless ?? false,
-            appProtected: entry.vault?.version === 2,
-            network: entry.network || 'mainnet',
-          });
+        setChoices(evrmore.map(toWalletInfo));
+        if (req && req.method !== 'connect' && req.walletId) {
+          // Sign/send: the connected wallet, and nothing else. A binding to a
+          // wallet that is gone leaves this null, and the buttons stay disabled.
+          const bound = wallets.find((w) => w.id === req.walletId && isEvrmoreWallet(w));
+          setWallet(bound ? toWalletInfo(bound) : null);
+        } else {
+          // Connect: preselect the wallet the site is already connected to
+          // (a re-connect to switch wallets), else the active wallet when it
+          // is an Evrmore one, else the first Evrmore wallet there is.
+          const preselected =
+            evrmore.find((w) => w.id === req?.walletId) ??
+            evrmore.find((w) => w.id === record?.activeId) ??
+            evrmore[0];
+          setWallet(preselected ? toWalletInfo(preselected) : null);
         }
       } catch {
         if (!cancelled) setLoadError('Could not load the request.');
@@ -208,9 +294,15 @@ export function DappApproval({ requestId }: { requestId: string }) {
     };
   }, [requestId]);
 
-  /** Send the terminal outcome to the worker exactly once, then close. */
+  /** Leave: close this window, or hand the frame back to the hosting wallet. */
+  const leave = useCallback(() => {
+    if (hosted) onDone?.();
+    else window.close();
+  }, [hosted, onDone]);
+
+  /** Send the terminal outcome to the worker exactly once, then leave. */
   const settle = useCallback(
-    async (payload: { result?: unknown; error?: string; approveOrigin?: string }) => {
+    async (payload: { result?: unknown; error?: string; approveOrigin?: string; walletId?: string }) => {
       if (settled.current) return;
       settled.current = true;
       try {
@@ -220,11 +312,11 @@ export function DappApproval({ requestId }: { requestId: string }) {
           ...payload,
         });
       } catch {
-        // worker unreachable — still close; the page's request will simply hang
+        // worker unreachable — still leave; the page's request will simply hang
       }
-      window.close();
+      leave();
     },
-    [requestId],
+    [requestId, leave],
   );
 
   // Closing the window without deciding counts as a rejection.
@@ -236,9 +328,9 @@ export function DappApproval({ requestId }: { requestId: string }) {
       // its own), and that key is a secret of exactly the same class as the
       // seed. lock() zeroes the seed alone, because a wallet SWITCH must keep
       // the master key; a page teardown must not.
-      if (reviewRef.current) {
+      if (reviewRef.current?.owned) {
         reviewRef.current.service.lockApp();
-        reviewRef.current.client.close();
+        reviewRef.current.client?.close();
       }
       if (settled.current) return;
       settled.current = true;
@@ -256,17 +348,81 @@ export function DappApproval({ requestId }: { requestId: string }) {
     return () => window.removeEventListener('pagehide', onPageHide);
   }, [requestId]);
 
+  // Hold a port open for as long as this request is on screen. The worker
+  // treats the port going away with the request still undecided as "the user
+  // closed the wallet": it rejects the request to the site, so the site can
+  // ask again instead of waiting on a prompt nobody can see (pagehide alone
+  // did not reliably get that message out of a closing window).
+  useEffect(() => {
+    const rt = typeof chrome !== 'undefined' ? chrome.runtime : undefined;
+    if (typeof rt?.connect !== 'function') return;
+    const name = `evr-dapp-approval:${requestId}`;
+    let open = true;
+    let port: chrome.runtime.Port | null = null;
+    let retry: ReturnType<typeof setTimeout> | null = null;
+    const connect = () => {
+      if (!open) return;
+      try {
+        port = rt.connect({ name });
+        // The worker was restarted (or is not up yet): reconnect so it keeps
+        // watching this page. Settled pages stop reconnecting on unmount.
+        port.onDisconnect.addListener(() => {
+          port = null;
+          if (open) retry = setTimeout(connect, 500);
+        });
+      } catch {
+        if (open) retry = setTimeout(connect, 500);
+      }
+    };
+    connect();
+    return () => {
+      open = false;
+      if (retry) clearTimeout(retry);
+      try {
+        port?.disconnect();
+      } catch {
+        // already gone
+      }
+    };
+  }, [requestId]);
+
+  // The worker asks "is this request still on screen?" before it lets the same
+  // site open another approval (see approvalStillShown in the worker). Answer
+  // while undecided; once settled, stay silent so the request can be replaced.
+  useEffect(() => {
+    const rt = typeof chrome !== 'undefined' ? chrome.runtime : undefined;
+    if (!rt?.onMessage?.addListener) return;
+    const onMessage = (
+      message: unknown,
+      _sender: chrome.runtime.MessageSender,
+      sendResponse: (r?: unknown) => void,
+    ): boolean | undefined => {
+      const msg = message as { type?: string; id?: string } | null;
+      if (msg?.type !== 'evr-dapp-ping' || msg.id !== requestId) return undefined;
+      if (!settled.current) sendResponse({ alive: true });
+      return undefined;
+    };
+    rt.onMessage.addListener(onMessage);
+    return () => rt.onMessage.removeListener(onMessage);
+  }, [requestId]);
+
   const reject = () => {
-    if (review) {
+    if (review?.owned) {
       review.service.lockApp();
-      review.client.close();
+      review.client?.close();
     }
     void settle({ error: 'user-rejected' });
   };
 
+  /** The hosting page's unlocked service, when it is showing the very wallet
+   *  this request is for. Anything else takes the fresh-service path below. */
+  const shared = hosted && session && session.unlocked && wallet && session.activeWalletId === wallet.id ? session : null;
+
   const approveConnect = () => {
     if (!wallet?.address || !pending) return;
-    void settle({ result: { address: wallet.address }, approveOrigin: pending.origin });
+    // The worker validates walletId against the Evrmore wallets that exist
+    // before it binds the origin; this page proposes, it does not decide.
+    void settle({ result: { address: wallet.address }, approveOrigin: pending.origin, walletId: wallet.id });
   };
 
   // Step 1: unlock -> build+sign (NO broadcast). Surfaces the REAL fee so the
@@ -290,8 +446,37 @@ export function DappApproval({ requestId }: { requestId: string }) {
       return;
     }
     setWorking(true);
+    if (shared) {
+      // The page's own unlocked wallet builds it; the password, if the wallet's
+      // send rule wants one, is asked at confirm like the wallet's own send.
+      const service = shared.service;
+      try {
+        const net = networkFor(service.network());
+        if (!isSpendableAddress(to, net)) {
+          setActionError(
+            `The site sent an unsupported ${net.displayName} address. Only standard addresses this wallet can pay to are accepted.`,
+          );
+          return;
+        }
+        const amountSats = toBaseUnits(amount, net.decimals);
+        const plan =
+          pending.method === 'sendAsset'
+            ? await service.buildAssetSend(to, assetName, amountSats)
+            : await service.buildEvrSend(to, amountSats);
+        setReview({ plan, service, client: null, owned: false });
+      } catch (err) {
+        const raw = err instanceof Error ? err.message : String(err);
+        setActionError(friendlyError(raw, assetName || walletNativeTicker, networkFor(service.network()).ticker, networkFor(service.network()).displayName));
+      } finally {
+        setWorking(false);
+      }
+      return;
+    }
     const client = createElectrumClient();
     const service = new LiveWalletService(client);
+    // Unlock and build for the CONNECTED wallet, whatever the wallet UI shows.
+    // adoptWallet is session-local: it does not move the store's active wallet.
+    if (wallet) service.adoptWallet(wallet.id);
     let unlocked = false;
     try {
       const ok = await service.unlock(walletUnlockSecret(wallet, password));
@@ -321,7 +506,7 @@ export function DappApproval({ requestId }: { requestId: string }) {
           ? await service.buildAssetSend(to, assetName, amountSats)
           : await service.buildEvrSend(to, amountSats);
       // Keep the unlocked service + client alive for the confirm step.
-      setReview({ plan, service, client });
+      setReview({ plan, service, client, owned: true });
       unlocked = false; // ownership transferred to `review`
     } catch (err) {
       const raw = err instanceof Error ? err.message : String(err);
@@ -340,6 +525,15 @@ export function DappApproval({ requestId }: { requestId: string }) {
     if (!review || working) return;
     setActionError('');
     setWorking(true);
+    if (!review.owned && shared?.sendNeedsPassword) {
+      // The wallet's own send rule, applied at the same moment its send screen
+      // applies it: verified before anything is broadcast.
+      if (!(await shared.verifyPassword(password))) {
+        setActionError('Incorrect password.');
+        setWorking(false);
+        return;
+      }
+    }
     try {
       review.service.allowBroadcast = true;
       const txid = await review.service.broadcast(review.plan.built.rawHex, review.plan.built.txid);
@@ -348,8 +542,10 @@ export function DappApproval({ requestId }: { requestId: string }) {
       const raw = err instanceof Error ? err.message : String(err);
       setActionError(friendlyError(raw, review.plan.assetName || walletNativeTicker, walletNativeTicker, walletChainName));
     } finally {
-      review.service.lockApp();
-      review.client.close();
+      if (review.owned) {
+        review.service.lockApp();
+        review.client?.close();
+      }
       setReview(null);
       setWorking(false);
     }
@@ -368,8 +564,21 @@ export function DappApproval({ requestId }: { requestId: string }) {
       return;
     }
     setWorking(true);
+    if (shared) {
+      // Already unlocked by the user in this very window: sign, no password.
+      try {
+        await settle({ result: shared.service.signMessage(message) });
+      } catch (err) {
+        setActionError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setWorking(false);
+      }
+      return;
+    }
     const client = createElectrumClient();
     const service = new LiveWalletService(client);
+    // Sign with the CONNECTED wallet's key (see reviewSend).
+    if (wallet) service.adoptWallet(wallet.id);
     try {
       const ok = await service.unlock(walletUnlockSecret(wallet, password));
       if (!ok) {
@@ -389,28 +598,43 @@ export function DappApproval({ requestId }: { requestId: string }) {
     }
   };
 
+  /** Hosted: a full-window overlay above the wallet (its state and its
+   *  connections stay where they are). In the popup window: the page itself. */
+  const frame = (children: ReactNode): ReactNode =>
+    hosted ? (
+      <div
+        data-testid="dapp-host-overlay"
+        data-request-id={requestId}
+        style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'var(--bg)', overflow: 'auto' }}
+      >
+        {children}
+      </div>
+    ) : (
+      children
+    );
+
   if (loading) {
-    return (
+    return frame(
       <div className="app-frame">
         <div className="result-screen">
           <span className="spinner lg" style={{ color: 'var(--accent)' }} />
         </div>
-      </div>
+      </div>,
     );
   }
 
   if (!pending || loadError) {
-    return (
+    return frame(
       <div className="app-frame" data-testid="dapp-approval">
         <div className="app-content">
           <div className="banner danger" style={{ marginTop: 16 }} data-testid="dapp-error">
             {loadError || 'This request has expired or was already handled.'}
           </div>
-          <Button block variant="secondary" style={{ marginTop: 14 }} onClick={() => window.close()}>
+          <Button block variant="secondary" style={{ marginTop: 14 }} onClick={leave}>
             Close
           </Button>
         </div>
-      </div>
+      </div>,
     );
   }
 
@@ -439,7 +663,7 @@ export function DappApproval({ requestId }: { requestId: string }) {
   // a password at every launch is asked to do it before a site can be answered.
   // A refusal cannot lose money; a wrong approval can.
   if (needsSetup) {
-    return (
+    return frame(
       <div className="app-frame" data-testid="dapp-approval">
         <div className="app-content">
           <div className="banner warning" style={{ marginTop: 16, alignItems: 'flex-start' }} data-testid="dapp-setup-required">
@@ -458,7 +682,7 @@ export function DappApproval({ requestId }: { requestId: string }) {
             Close
           </Button>
         </div>
-      </div>
+      </div>,
     );
   }
 
@@ -486,18 +710,60 @@ export function DappApproval({ requestId }: { requestId: string }) {
   // An app-key wallet ALWAYS asks here, even one that skips the password on the
   // wallet's own send screen: this page builds a fresh LiveWalletService that
   // holds no master key, so there is nothing to open the vault with but the app
-  // password the user types.
-  const needPassword = (wallet?.appProtected ?? false) || !(wallet?.passwordless ?? false);
+  // password the user types. Unless the hosting page lends its unlocked one.
+  const needPassword = !shared && ((wallet?.appProtected ?? false) || !(wallet?.passwordless ?? false));
+  const sendPasswordBeforeReview = needPassword && !review;
+  const sendPasswordAtConfirm = !!shared && shared.sendNeedsPassword && !!review;
 
-  return (
+  // WALLET LOCKED, HOSTED, KEYS NEEDED: do not put a password box over the
+  // lock screen. The lock screen stays; a strip says who is waiting and why;
+  // the approval appears the moment the user unlocks (the owner's flow:
+  // unlock once, then sign, then back in the wallet, 2026-09-07).
+  if (hosted && session && !session.unlocked && (isSign || isSend)) {
+    return (
+      <div
+        data-testid="dapp-unlock-wait"
+        data-request-id={requestId}
+        role="status"
+        style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          zIndex: 1000,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          padding: '10px 12px',
+          background: 'var(--bg)',
+          borderBottom: '1px solid var(--border-strong)',
+          boxShadow: '0 4px 14px rgba(0,0,0,0.18)',
+        }}
+      >
+        <ShieldCheck size={16} style={{ flexShrink: 0, color: 'var(--accent)' }} />
+        <span style={{ flex: 1, fontSize: 12.5, lineHeight: 1.4 }}>
+          <strong className="mono" style={{ wordBreak: 'break-all' }}>{pending.origin}</strong>{' '}
+          asks you to {isSign ? 'sign a message' : 'confirm a transaction'}. Unlock the wallet to continue.
+        </span>
+        <Button variant="secondary" data-testid="dapp-reject" style={{ flexShrink: 0, padding: '6px 12px' }} onClick={reject}>
+          Reject
+        </Button>
+      </div>
+    );
+  }
+
+  return frame(
     <div className="app-frame screen-enter" data-testid="dapp-approval">
       <div className="sub-header">
         <span style={{ width: 32 }} />
         <h2 style={{ flex: 1 }}>{isSend ? 'Confirm transaction' : isSign ? 'Sign message' : 'Connect to site'}</h2>
         <span style={{ width: 32 }} />
       </div>
-      <div className="app-content">
-        <div className="banner info" style={{ marginBottom: 14, display: 'flex', alignItems: 'center', gap: 8 }}>
+      {/* A flex column: the message box (sign) and the wallet picker (connect)
+          are the only blocks allowed to shrink, so the password field and the
+          buttons stay in view in a 400x620 popup without scrolling. */}
+      <div className="app-content" style={{ display: 'flex', flexDirection: 'column' }}>
+        <div className="banner info" style={{ marginBottom: 10, display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
           <Globe size={16} style={{ flexShrink: 0 }} />
           <span className="mono" style={{ wordBreak: 'break-all' }} data-testid="dapp-origin">
             {pending.origin}
@@ -506,55 +772,62 @@ export function DappApproval({ requestId }: { requestId: string }) {
 
         {isSign && (
           <>
-            <p className="text-dim" style={{ fontSize: 12.5, lineHeight: 1.55, margin: '0 2px 14px' }}>
-              This site wants you to <strong>sign a message</strong> with your wallet to
-              prove you control its address (e.g. to log in). Signing costs nothing,
-              moves no funds, and reveals no private key.
+            <p className="text-dim" style={{ fontSize: 12.5, lineHeight: 1.5, margin: '0 2px 10px', flexShrink: 0 }}>
+              This site asks you to <strong>sign a message</strong> to prove you control this
+              address (for example to log in). Nothing is sent and no funds move.
             </p>
-            <div className="section-label" style={{ marginTop: 0 }}>Signing wallet</div>
-            <div className="card solid" style={{ marginBottom: 14 }}>
+            <div className="section-label" style={{ marginTop: 0, flexShrink: 0 }}>Signing wallet</div>
+            <div className="card solid" style={{ marginBottom: 10, flexShrink: 0 }}>
               <div className="summary-table">
                 <div className="sum-row">
-                  <span className="sum-key">Wallet</span>
-                  <span className="sum-val">{wallet?.name ?? 'n/a'}</span>
-                </div>
-                <div className="sum-row">
-                  <span className="sum-key">Address</span>
+                  <span className="sum-key">{wallet?.name ?? 'Wallet'}</span>
                   <span className="sum-val mono" style={{ fontSize: 11 }} data-testid="dapp-sign-address">
                     {wallet?.address ? shortAddress(wallet.address) : 'No wallet set up'}
                   </span>
                 </div>
               </div>
             </div>
-            <div className="section-label">Message</div>
+            <div className="section-label" style={{ marginTop: 0, flexShrink: 0 }}>Message</div>
             <div
               className="card solid mono"
-              style={{ marginBottom: 14, maxHeight: 150, overflowY: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 12, lineHeight: 1.5 }}
+              style={{
+                marginBottom: 10,
+                flex: '0 1 auto',
+                minHeight: 44,
+                maxHeight: 160,
+                overflowY: 'auto',
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-word',
+                fontSize: 12,
+                lineHeight: 1.5,
+              }}
               data-testid="dapp-sign-message"
             >
               {signMessageText || <span className="text-dim">(empty message)</span>}
             </div>
 
             {needPassword && (
-              <PasswordField
-                label="Wallet password"
-                showLabel="Show password"
-                hideLabel="Hide password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="Enter your wallet password"
-                autoFocus
-                testId="dapp-password"
-              />
+              <div style={{ flexShrink: 0 }}>
+                <PasswordField
+                  label="Wallet password"
+                  showLabel="Show password"
+                  hideLabel="Hide password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="Enter your wallet password"
+                  autoFocus
+                  testId="dapp-password"
+                />
+              </div>
             )}
 
             {actionError && (
-              <div className="banner danger" style={{ margin: '12px 0 0' }} data-testid="dapp-error" role="alert">
+              <div className="banner danger" style={{ margin: '10px 0 0', flexShrink: 0 }} data-testid="dapp-error" role="alert">
                 {actionError}
               </div>
             )}
 
-            <div style={{ display: 'flex', gap: 10, marginTop: 16 }}>
+            <div style={{ display: 'flex', gap: 10, marginTop: 12, flexShrink: 0 }}>
               <Button block variant="secondary" data-testid="dapp-reject" disabled={working} onClick={reject}>
                 Reject
               </Button>
@@ -574,13 +847,36 @@ export function DappApproval({ requestId }: { requestId: string }) {
 
         {!isSend && !isSign && (
           <>
-            <p className="text-dim" style={{ fontSize: 12.5, lineHeight: 1.55, margin: '0 2px 14px' }}>
-              This site wants to connect to your wallet. It will be able to see your
-              address and balances, and to <strong>request</strong> transactions.
-              Every send still needs your explicit approval.
+            <p className="text-dim" style={{ fontSize: 12.5, lineHeight: 1.5, margin: '0 2px 10px', flexShrink: 0 }}>
+              This site wants to connect to your <strong>Evrmore</strong> wallet. It will see
+              that wallet's address and balances and may <strong>request</strong> transactions,
+              each of which still needs your approval.
             </p>
-            <div className="section-label">Wallet to connect</div>
-            <div className="card solid" style={{ marginBottom: 14 }}>
+            <div className="section-label" style={{ marginTop: 0, flexShrink: 0 }}>Wallet to connect</div>
+            {/* A dropdown, not a list: the approval stays ONE screen however many
+                wallets there are (the owner's rule, 2026-09-07). */}
+            {choices.length > 1 && (
+              <div style={{ marginBottom: 10, flexShrink: 0 }} data-testid="dapp-wallet-picker">
+                <select
+                  className="live-picker"
+                  data-testid="dapp-wallet-select"
+                  aria-label="Wallet to connect"
+                  value={wallet?.id ?? ''}
+                  onChange={(e) => {
+                    const next = choices.find((c) => c.id === e.target.value);
+                    if (next) setWallet(next);
+                  }}
+                  style={{ width: '100%' }}
+                >
+                  {choices.map((c) => (
+                    <option key={c.id} value={c.id} data-testid={`dapp-wallet-option-${c.id}`}>
+                      {c.name} · {c.address ? shortAddress(c.address) : 'no address'}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+            <div className="card solid" style={{ marginBottom: 10, flexShrink: 0 }}>
               <div className="summary-table">
                 <div className="sum-row">
                   <span className="sum-key">Wallet</span>
@@ -595,11 +891,13 @@ export function DappApproval({ requestId }: { requestId: string }) {
               </div>
             </div>
             {!wallet?.address && (
-              <div className="banner warning" style={{ marginBottom: 14 }}>
-                Set up the live wallet in the extension first, then retry from the site.
+              <div className="banner warning" style={{ marginBottom: 10, flexShrink: 0 }} data-testid="dapp-no-evrmore-wallet">
+                {choices.length === 0
+                  ? 'This site needs an Evrmore wallet. Open Satori GO, switch to Evrmore (or add it to a wallet), then retry from the site.'
+                  : 'Set up the live wallet in the extension first, then retry from the site.'}
               </div>
             )}
-            <div style={{ display: 'flex', gap: 10, marginTop: 6 }}>
+            <div style={{ display: 'flex', gap: 10, marginTop: 4, flexShrink: 0 }}>
               <Button block variant="secondary" data-testid="dapp-reject" onClick={reject}>
                 Reject
               </Button>
@@ -618,14 +916,14 @@ export function DappApproval({ requestId }: { requestId: string }) {
 
         {isSend && (
           <>
-            <div className="banner warning" style={{ marginBottom: 14, display: 'flex', alignItems: 'center', gap: 8 }}>
+            <div className="banner warning" style={{ marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
               <SendHorizonal size={15} style={{ flexShrink: 0 }} />
               <span>
                 Sending <strong>{Number.isFinite(sendAmount) ? sendAmount : '?'} {sendAssetName}</strong> on the{' '}
                 <strong>real</strong>{` ${walletChainName}`} network. This cannot be undone.
               </span>
             </div>
-            <div className="card solid" style={{ marginBottom: 14 }}>
+            <div className="card solid" style={{ marginBottom: 12, flexShrink: 0 }}>
               <div className="summary-table">
                 <div className="sum-row">
                   <span className="sum-key">From wallet</span>
@@ -662,32 +960,34 @@ export function DappApproval({ requestId }: { requestId: string }) {
               </div>
             </div>
 
-            {needPassword && !review && (
-              <PasswordField
-                label="Wallet password"
-                showLabel="Show password"
-                hideLabel="Hide password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="Enter your wallet password"
-                autoFocus
-                testId="dapp-password"
-              />
+            {(sendPasswordBeforeReview || sendPasswordAtConfirm) && (
+              <div style={{ flexShrink: 0 }}>
+                <PasswordField
+                  label="Wallet password"
+                  showLabel="Show password"
+                  hideLabel="Hide password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="Enter your wallet password"
+                  autoFocus
+                  testId="dapp-password"
+                />
+              </div>
             )}
 
             {review && (
-              <div className="banner info" style={{ marginTop: 4 }}>
+              <div className="banner info" style={{ marginTop: 4, flexShrink: 0 }}>
                 Reviewed &amp; signed. Confirm to broadcast. The fee above is final.
               </div>
             )}
 
             {actionError && (
-              <div className="banner danger" style={{ margin: '12px 0 0' }} data-testid="dapp-error" role="alert">
+              <div className="banner danger" style={{ margin: '10px 0 0', flexShrink: 0 }} data-testid="dapp-error" role="alert">
                 {actionError}
               </div>
             )}
 
-            <div style={{ display: 'flex', gap: 10, marginTop: 16 }}>
+            <div style={{ display: 'flex', gap: 10, marginTop: 12, flexShrink: 0 }}>
               <Button block variant="secondary" data-testid="dapp-reject" disabled={working} onClick={reject}>
                 Reject
               </Button>
@@ -715,6 +1015,6 @@ export function DappApproval({ requestId }: { requestId: string }) {
           </>
         )}
       </div>
-    </div>
+    </div>,
   );
 }

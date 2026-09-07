@@ -111,6 +111,15 @@ import {
 // Module-level singleton — one service, one connection.
 const svc = new LiveWalletService();
 
+/** The page's one wallet service, for the dApp approval hosted in this page:
+ *  once the user has unlocked the wallet here, a site's sign or send request
+ *  is answered with THIS unlocked instance instead of asking for the password
+ *  again in a fresh one (owner's rule, 2026-09-07). Read-only handle; the
+ *  store stays the only thing that unlocks, locks or switches it. */
+export function liveService(): LiveWalletService {
+  return svc;
+}
+
 /** The active wallet's chain id (LiveNetworkId). Everything chain-dependent
  *  (native ticker, protected assets, server pool, explorer, price) reads this so
  *  it follows the active wallet. Exported so UI code (which chain is Send/Receive/

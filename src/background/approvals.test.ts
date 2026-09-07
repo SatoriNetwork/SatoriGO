@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   addApproval,
+  approvedWalletId,
+  collapseToOnePerOrigin,
   isOriginApproved,
   normalizeApprovals,
+  setApproval,
   type ApprovedEntry,
 } from './approvals';
 
@@ -151,5 +154,97 @@ describe('addApproval', () => {
       { origin: A, walletId: 'w1' },
       { origin: A, walletId: 'w2' },
     ]);
+  });
+});
+
+describe('approvedWalletId — which wallet an origin is CONNECTED to', () => {
+  it('returns the bound wallet id, and null for an origin never approved', () => {
+    const list: ApprovedEntry[] = [{ origin: A, walletId: 'w1' }];
+    expect(approvedWalletId(list, A)).toBe('w1');
+    expect(approvedWalletId(list, B)).toBeNull();
+    expect(approvedWalletId([], A)).toBeNull();
+  });
+
+  it('does NOT depend on which wallet is active: the binding is to the picked wallet', () => {
+    // The whole point of the 1.4.1 change: a site approved for Wallet 1 stays
+    // on Wallet 1 while the wallet UI shows Bitcoin, Wallet 2, anything.
+    const list: ApprovedEntry[] = [{ origin: A, walletId: 'w1' }];
+    expect(approvedWalletId(list, A)).toBe('w1');
+    expect(isOriginApproved(list, A, 'w2')).toBe(false); // the old, active-bound view
+  });
+
+  it('with several legacy entries for one origin, the LAST (most recent consent) wins', () => {
+    const list: ApprovedEntry[] = [
+      { origin: A, walletId: 'w1' },
+      { origin: B, walletId: 'w1' },
+      { origin: A, walletId: 'w2' },
+    ];
+    expect(approvedWalletId(list, A)).toBe('w2');
+    expect(approvedWalletId(list, B)).toBe('w1');
+  });
+});
+
+describe('setApproval — one connected wallet per origin', () => {
+  it('adds a binding for a new origin without touching the others', () => {
+    const list: ApprovedEntry[] = [{ origin: B, walletId: 'w1' }];
+    expect(setApproval(list, A, 'w2')).toEqual([
+      { origin: B, walletId: 'w1' },
+      { origin: A, walletId: 'w2' },
+    ]);
+  });
+
+  it('REPLACES an existing binding for the origin instead of adding a second one', () => {
+    const list: ApprovedEntry[] = [
+      { origin: A, walletId: 'w1' },
+      { origin: B, walletId: 'w1' },
+    ];
+    const next = setApproval(list, A, 'w2');
+    expect(next).toEqual([
+      { origin: B, walletId: 'w1' },
+      { origin: A, walletId: 'w2' },
+    ]);
+    expect(next.filter((e) => e.origin === A)).toHaveLength(1);
+    expect(approvedWalletId(next, A)).toBe('w2');
+  });
+
+  it('collapses several legacy entries for the origin down to the one chosen', () => {
+    const list: ApprovedEntry[] = [
+      { origin: A, walletId: 'w1' },
+      { origin: A, walletId: 'w2' },
+    ];
+    expect(setApproval(list, A, 'w1')).toEqual([{ origin: A, walletId: 'w1' }]);
+  });
+
+  it('does not mutate its input', () => {
+    const list: ApprovedEntry[] = [{ origin: A, walletId: 'w1' }];
+    setApproval(list, A, 'w2');
+    expect(list).toEqual([{ origin: A, walletId: 'w1' }]);
+  });
+});
+
+describe('collapseToOnePerOrigin — a 1.4.0 list with one entry per wallet', () => {
+  it('keeps the LAST entry for an origin and reports the change', () => {
+    const list: ApprovedEntry[] = [
+      { origin: A, walletId: 'w1' },
+      { origin: B, walletId: 'w1' },
+      { origin: A, walletId: 'w2' },
+    ];
+    const { entries, changed } = collapseToOnePerOrigin(list);
+    expect(changed).toBe(true);
+    expect(entries).toEqual([
+      { origin: A, walletId: 'w2' },
+      { origin: B, walletId: 'w1' },
+    ]);
+  });
+
+  it('leaves a list that is already one-per-origin alone (changed=false)', () => {
+    const list: ApprovedEntry[] = [
+      { origin: A, walletId: 'w1' },
+      { origin: B, walletId: 'w2' },
+    ];
+    const { entries, changed } = collapseToOnePerOrigin(list);
+    expect(changed).toBe(false);
+    expect(entries).toEqual(list);
+    expect(collapseToOnePerOrigin([]).changed).toBe(false);
   });
 });

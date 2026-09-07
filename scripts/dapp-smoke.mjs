@@ -101,6 +101,13 @@ const server = http.createServer((req, res) => {
   res.end(PAGE_HTML);
 });
 await new Promise((resolve) => server.listen(PORT, '127.0.0.1', resolve));
+const PORT2 = PORT + 1;
+const SITE2 = `http://127.0.0.1:${PORT2}`;
+const server2 = http.createServer((req, res) => {
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+  res.end(PAGE_HTML);
+});
+await new Promise((resolve) => server2.listen(PORT2, '127.0.0.1', resolve));
 
 const context = await chromium.launchPersistentContext(userDataDir, {
   channel: 'chromium',
@@ -114,6 +121,8 @@ const check = (ok, label) => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}`);
 
 async function extId() {
   const w = context.serviceWorkers()[0] ?? (await context.waitForEvent('serviceworker', { timeout: 15_000 }));
+  // The worker's own errors are otherwise invisible to this script.
+  w.on('console', (m) => { if (/error|warn/i.test(m.type())) console.log('  [worker]', m.text().slice(0, 240)); });
   return new URL(w.url()).host;
 }
 
@@ -159,9 +168,157 @@ async function answerMnemonicQuiz(pg, label = 'create') {
   check(positions.length === 3, `${label}: recovery-phrase quiz answered (#${positions.join(', #')})`);
 }
 
+/**
+ * WHERE AN APPROVAL APPEARS. Since 1.4.1 the worker shows a site's request
+ * INSIDE a wallet window that is already open (side panel, popup, tab) as an
+ * overlay, and only opens the 400x620 popup when no wallet window is open.
+ * `trigger` fires the request; this resolves with { kind, scope } where scope
+ * is either the new approval page or the overlay locator inside the hosting
+ * page (both answer getByTestId the same way). Times out if neither shows up.
+ */
+async function awaitApproval(trigger, { timeout = 20_000 } = {}) {
+  const walletPages = context.pages().filter((p) => p.url().startsWith('chrome-extension://'));
+  const never = new Promise(() => {});
+  // An overlay for the PREVIOUS request can linger a few ms after it was
+  // decided; only an overlay carrying a new request id counts.
+  const seen = new Set();
+  for (const page of walletPages) {
+    if (page.isClosed()) continue;
+    for (const el of await page.getByTestId('dapp-host-overlay').all()) seen.add(await el.getAttribute('data-request-id'));
+  }
+  const asWindow = context
+    .waitForEvent('page', { timeout })
+    .then((page) => ({ kind: 'window', scope: page, page }))
+    .catch(() => never);
+  await trigger();
+  const asHosted = (async () => {
+    const until = Date.now() + timeout;
+    while (Date.now() < until) {
+      for (const page of walletPages) {
+        if (page.isClosed()) continue;
+        const overlay = page.getByTestId('dapp-host-overlay');
+        if ((await overlay.count()) && !seen.has(await overlay.getAttribute('data-request-id'))) {
+          return { kind: 'hosted', scope: overlay, page };
+        }
+      }
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    return never;
+  })();
+  const bail = new Promise((_, reject) => setTimeout(() => reject(new Error('no approval appeared')), timeout + 1000));
+  const found = await Promise.race([asWindow, asHosted, bail]);
+  await found.scope.getByTestId('dapp-approval').waitFor({ timeout: 15_000 });
+  return found;
+}
+
+/** Open a fresh wallet page and unlock it with `password` if the lock shows. */
+async function openWalletPage(id, password) {
+  const pg = await context.newPage();
+  await pg.goto(`chrome-extension://${id}/index.html`);
+  await pg.waitForSelector('[data-testid="live-unlock"], [data-testid="live-home"]', { timeout: 20_000 });
+  if (await pg.getByTestId('live-unlock').count()) {
+    await pg.getByTestId('live-unlock').fill(password);
+    await pg.getByRole('button', { name: /^Unlock$/ }).click();
+    await pg.getByTestId('live-home').waitFor({ timeout: 25_000 });
+  }
+  return pg;
+}
+
+/** Settings > Connected sites: read the rows, or disconnect every binding. */
+async function openConnectedSites(pg) {
+  await pg.getByTestId('live-settings-btn').click();
+  // Connected sites is an EXPERT-mode section; Settings opens in basic.
+  await pg.getByTestId('live-settings-mode-expert').click({ timeout: 10_000 });
+  await pg.getByTestId('live-settings-row-sites').click();
+  await pg.getByTestId('live-connected-sites').waitFor({ timeout: 10_000 });
+}
+async function disconnectAllSites(pg) {
+  for (let i = 0; i < 8; i++) {
+    if (await pg.getByTestId('live-sites-empty').count()) break;
+    const btn = pg.getByTestId('live-site-disconnect-0');
+    if (!(await btn.count())) break;
+    await btn.click();
+    await pg.waitForTimeout(400);
+  }
+  await pg.getByTestId('live-sites-empty').waitFor({ timeout: 10_000 });
+}
+
+/** Empty the page's #out so the NEXT result cannot be mistaken for the last one. */
+const clearOut = (site) => site.evaluate(() => { document.querySelector('#out').textContent = ''; });
+
+/** Does a shown address (possibly shortened to "EMc6LdHEHR…X2D9Ew") name `full`? */
+function sameAddress(full, shown) {
+  if (!full || !shown) return false;
+  if (shown === full) return true;
+  const parts = shown.split('…');
+  return parts.length === 2 && full.startsWith(parts[0]) && full.endsWith(parts[1]);
+}
+
+/**
+ * Does the approval fit WITHOUT scrolling at the popup's real inner size?
+ * chrome.windows.create({height: 620}) is the OUTER height; on Windows the
+ * title bar takes 30-40px, so the page gets about 580. Measured at 540 to
+ * leave room for DPI scaling. The scroll container is .app-content.
+ */
+async function fitsWithoutScroll(found, label) {
+  const page = found.page;
+  const before = page.viewportSize();
+  await page.setViewportSize({ width: 400, height: 540 });
+  await page.waitForTimeout(150);
+  const m = await found.scope.locator('.app-content').evaluate((el) => ({
+    scrollHeight: el.scrollHeight,
+    clientHeight: el.clientHeight,
+  }));
+  if (before) await page.setViewportSize(before);
+  check(
+    m.scrollHeight <= m.clientHeight + 1,
+    `${label} fits a 400x540 viewport without scrolling (content ${m.scrollHeight}px in ${m.clientHeight}px)`,
+  );
+}
+
+/** The connect approval's wallet dropdown: option labels and the selected name. */
+async function pickerState(scope) {
+  return scope.getByTestId('dapp-wallet-select').evaluate((el) => ({
+    labels: [...el.options].map((o) => o.text.split(' · ')[0].trim()),
+    selected: el.selectedOptions[0] ? el.selectedOptions[0].text.split(' · ')[0].trim() : '(none)',
+  }));
+}
+async function pickWallet(scope, re) {
+  const value = await scope.getByTestId('dapp-wallet-select').evaluate((el, src) => {
+    const rx = new RegExp(src, 'i');
+    const o = [...el.options].find((x) => rx.test(x.text));
+    return o ? o.value : '';
+  }, re.source);
+  if (!value) throw new Error(`no wallet matching ${re} in the dropdown`);
+  await scope.getByTestId('dapp-wallet-select').selectOption(value);
+}
+
+/** Read the page's last #out once it matches `re` (or give up). */
+async function outMatching(site, re, tries = 30) {
+  let text = '';
+  for (let i = 0; i < tries; i++) {
+    text = (await site.locator('#out').innerText()).trim();
+    if (re.test(text)) break;
+    await site.waitForTimeout(500);
+  }
+  return text;
+}
+
+/** Side panel mode on/off, the way Settings stores it (the worker re-reads it
+ *  on storage.onChanged). Playwright cannot see or drive Chrome's side panel,
+ *  so every step that decides an approval runs in POPUP mode; the last step
+ *  turns the panel on and checks, through the worker, that a site's click
+ *  opens it and the request is hosted there. */
+async function setSidePanelMode(on) {
+  const sw = context.serviceWorkers()[0];
+  await sw.evaluate((v) => chrome.storage.local.set({ 'ui:sidePanel': v }), on);
+  await new Promise((r) => setTimeout(r, 200));
+}
+
 try {
   const id = await extId();
   check(true, `extension service worker alive (background.js built) — id ${id}`);
+  await setSidePanelMode(false);
 
   // --- 1. Set up the live wallet in the extension popup ----------------------
   const popup = await context.newPage();
@@ -189,21 +346,27 @@ try {
   }
   check(hasProvider, 'window.evrmore provider injected into the http page');
 
-  // --- 3. connect -> approval window -> address on the page ------------------
-  const approvalPromise = context.waitForEvent('page', { timeout: 20_000 });
-  await site.click('#connect');
-  const approval = await approvalPromise;
-  await approval.getByTestId('dapp-approval').waitFor({ timeout: 15_000 });
+  // --- 3. connect -> approval HOSTED in the open wallet page -> address -------
+  // The wallet page from step 1 is still open, so the request must appear in
+  // it (the user's window, not a popup on top of it).
+  const wallet1Name = (await popup.getByTestId('live-wallet-switcher').innerText()).trim();
+  const first = await awaitApproval(() => site.click('#connect'));
+  check(first.kind === 'hosted', `approval appears INSIDE the open wallet window, no popup (${first.kind})`);
+  const approval = first.scope;
   const shownOrigin = (await approval.getByTestId('dapp-origin').innerText()).trim();
-  check(shownOrigin === SITE, `approval window shows the requesting origin (${shownOrigin})`);
+  check(shownOrigin === SITE, `approval shows the requesting origin (${shownOrigin})`);
+  check(
+    (await approval.getByTestId('dapp-wallet-picker').count()) === 0,
+    'a single Evrmore wallet: no picker, it is preselected',
+  );
   await approval.getByTestId('dapp-approve').click({ timeout: 10_000 });
-  let outText = '';
-  for (let i = 0; i < 30; i++) {
-    outText = (await site.locator('#out').innerText()).trim();
-    if (outText) break;
-    await site.waitForTimeout(500);
-  }
+  let outText = await outMatching(site, /./);
   check(/"address"\s*:\s*"EMc6/.test(outText), `connect resolved with the wallet address on the page -> ${outText}`);
+  await popup.getByTestId('dapp-host-overlay').waitFor({ state: 'detached', timeout: 10_000 });
+  check(
+    (await popup.getByTestId('live-home').count()) === 1,
+    'after deciding, the overlay is gone and the wallet page is where it was',
+  );
   // Wallet 1's address — used later to prove a wallet switch re-binds access.
   const wallet1Address = (() => {
     try { return JSON.parse(outText).address; } catch { return ''; }
@@ -221,13 +384,15 @@ try {
 
   // --- 4b. signMessage -> approval window -> page gets { address, signature }
   //         and the signature RECOVERS to the wallet address (Satori-valid) ------
-  const signApprovalPromise = context.waitForEvent('page', { timeout: 20_000 });
-  await site.click('#sign');
-  const signApproval = await signApprovalPromise;
-  await signApproval.getByTestId('dapp-approval').waitFor({ timeout: 15_000 });
+  const signFound = await awaitApproval(() => site.click('#sign'));
+  const signApproval = signFound.scope;
+  await fitsWithoutScroll(signFound, 'sign approval (password + buttons in view)');
   const shownMsg = (await signApproval.getByTestId('dapp-sign-message').innerText()).trim();
   check(shownMsg === SIGN_MSG, `sign approval shows the exact message -> "${shownMsg}"`);
-  await signApproval.getByTestId('dapp-password').fill(PASSWORD);
+  check(
+    (await signApproval.getByTestId('dapp-password').count()) === 0,
+    'hosted in the UNLOCKED wallet: the signature asks for no password (the user unlocked it here already)',
+  );
   await signApproval.getByTestId('dapp-approve').click({ timeout: 10_000 });
   outText = '';
   for (let i = 0; i < 30; i++) {
@@ -243,17 +408,46 @@ try {
     `signMessage signature recovers to the wallet address -> ${recovered || outText.slice(0, 80)}`,
   );
 
+  // --- 4c. WALLET LOCKED: a sign request does not put a password box over the
+  //         lock screen. A strip says the site is waiting; unlocking the wallet
+  //         brings the approval, which asks for no password (owner's flow:
+  //         unlock once, sign, back in the wallet). ---------------------------
+  await popup.getByTestId('live-lock-btn').click({ timeout: 10_000 });
+  await popup.getByTestId('live-unlock').waitFor({ timeout: 15_000 });
+  await clearOut(site);
+  await site.click('#sign');
+  await popup.getByTestId('dapp-unlock-wait').waitFor({ timeout: 15_000 });
+  check(
+    (await popup.getByTestId('dapp-approval').count()) === 0 && (await popup.getByTestId('live-unlock').count()) === 1,
+    'locked wallet: the request waits behind the lock screen (strip shown, no approval, no second password box)',
+  );
+  await popup.getByTestId('live-unlock').fill(PASSWORD);
+  await popup.getByRole('button', { name: /^Unlock$/ }).click();
+  await popup.getByTestId('live-home').waitFor({ timeout: 25_000 });
+  await popup.getByTestId('dapp-approval').waitFor({ timeout: 15_000 });
+  check(
+    (await popup.getByTestId('dapp-password').count()) === 0 && (await popup.getByTestId('dapp-unlock-wait').count()) === 0,
+    'after unlocking, the sign approval appears without a password field',
+  );
+  await popup.getByTestId('dapp-approve').click({ timeout: 10_000 });
+  outText = await outMatching(site, /"signature"/);
+  let signedAfterUnlock = {};
+  try { signedAfterUnlock = JSON.parse(outText); } catch { /* leave empty */ }
+  check(
+    !!signedAfterUnlock.signature && recoverEvrAddress(SIGN_MSG, signedAfterUnlock.signature) === signedAfterUnlock.address,
+    `signed with the wallet unlocked in the page -> ${signedAfterUnlock.address || outText.slice(0, 60)}`,
+  );
+  await popup.getByTestId('dapp-host-overlay').waitFor({ state: 'detached', timeout: 10_000 });
+  check((await popup.getByTestId('live-home').count()) === 1, 'and the wallet is back, still unlocked');
+
   // --- 5. sendEvr -> approval window -> unlock+build proves insufficient funds,
   //        then Reject -> the page gets user-rejected --------------------------
-  const sendApprovalPromise = context.waitForEvent('page', { timeout: 20_000 });
-  await site.click('#send');
-  const sendApproval = await sendApprovalPromise;
-  await sendApproval.getByTestId('dapp-approval').waitFor({ timeout: 15_000 });
+  const sendApproval = (await awaitApproval(() => site.click('#send'))).scope;
   check(
     (await sendApproval.getByTestId('dapp-send-to').innerText()).includes(RECIPIENT),
     'send approval shows the recipient',
   );
-  await sendApproval.getByTestId('dapp-password').fill(PASSWORD);
+  if (await sendApproval.getByTestId('dapp-password').count()) await sendApproval.getByTestId('dapp-password').fill(PASSWORD);
   await sendApproval.getByTestId('dapp-approve').click({ timeout: 10_000 });
   await sendApproval.getByTestId('dapp-error').waitFor({ timeout: 30_000 });
   const errText = (await sendApproval.getByTestId('dapp-error').innerText()).trim();
@@ -267,6 +461,30 @@ try {
   }
   check(/user-rejected/.test(outText), `page received user-rejected after Reject -> ${outText}`);
 
+  // --- 5b. WALLET CLOSED MID-REQUEST: a sign request is shown in the open
+  //         wallet page; the page is closed without deciding. The site must get
+  //         user-rejected, and the NEXT sign request must open a fresh approval
+  //         (it used to be refused with approval-already-open, which the site
+  //         shows as "Could not reach the wallet"). ------------------------------
+  await clearOut(site);
+  const midway = await awaitApproval(() => site.click('#sign'));
+  check(midway.kind === 'hosted', `sign request shown in the open wallet page (${midway.kind})`);
+  await midway.page.close();
+  outText = await outMatching(site, /user-rejected/, 20);
+  check(/user-rejected/.test(outText), `closing the wallet mid-request rejected it to the site -> ${outText}`);
+  await clearOut(site);
+  let afterClose;
+  try {
+    afterClose = await awaitApproval(() => site.click('#sign'));
+  } catch (e) {
+    console.log('  [debug] second sign: #out =', JSON.stringify(await site.locator('#out').innerText()), 'pages =', context.pages().map((p) => p.url()).join(' | '));
+    throw e;
+  }
+  check(afterClose.kind === 'window', `the next sign request opens a fresh approval (${afterClose.kind}), not approval-already-open`);
+  await afterClose.scope.getByTestId('dapp-reject').click({ timeout: 10_000 });
+  outText = await outMatching(site, /user-rejected/);
+  check(/user-rejected/.test(outText), 'and can be decided normally');
+
   // Page-side helper: resolve/reject window.evrmore.getAddress() to a plain object.
   const pageGetAddress = () =>
     site.evaluate(() =>
@@ -276,21 +494,14 @@ try {
       ),
     );
 
-  // --- 6. WALLET-SWITCH (M2 fix): a connection is bound to ONE wallet ---------
-  // The site is connected while Wallet 1 is active. Create + switch to a SECOND
-  // wallet in the extension UI, then prove from the page that:
-  //   (a) getAddress() rejects not-connected (Wallet 2 was never approved), and
-  //   (b) a fresh connect() opens a NEW approval window (re-consent for Wallet 2).
-  // Then switch back to Wallet 1 and prove getAddress() works again with NO new
-  // approval — the original approval still stands for its own wallet.
-  const popupSw = await context.newPage();
-  await popupSw.goto(`chrome-extension://${id}/index.html`);
-  await popupSw.waitForSelector('[data-testid="live-unlock"], [data-testid="live-home"]', { timeout: 20_000 });
-  if (await popupSw.getByTestId('live-unlock').count()) {
-    await popupSw.getByTestId('live-unlock').fill(PASSWORD);
-    await popupSw.getByRole('button', { name: /^Unlock$/ }).click();
-    await popupSw.getByTestId('live-home').waitFor({ timeout: 25_000 });
-  }
+  // --- 6. WALLET SWITCH: the connection is bound to the wallet the user PICKED
+  // and it does not move when the wallet UI switches wallet. Create + switch to
+  // a SECOND wallet in the extension UI, then prove from the page that:
+  //   (a) getAddress() still answers with Wallet 1's address, and
+  //   (b) connect() resolves at once with Wallet 1's address, NO new approval.
+  // (Until 1.4.1 the binding followed the ACTIVE wallet, so a switch silently
+  // disconnected the site and the next connect bound whatever was active.)
+  const popupSw = await openWalletPage(id, PASSWORD);
   // Create a second wallet via the header switcher (mirrors live-extension-smoke).
   const WALLET2_PASS = 'wallet2-pass-9876';
   await popupSw.getByTestId('live-wallet-switcher').click({ timeout: 10_000 });
@@ -306,36 +517,36 @@ try {
   await popupSw.getByTestId('live-home').waitFor({ timeout: 20_000 });
   const activeName = (await popupSw.getByTestId('live-wallet-switcher').innerText()).trim();
   check(/second wallet/i.test(activeName), `created + switched to Wallet 2 (active switcher -> "${activeName}")`);
+  const wallet2Shown = (await popupSw.getByTestId('live-address').innerText()).trim();
 
-  // (a) getAddress() from the page must now fail — Wallet 2 is not approved.
+  // (a) getAddress() from the page still answers with Wallet 1: the binding stayed.
   let addrW2 = await pageGetAddress();
-  for (let i = 0; i < 10 && addrW2.ok; i++) { await site.waitForTimeout(300); addrW2 = await pageGetAddress(); }
+  for (let i = 0; i < 10 && !addrW2.ok; i++) { await site.waitForTimeout(300); addrW2 = await pageGetAddress(); }
   check(
-    addrW2.ok === false && /not-connected/.test(addrW2.message),
-    `getAddress rejects not-connected after switching to an UNAPPROVED wallet -> ${JSON.stringify(addrW2)}`,
+    addrW2.ok === true && addrW2.address === wallet1Address,
+    `after switching to Wallet 2, the site is STILL connected to Wallet 1 -> ${JSON.stringify(addrW2)}`,
   );
 
-  // (b) A fresh connect() must open a NEW approval window (re-consent for Wallet 2).
-  const w2ApprovalPromise = context.waitForEvent('page', { timeout: 20_000 });
-  await site.click('#connect');
-  const w2Approval = await w2ApprovalPromise;
-  await w2Approval.getByTestId('dapp-approval').waitFor({ timeout: 15_000 });
-  check(true, 'connect() from an unapproved wallet opens a NEW approval window (fresh consent)');
-  const w2WalletName = (await w2Approval.getByTestId('dapp-wallet-name').innerText()).trim();
-  check(/second wallet/i.test(w2WalletName), `new approval window binds to the ACTIVE wallet -> "${w2WalletName}"`);
-  await w2Approval.getByTestId('dapp-approve').click({ timeout: 10_000 });
-  outText = '';
-  for (let i = 0; i < 30; i++) {
-    outText = (await site.locator('#out').innerText()).trim();
-    if (/"address"/.test(outText)) break;
-    await site.waitForTimeout(500);
-  }
-  let w2Addr = '';
-  try { w2Addr = JSON.parse(outText).address; } catch { /* leave empty */ }
+  // (b) connect() again, now that TWO Evrmore wallets exist: the approval
+  // re-opens with the picker, the CONNECTED wallet (Wallet 1) preselected, and
+  // picking Second Wallet re-binds the site to it. This is how a user switches
+  // the wallet a site uses after a site-side "disconnect".
+  await clearOut(site);
+  const again = await awaitApproval(() => site.click('#connect'));
+  check(again.kind === 'hosted', `re-connect on a connected site re-opens the approval in the open wallet (${again.kind})`);
+  await fitsWithoutScroll(again, 'connect approval with the picker');
+  const againState = await pickerState(again.scope);
+  check(againState.selected === wallet1Name, `the CONNECTED wallet is preselected in the dropdown, not the active one (${againState.selected})`);
+  await pickWallet(again.scope, /second wallet/);
+  await again.scope.getByTestId('dapp-approve').click({ timeout: 10_000 });
+  outText = await outMatching(site, /"address"/);
+  let reAddr = '';
+  try { reAddr = JSON.parse(outText).address; } catch { /* leave empty */ }
   check(
-    !!w2Addr && w2Addr !== wallet1Address,
-    `connect approved -> page now sees Wallet 2's DIFFERENT address (${w2Addr})`,
+    !!reAddr && reAddr !== wallet1Address && sameAddress(reAddr, wallet2Shown),
+    `picking Second Wallet re-binds the site to it (${reAddr}, shown in the wallet as ${wallet2Shown})`,
   );
+  const wallet2Address = reAddr;
 
   // Switch back to Wallet 1 (unlock with its own password).
   await popupSw.getByTestId('live-wallet-switcher').click({ timeout: 10_000 });
@@ -345,55 +556,31 @@ try {
   await popupSw.getByRole('button', { name: /^Unlock$/i }).click({ timeout: 10_000 });
   await popupSw.getByTestId('live-home').waitFor({ timeout: 25_000 });
 
-  // Back on Wallet 1: getAddress() works again with NO new approval window.
   let addrBack = await pageGetAddress();
   for (let i = 0; i < 10 && !addrBack.ok; i++) { await site.waitForTimeout(300); addrBack = await pageGetAddress(); }
   check(
-    addrBack.ok === true && addrBack.address === wallet1Address,
-    `after switching back to Wallet 1, getAddress works again WITHOUT re-approval -> ${JSON.stringify(addrBack)}`,
+    addrBack.ok === true && addrBack.address === wallet2Address,
+    `back on Wallet 1 in the UI, the site stays bound to Second Wallet -> ${JSON.stringify(addrBack)}`,
   );
 
-  // --- 7. Reopen the popup: Settings -> Connected sites lists BOTH bindings ---
-  const popup2 = await context.newPage();
-  await popup2.goto(`chrome-extension://${id}/index.html`);
-  // Reopening lands on the live surface; a fresh page means the wallet service
-  // is locked again, so unlock first when the lock screen shows.
-  await popup2.waitForSelector('[data-testid="live-unlock"], [data-testid="live-home"]', { timeout: 20_000 });
-  if (await popup2.getByTestId('live-unlock').count()) {
-    await popup2.getByTestId('live-unlock').fill(PASSWORD);
-    await popup2.getByRole('button', { name: /^Unlock$/ }).click();
-    await popup2.getByTestId('live-home').waitFor({ timeout: 25_000 });
-  }
-  await popup2.getByTestId('live-settings-btn').click();
-  // Connected sites is an EXPERT-mode section; Settings opens in basic.
-  await popup2.getByTestId('live-settings-mode-expert').click({ timeout: 10_000 });
-  await popup2.getByTestId('live-settings-row-sites').click();
-  await popup2.getByTestId('live-connected-sites').waitFor({ timeout: 10_000 });
+  // --- 7. Reopen the popup: Settings -> Connected sites lists ONE binding ------
+  const popup2 = await openWalletPage(id, PASSWORD);
+  await openConnectedSites(popup2);
   await popup2.getByTestId('live-site-0').waitFor({ timeout: 10_000 });
-  // The same origin is now approved for BOTH wallets -> two rows, each labelled
-  // with its bound wallet's name.
+  // One origin, one wallet: the site is connected to Wallet 1 and nothing else.
   const siteRowCount = await popup2.locator('[data-testid^="live-site-"]:not([data-testid*="disconnect"]):not([data-testid*="wallet"])').count();
   const siteRow0 = (await popup2.getByTestId('live-site-0').innerText()).trim();
   const boundNames = (await popup2.locator('[data-testid^="live-site-wallet-"]').allInnerTexts()).join(' | ');
   check(
-    siteRow0.includes(SITE) && siteRowCount >= 2 && /second wallet/i.test(boundNames),
-    `Connected sites lists per-wallet bindings (${siteRowCount} rows; wallets: ${boundNames})`,
+    siteRow0.includes(SITE) && siteRowCount === 1 && /second wallet/i.test(boundNames) && !boundNames.includes(wallet1Name),
+    `Connected sites lists exactly one binding, to Second Wallet (${siteRowCount} row; wallet: ${boundNames})`,
   );
 
-  // --- 8. Disconnect every binding -> the list empties (empty state shows) ----
-  // Each row's Disconnect removes only THAT {origin, wallet} entry, so click until
-  // the empty state appears.
-  for (let i = 0; i < 5; i++) {
-    if (await popup2.getByTestId('live-sites-empty').count()) break;
-    const btn = popup2.getByTestId('live-site-disconnect-0');
-    if (!(await btn.count())) break;
-    await btn.click();
-    await popup2.waitForTimeout(400);
-  }
-  await popup2.getByTestId('live-sites-empty').waitFor({ timeout: 10_000 });
+  // --- 8. Disconnect -> the list empties (empty state shows) ------------------
+  await disconnectAllSites(popup2);
   check(
     (await popup2.getByTestId('live-site-0').count()) === 0,
-    'Disconnect removed every binding (empty state shown)',
+    'Disconnect removed the binding (empty state shown)',
   );
 
   // --- 9. Back on the page (Wallet 1 active): getAddress must now REJECT -------
@@ -402,12 +589,125 @@ try {
     addrOutcome.ok === false && /not-connected/.test(addrOutcome.message),
     `getAddress rejected with not-connected after disconnect -> ${JSON.stringify(addrOutcome)}`,
   );
+
+  // --- 10. WALLET CLOSED: the request opens the popup, and the PICKER offers
+  //         both Evrmore wallets; the user picks Wallet 2 ------------------------
+  // This is the case the old smoke never covered (it kept the wallet open), and
+  // the one the owner hit: with no wallet window open, a popup is the only
+  // window a page's message may cause. Two Evrmore wallets exist now, so the
+  // approval must let the user choose, and bind the site to the chosen one.
+  for (const pg of context.pages()) {
+    if (pg.url().startsWith('chrome-extension://')) await pg.close();
+  }
+  await clearOut(site);
+  const closedCase = await awaitApproval(() => site.click('#connect'));
+  check(closedCase.kind === 'window', `with every wallet window closed, the approval opens as a popup (${closedCase.kind})`);
+  const picker = closedCase.scope.getByTestId('dapp-wallet-picker');
+  check((await picker.count()) === 1, 'two Evrmore wallets: the approval shows a wallet picker');
+  await fitsWithoutScroll(closedCase, 'popup connect approval with the picker');
+  const closedState = await pickerState(closedCase.scope);
+  check(
+    closedState.labels.length === 2 && closedState.labels.some((t) => /second wallet/i.test(t)) && !closedState.labels.some((t) => /bc1q/.test(t)),
+    `dropdown lists both Evrmore wallets (${closedState.labels.join(' | ')})`,
+  );
+  await pickWallet(closedCase.scope, /second wallet/);
+  const pickedName = (await closedCase.scope.getByTestId('dapp-wallet-name').innerText()).trim();
+  check(/second wallet/i.test(pickedName), `picking Wallet 2 updates the summary (${pickedName})`);
+  await closedCase.scope.getByTestId('dapp-approve').click({ timeout: 10_000 });
+  outText = await outMatching(site, /"address"/);
+  let pickedAddr = '';
+  try { pickedAddr = JSON.parse(outText).address; } catch { /* leave empty */ }
+  check(
+    !!pickedAddr && pickedAddr === wallet2Address,
+    `connect resolved with the PICKED wallet's address (${pickedAddr})`,
+  );
+
+  // --- 11. CHAIN GATE: Bitcoin active in the wallet UI ------------------------
+  // Enable Bitcoin on Wallet 1 so the active entry is "… (Bitcoin)" with a bc1q
+  // address, which is what the owner had open on 2026-09-04. The site must keep
+  // Wallet 2's Evrmore address, and a fresh connect must offer Evrmore wallets
+  // only, never the Bitcoin entry.
+  const popupBtc = await openWalletPage(id, PASSWORD);
+  await popupBtc.getByTestId('live-chain-switcher').click({ timeout: 10_000 });
+  await popupBtc.getByTestId('live-chain-option-bitcoin-mainnet').click({ timeout: 10_000 });
+  await popupBtc.getByTestId('live-chain-enable-panel').waitFor({ timeout: 10_000 });
+  if (await popupBtc.getByTestId('live-chain-enable-password').count()) {
+    await popupBtc.getByTestId('live-chain-enable-password').fill(PASSWORD);
+  }
+  await popupBtc.getByTestId('live-chain-enable-submit').click({ timeout: 10_000 });
+  await popupBtc.getByTestId('live-chain-enable-panel').waitFor({ state: 'detached', timeout: 30_000 });
+  let btcAddr = '';
+  for (let i = 0; i < 40 && !/^bc1q/.test(btcAddr); i++) {
+    btcAddr = (await popupBtc.getByTestId('live-address').innerText()).trim();
+    if (!/^bc1q/.test(btcAddr)) await popupBtc.waitForTimeout(500);
+  }
+  check(/^bc1q/.test(btcAddr), `Bitcoin enabled and active in the wallet UI (${btcAddr.slice(0, 12)}…)`);
+
+  const addrOnBtc = await pageGetAddress();
+  check(
+    addrOnBtc.ok === true && addrOnBtc.address === pickedAddr,
+    `with Bitcoin active, the site still gets its Evrmore wallet, never bc1q -> ${JSON.stringify(addrOnBtc)}`,
+  );
+
+  await openConnectedSites(popupBtc);
+  await disconnectAllSites(popupBtc);
+  await clearOut(site);
+  const gated = await awaitApproval(() => site.click('#connect'));
+  const gatedState = await pickerState(gated.scope);
+  const gatedText = await gated.scope.getByTestId('dapp-approval').innerText();
+  check(
+    gatedState.labels.length === 2 && !/bc1q|bitcoin/i.test(gatedText) && !gatedState.labels.some((t) => /bitcoin/i.test(t)),
+    `a fresh connect while Bitcoin is active offers the two Evrmore wallets and no Bitcoin entry (${gatedState.labels.join(' | ')})`,
+  );
+  await gated.scope.getByTestId('dapp-approve').click({ timeout: 10_000 });
+  outText = await outMatching(site, /"address"/);
+  let gatedAddr = '';
+  try { gatedAddr = JSON.parse(outText).address; } catch { /* leave empty */ }
+  check(gatedAddr === wallet1Address, `the site receives the preselected Evrmore wallet's address, Wallet 1 (${gatedAddr})`);
+
+  // --- 12. SIDE PANEL MODE (the default on Chrome): a site's click opens the
+  //         wallet in the side panel and the approval is hosted THERE, with no
+  //         popup. Verified through the worker: Playwright has no handle on the
+  //         panel, so this request is left parked on a second origin. ---------
+  for (const pg of context.pages()) {
+    if (pg.url().startsWith('chrome-extension://')) await pg.close();
+  }
+  await setSidePanelMode(true);
+  const site2 = await context.newPage();
+  await site2.goto(SITE2);
+  let provider2 = false;
+  for (let i = 0; i < 20 && !provider2; i++) {
+    provider2 = await site2.evaluate(() => Boolean(window.evrmore && window.evrmore.isEvrNexus));
+    if (!provider2) await site2.waitForTimeout(250);
+  }
+  let popped = false;
+  const onPage = () => { popped = true; };
+  context.on('page', onPage);
+  await site2.click('#connect');
+  await site2.waitForTimeout(5500);
+  context.off('page', onPage);
+  const sw = context.serviceWorkers()[0];
+  const panelCtx = await sw.evaluate(async () =>
+    (await chrome.runtime.getContexts({ contextTypes: ['SIDE_PANEL'] })).map((c) => c.documentUrl ?? ''),
+  );
+  const parked2 = await sw.evaluate(async () => {
+    const all = await chrome.storage.session.get(null);
+    return Object.values(all).filter((p) => p && p.origin);
+  });
+  const mine = parked2.filter((p) => p.origin === SITE2);
+  check(panelCtx.some((u) => /panel=1/.test(u)), `the click opened the side panel (${panelCtx.join(' | ') || 'no panel context'})`);
+  check(
+    !popped && mine.length === 1 && mine[0].popupWindowId === undefined,
+    `the request is hosted in the panel: no popup window, one parked request without a popup id (${JSON.stringify(mine.map((p) => p.method))})`,
+  );
+  await setSidePanelMode(false);
 } catch (e) {
   console.log('FAIL  exception:', String(e).split('\n')[0]);
   failures++;
 } finally {
   await context.close();
   server.close();
+  server2.close();
   rmSync(userDataDir, { recursive: true, force: true });
 }
 

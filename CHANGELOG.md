@@ -9,6 +9,49 @@ and release commits.
 
 ---
 
+## 1.4.1
+
+### Connecting to a website works the way you would expect
+
+A website that talks to the wallet (Satori Signals, for example) is now always
+offered an Evrmore wallet. Before, the wallet handed the site whichever chain
+happened to be open, so with Bitcoin open the site received a Bitcoin address,
+could not use it, and reported that it could not reach the wallet. Opening the
+wallet and switching back to Evrmore was the accidental workaround.
+
+That is gone. The connection request lists your Evrmore wallets and you pick
+the one to connect. The site then stays connected to that wallet, whatever you
+switch to in the wallet meanwhile, until you disconnect it in Settings >
+Connected sites. A site is connected to one wallet at a time. To move a site to
+another wallet, press its connect button again: with more than one Evrmore
+wallet the request opens with the connected one preselected in a dropdown and
+you choose. The request stays a single screen however many wallets you have.
+
+### Requests open the wallet in the side panel
+
+With the wallet in side panel mode (the default on Chrome and Edge), pressing a
+site's connect or sign button slides the wallet out in the side panel and shows
+the request there, the way MetaMask does. If the wallet is already open, the
+request appears in the open window instead of in a separate popup on top of it.
+
+Unlock once. When the wallet is locked, a site's request to sign or send waits
+behind the lock screen, with a note saying which site is waiting, instead of
+putting a second password box over it. Once you unlock, the request appears
+and a signature needs no password again. A send still follows the wallet's own
+send rule. When you are done, you are back in the unlocked wallet.
+
+The popup is still used in popup mode, and when a site asks without you
+clicking anything, because the browser only lets a click open the side panel.
+It now opens in the same place every time, the top right corner of the browser
+window that asked, and the message-signing request fits it without scrolling.
+
+Closing the wallet while a request is waiting counts as declining it. The site
+is told so, and its next request opens a fresh approval instead of being
+refused. A request whose window vanished without an answer also expires on its
+own after fifteen minutes.
+
+---
+
 ## 1.4.0
 
 ### The wallet opens in the side panel now

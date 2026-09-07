@@ -5,6 +5,13 @@
 // CWS hard requirements (these are why this script exists):
 //   - screenshots: EXACTLY 1280x800 or 640x400. Our popup is 400x620, so each
 //     capture is composed onto a 1280x800 branded canvas with a caption.
+//   - JPEG or 24-BIT PNG, NO ALPHA. sharp writes RGBA by default even when the
+//     canvas underneath is opaque, so every output is flattened onto the
+//     background and its alpha channel removed. A 32-bit PNG is rejected at
+//     upload, and the rejection does not say which of the five files was wrong.
+//   - AT MOST FIVE screenshots. The listing takes no more, so the script picks
+//     them in a deliberate order (PICK below) instead of shipping whatever
+//     happened to sort first.
 //   - small promo tile: EXACTLY 440x280.
 //
 // SOURCE SCREENSHOTS: docs/screenshots/*.png are produced by the live smoke, which
@@ -13,7 +20,7 @@
 // blank. Re-capture from a wallet that actually holds EVR + SATORIEVR, drop the PNGs
 // in store/raw/ (400x620), and re-run this. We never fabricate balances.
 import sharp from 'sharp';
-import { mkdir, readdir, readFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -33,16 +40,30 @@ const ACCENT = '#7c6cf5';
 
 /** Caption per source file. Keys are matched as a substring of the filename. */
 const CAPTIONS = [
-  ['home', 'Your EVR and assets, live', 'Real balances straight from the Evrmore network.'],
+  ['home', 'Many networks, one wallet', 'Coins, assets and tokens, with live balances from each network.'],
   ['send', 'Send with a real fee review', 'Every transaction is built, signed and confirmed by you.'],
-  ['asset-send', 'Send any EVRmore asset', 'SATORIEVR and every other asset you hold.'],
-  ['asset-detail', 'Assets, auto-detected', 'The wallet finds every EVRmore asset you own.'],
+  ['asset-send', 'Send what you hold', 'Coins, on-chain assets and tokens, all through the same review.'],
+  ['asset-detail', 'Assets and tokens, found for you', 'What an account holds is detected; add anything else yourself.'],
   ['receive', 'Receive', 'Multiple addresses per wallet.'],
-  ['multiwallet', 'Multiple wallets', 'A recovery phrase, or import a Satori private key.'],
-  ['staking', 'Stake SATORIEVR', 'Delegate to a Satori pool. No funds move — an off-chain signature.'],
-  ['passwordless', 'Your keys, encrypted', 'Seeds never leave your machine unencrypted.'],
+  ['multiwallet', 'Several wallets at once', 'From a recovery phrase, or import an existing key.'],
+  ['recovery-settings', 'A way back if you forget', 'A recovery code and an encrypted backup file, both kept by you.'],
+  ['recovery-code', 'Your recovery code', 'Shown once. It opens the wallet if the password is gone.'],
+  ['staking', 'Stake where the network allows it', 'See what is staked and what it earned, and choose a validator.'],
+  ['side-panel', 'Docked beside your work', 'The wallet stays open while you browse, instead of closing.'],
+  ['settings-root', 'Settings that stay out of the way', 'Everyday choices up front, the rest behind an expert switch.'],
+  ['app-lock', 'One password for the whole wallet', 'Optional. You type it once, then choose which wallet to open.'],
   ['lock', 'Locked by default', 'AES-256-GCM, unlocked only by your password.'],
 ];
+
+/**
+ * The five that get shipped, in listing order, matched as a filename substring.
+ *
+ * A deliberate list rather than "the first five alphabetically": the listing
+ * allows five and the source directory holds twenty, so without this the choice
+ * is made by a numeric prefix nobody thought about. First one wins per slot.
+ */
+const PICK = ['live-home', 'app-lock', 'recovery-settings', 'staking', 'side-panel-narrow'];
+const MAX_SHOTS = 5;
 
 function captionFor(file) {
   // longest key wins, so 'asset-send' beats 'send'
@@ -51,6 +72,26 @@ function captionFor(file) {
 }
 
 const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+/**
+ * Write a composed image as a 24-bit PNG with NO alpha channel.
+ *
+ * IT HAS TO BE A SECOND PASS, which is the whole reason this exists. sharp
+ * applies operations in a fixed internal order rather than the order they are
+ * chained: `flatten` runs at the input stage, BEFORE `composite`, so an overlay
+ * carrying alpha puts the channel straight back and the file lands as 32-bit
+ * RGBA. The store rejects that at upload and does not say which file was wrong.
+ * Re-opening the composed buffer is the only way to be certain, so this checks
+ * its own output before returning.
+ */
+async function writeOpaquePng(pipeline, dest) {
+  const composed = await pipeline.png().toBuffer();
+  await sharp(composed).flatten({ background: BG }).removeAlpha().png({ compressionLevel: 9 }).toFile(dest);
+  const meta = await sharp(dest).metadata();
+  if (meta.hasAlpha || meta.channels !== 3) {
+    throw new Error(`${dest} still carries alpha (${meta.channels} channels)`);
+  }
+}
 
 /** Greedy word-wrap. The caption column is narrow — unwrapped text ran under the
  *  screenshot and got clipped. maxChars is tuned for 24px Segoe UI in ~620px. */
@@ -70,9 +111,23 @@ function wrap(text, maxChars) {
 }
 
 await mkdir(shotOut, { recursive: true });
+// CLEAR THE OUTPUT FIRST. A previous release left eleven files here while this
+// listing takes five, and the extra ones look exactly as finished as the real
+// ones. Uploading last release's screenshot is a quiet mistake, so make it
+// impossible rather than obvious.
+for (const stale of await readdir(shotOut)) {
+  await rm(path.join(shotOut, stale), { force: true });
+}
 
 // ---------------------------------------------------------------- screenshots
-const files = (await readdir(srcDir)).filter((f) => f.endsWith('.png')).sort();
+const allFiles = (await readdir(srcDir)).filter((f) => f.endsWith('.png')).sort();
+// Take PICK in order, then top up from whatever is left if a pick is missing,
+// so a renamed capture degrades to "one fewer deliberate choice" rather than to
+// an empty listing.
+const picked = PICK.map((k) => allFiles.find((f) => f.includes(k))).filter(Boolean);
+const files = [...new Set([...picked, ...allFiles])].slice(0, MAX_SHOTS);
+console.log(`source: ${srcDir}`);
+console.log(`picked ${files.length} of ${allFiles.length}: ${files.join(', ')}`);
 let made = 0;
 
 for (const file of files) {
@@ -144,10 +199,10 @@ for (const file of files) {
       <rect x="90" y="${ruleY}" width="64" height="4" rx="2" fill="${ACCENT}"/>
     </svg>`);
 
-  await sharp(canvas)
-    .composite([{ input: shot, left: shotLeft, top: shotTop }])
-    .png()
-    .toFile(path.join(shotOut, file.replace(/^\d+-/, '')));
+  await writeOpaquePng(
+    sharp(canvas).composite([{ input: shot, left: shotLeft, top: shotTop }]),
+    path.join(shotOut, file.replace(/^\d+-/, '')),
+  );
   made++;
   console.log(`screenshot: ${file} -> 1280x800 ("${title}")`);
 }
@@ -166,15 +221,15 @@ const promo = Buffer.from(`
     <text x="196" y="150" font-family="Segoe UI, Arial, sans-serif" font-size="40"
           font-weight="700" fill="#ffffff">Satori GO</text>
     <text x="196" y="182" font-family="Segoe UI, Arial, sans-serif" font-size="16"
-          fill="#a6accd">EVRmore wallet for the</text>
+          fill="#a6accd">Multi-chain wallet made</text>
     <text x="196" y="204" font-family="Segoe UI, Arial, sans-serif" font-size="16"
-          fill="#a6accd">Satori Network</text>
+          fill="#a6accd">by Satori Network</text>
   </svg>`);
 
-await sharp(promo)
-  .composite([{ input: icon, left: 26, top: 65 }])
-  .png()
-  .toFile(path.join(outDir, 'promo-440x280.png'));
+await writeOpaquePng(
+  sharp(promo).composite([{ input: icon, left: 26, top: 65 }]),
+  path.join(outDir, 'promo-440x280.png'),
+);
 
 console.log(`promo tile: store/promo-440x280.png`);
 console.log(`\n${made} screenshot(s) written to store/screenshots (source: ${path.relative(repo, srcDir)})`);

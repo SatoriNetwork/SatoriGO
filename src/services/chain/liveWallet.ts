@@ -2579,6 +2579,22 @@ export class LiveWalletService implements WalletEngine {
   }
 
   /**
+   * Point THIS SERVICE at wallet `id` without touching the shared store.
+   *
+   * The dApp approval page acts on the wallet a site is CONNECTED to, which is
+   * not necessarily the one the wallet UI is showing. switchWallet() would
+   * persist `activeId` and flip every open window onto that wallet; this only
+   * sets the session id, which loadStore() then keeps ("THE PAGE KEEPS ITS OWN
+   * WALLET") and activates on the next store access, so the following unlock(),
+   * signMessage() or send builds for exactly that wallet. An unknown id is
+   * ignored by loadStore() and the session falls back to the store's active
+   * wallet, so a caller must check the id exists before relying on this.
+   */
+  adoptWallet(id: string): void {
+    this.activeId = id;
+  }
+
+  /**
    * Switch the active wallet. The newly-active wallet starts LOCKED — the seed
    * is cleared and the caller must unlock() with that wallet's own password.
    *

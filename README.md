@@ -70,7 +70,31 @@ network.
 Any network can be hidden from the switcher in expert Settings, so a wallet that
 only uses two of them need not scroll past the rest.
 
-Version **1.4.0**. (The canonical version lives in each target's manifest under
+### How the wallet reaches them
+
+Every network request goes through one host, `network.satorigo.app`, run by this
+project. It serves three things: public exchange prices, read and broadcast
+access to the EVM networks (JSON-RPC, transaction history, public token lists and
+token logos), and a WebSocket bridge to the Electrum servers of the coin
+networks.
+
+It exists so your browser is not making requests to a list of third-party
+providers directly, and so no API key has to ship inside the extension. It never
+receives a key, a recovery phrase or a password: what reaches it is what any
+blockchain node receives, public addresses to look up and transactions you have
+already approved.
+
+Each coin network keeps its usual public servers listed behind the gateway as a
+fallback, so an outage there costs you the gateway and nothing more. Two are the
+exception on purpose, Ravencoin and Neoxa: neither has a public server this
+wallet can safely use, because the generally available ones do not speak the
+asset protocol those chains need and falling back to one would report wrong
+asset balances rather than failing. Both go through the gateway alone and are
+offline while it is unreachable. You can add your own server for either in
+Settings > Network. `KNOWN_LIMITATIONS.md` records which networks are currently
+reaching the chain some other way and what that costs.
+
+Version **1.4.1**. (The canonical version lives in each target's manifest under
 `platforms/<target>/manifest.json`; this line is informational and can lag —
 check the manifest if in doubt.)
 
@@ -88,23 +112,41 @@ check the manifest if in doubt.)
 
 ## ⚠️ Security status (read this)
 
-This wallet moves **real funds on Evrmore mainnet**. It is **unaudited beta**
+This wallet moves **real funds on live networks**. It is **unaudited beta**
 software (the code has had an internal adversarial review, not a formal external
 audit). Use only amounts you can afford to lose, and **always do a small test send
 first**. See the in‑app note under **Settings → About**.
 
 - Seeds/keys are stored **only** as AES‑256‑GCM ciphertext (scrypt N=2¹⁷ for new
   vaults; older vaults upgrade on next password change); passwords are never stored.
+- **One password for the whole wallet** is optional. Under it the master key is
+  random and the password merely wraps it, so changing the password rewrites 32
+  bytes and touches no vault. A **recovery code** holds a second wrapping of the
+  same key, which is why it keeps working across password changes, and an
+  **encrypted backup file** carries the whole store under a password of its own.
+  Nothing about any of them reaches a server, so a forgotten password has no
+  reset anyone can send you: the code, the file and your recovery phrase are the
+  three ways back, and the wallet says so where you set the password.
 - Mainnet transactions are built + signed locally and broadcast behind an explicit
   **Confirm & Send** step (with your password unless the wallet is passwordless).
-- The network fee is clamped against a hostile Electrum server (rate cap + a hard
-  1‑EVR ceiling per transaction).
+- The network fee is clamped against a hostile server: an untrusted estimate is
+  forced into that chain's own floor/ceiling band before it can be used, and the
+  EVM networks carry a per-network cap of their own.
 - **Input amounts are verified trustlessly** before signing: each spent output is
   re‑fetched and its bytes are checked to hash to the claimed txid, so a lying
   server can’t under‑report values to inflate the real fee (Evrmore’s legacy
   sighash doesn’t commit input amounts).
-- Sends are restricted to standard **P2PKH** recipients; P2SH / wrong‑network
-  addresses are rejected rather than silently built into an unspendable output.
+- Sends go to **P2PKH and native segwit** recipients, whichever the chain
+  actually uses; P2SH and wrong-network addresses are rejected rather than
+  silently built into an unspendable output.
+- **The broadcast answer is checked, not trusted.** After a send the wallet
+  compares what the server returned against the transaction id it computed
+  itself, so a server cannot report a different transaction, or a success it did
+  not perform, and have the wallet believe it.
+- **A token has to earn the wallet's word.** It is vouched for only when it is on
+  the network's public token list AND carries a registry mark; anything else is
+  shown as unverified rather than dressed up as genuine, and a token cannot mark
+  itself.
 - Every website connection, send and **message signature** is individually
   approval‑gated; a site can’t spoof its origin or forge an approval, and at most
   one approval prompt per origin can be open (anti‑popup‑flood).
@@ -153,6 +195,17 @@ first**. See the in‑app note under **Settings → About**.
 - **Incoming‑funds notifications** — an opt‑in background poll shows a desktop
   notification when a coin, asset or token arrives in any of your wallets
   (Settings → Notifications).
+- **Notices from Satori Network** — short messages can appear on the home screen
+  (an update, a network's status). They are dismissible, they take turns when
+  there is more than one, and one you closed comes back only if it is sent out
+  again.
+- **Several windows at once** — the popup, the side panel and a detached window
+  are separate pages, and each stays on the wallet it opened rather than
+  following the others.
+- **A wallet with no password is asked to set one, once.** A passwordless wallet
+  keeps its seed under an empty passphrase, so anyone with the computer can spend
+  from it. On opening one the wallet asks for an app password and offers the
+  recovery phrase first, since that is the last easy moment to write it down.
 
 ## Install (Load unpacked)
 
