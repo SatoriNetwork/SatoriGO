@@ -583,13 +583,15 @@ export function buildNeoxElectrumPool(
 export const PUBLIC_NEOX_ELECTRUM_SERVERS: ElectrumEndpoint[] = buildNeoxElectrumPool();
 
 // ---------------------------------------------------------------------------
-// BITCOIN BLAKE2b (BTCB2): the Bitcoin Knots BLAKE2b hardfork. Its one public
-// Electrum server, electrum.bitcoinxor.org (Fulcrum 2.1.2, TCP 50001 / SSL
-// 50002, verified 2026-09-07: Bitcoin's genesis, balances, history, merkle
-// proofs and fee estimates all answered), has NO wss:// listener (50003/50004/
-// 50006/443 all time out), so a browser cannot reach it directly. The gateway
-// bridges it at /electrum/btcb2, which makes the pool the bridge alone, the
-// Neoxa shape. A public fallback goes here the day the project runs one.
+// BITCOIN BLAKE2b (BTCB2): the Bitcoin Knots BLAKE2b hardfork. Two public
+// Electrum servers are known (verified 2026-09-07 and 2026-09-25: Bitcoin's
+// genesis, balances, history, merkle proofs and fee estimates all answered,
+// and identical between them): electrum.bitcoinxor.org (Fulcrum 2.1.2) and the
+// explorer's own mempool.guide (mempool-electrs), both SSL 50002 only. Neither
+// has a wss:// listener, so a browser cannot reach either directly. The gateway
+// bridges them at /electrum/btcb2 (both as its upstreams), which makes the pool
+// the bridge alone, the Neoxa shape. A public fallback goes here the day one of
+// them opens a wss port.
 // ---------------------------------------------------------------------------
 const BTCB2_PUBLIC_FALLBACKS: ElectrumEndpoint[] = [];
 
