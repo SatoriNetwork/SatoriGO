@@ -151,8 +151,8 @@ export interface EvmChain {
   /** Address-history indexer for this chain, if one is proposed. See note
    *  (a): baseUrl is a candidate host, not a live integration. */
   indexer?: { family: EvmIndexerFamily; baseUrl: string };
-  /** A young or thin network. Marked "New" beside its name in the chain
-   *  switcher and carrying Home's caution notice, exactly as a UTXO chain with
+  /** A young or thin network. Carries Home's caution notice (the "New" chip
+   *  is `recentlyAdded` alone since 1.5.0), exactly as a UTXO chain with
    *  `young` does (chainParams.ts isYoungChain). Absent means established.
    *
    *  That notice used to be UTXO-only because it claimed "little mining power",
@@ -362,6 +362,91 @@ export const EVM_CHAINS: readonly EvmChain[] = Object.freeze([
       bondDenom: 'aepix',
       restBaseUrl: 'https://api.epix.zone',
     },
+  }),
+  // Avalanche C-Chain (docs/design/avalanche.md), added for the release after
+  // 1.5.0 (owner's go 2026-09-28 after enabling avax-mainnet in his Alchemy
+  // app; the gateway's `avalanche` row went live the same day). Live-verified
+  // 2026-09-29 through https://network.satorigo.app/evm/avalanche/rpc:
+  // eth_chainId 0xa86a (43114); eth_feeHistory(4, latest, [25,75]) carries a
+  // non-zero baseFeePerGas on every block (about 5 gwei), so the fee model is
+  // EIP-1559; the public fallback RPC answers eth_chainId 0xa86a too; the
+  // CoinGecko token list for the chain answers through /evm/tokenlist/
+  // avalanche; https://www.avax.network answers 200. Both default tokens were
+  // read live via eth_call: symbol()/decimals() answered "USDC"/6 and "USDt"/6.
+  freezeChain({
+    key: 'avalanche',
+    chainId: 43114,
+    displayName: 'Avalanche',
+    nativeTicker: 'AVAX',
+    nativeDecimals: 18,
+    // Keyless public fallback (chains.ts note (a): a proposal, never fetched
+    // in a gateway build). eth_chainId 0xa86a verified 2026-09-29.
+    rpc: ['https://api.avax.network/ext/bc/C/rpc'],
+    alchemyNetwork: 'avax-mainnet',
+    trustWalletChain: 'avalanchec',
+    tokenListSlug: 'avalanche',
+    // Snowtrace is the chain's own explorer; the path shape is the common
+    // /tx/<hash> (it refuses a bare curl with 403 behind its bot check, a
+    // browser resolves it).
+    explorerTxUrl: 'https://snowtrace.io/tx/{txid}',
+    homepage: 'https://www.avax.network',
+    feeModel: 'eip1559',
+    // No l1DataFee: its own L1, posts calldata nowhere.
+    // Circle's native USDC and Tether's USDt on Avalanche C-Chain, both 6
+    // decimals; the symbols are exactly what the contracts answered.
+    defaultTokens: [
+      { address: '0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E', symbol: 'USDC', decimals: 6 },
+      { address: '0x9702230A8Ea53601f5cD2dc00fDBc13d4dF4A8c7', symbol: 'USDt', decimals: 6 },
+    ],
+    // "New" chip without the thin-chain caution: an established network, new
+    // to this wallet.
+    recentlyAdded: true,
+  }),
+  // Robinhood Chain (docs/design/robinhood.md), an Ethereum L2 on Arbitrum
+  // Nitro (Arbitrum Orbit), public mainnet since 2026-07-01. Added 2026-10-02
+  // for 1.5.0. The gateway's `robinhood` row is NOT live yet: the owner still
+  // enables robinhood-mainnet in his Alchemy app and adds the row. Live-verified
+  // 2026-10-02 against the public RPC below: eth_chainId 0x1237 (4663);
+  // eth_feeHistory(4, latest, [25,75]) carries a non-zero baseFeePerGas on every
+  // block (about 0.033 gwei, rewards 0), so the fee model is EIP-1559;
+  // eth_estimateGas for a plain transfer answered 0x53a0 (21,408). The
+  // CoinGecko token list `robinhood` answers (1202 tokens, ~76 KB gzip; the
+  // CoinGecko asset platform `robinhood` names chain_identifier 4663); the
+  // Trust Wallet folder `robinhoodchain` exists (info.json names chain ETH,
+  // 18 decimals, and the USDG mark answers 200); https://robinhood.com/chain
+  // answers 200. The default token was read live via eth_call.
+  freezeChain({
+    key: 'robinhood',
+    chainId: 4663,
+    displayName: 'Robinhood Chain',
+    nativeTicker: 'ETH',
+    nativeDecimals: 18,
+    // Keyless public fallback (chains.ts note (a): a proposal, never fetched
+    // in a gateway build). eth_chainId 0x1237 verified 2026-10-02.
+    rpc: ['https://rpc.mainnet.chain.robinhood.com'],
+    alchemyNetwork: 'robinhood-mainnet',
+    trustWalletChain: 'robinhoodchain',
+    tokenListSlug: 'robinhood',
+    // Blockscout is the chain's own explorer (the docs link every contract to
+    // it); the path shape is the common /tx/<hash>. It refuses a bare curl
+    // behind a Cloudflare check, a browser resolves it.
+    explorerTxUrl: 'https://robinhoodchain.blockscout.com/tx/{txid}',
+    // Robinhood's own domain; it serves the chain's documentation home
+    // ("About Robinhood Chain"), the same pages as docs.robinhood.com/chain.
+    // robinhoodchain.com is NOT used: on 2026-10-02 it only redirected to a
+    // /lander page.
+    homepage: 'https://robinhood.com/chain',
+    feeModel: 'eip1559',
+    // No l1DataFee: Arbitrum Nitro folds the L1 cost into the gas used, so
+    // there is no separate surcharge to add (that field is the OP-stack one).
+    // Paxos's Global Dollar, the stablecoin both Robinhood's contract list
+    // (docs.robinhood.com/chain/contracts) and Paxos's USDG mainnet table name
+    // at this address. symbol()/decimals() answered "USDG"/6 on 2026-10-02,
+    // totalSupply about 6.9e8. No USDC: neither list carries one.
+    defaultTokens: [{ address: '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168', symbol: 'USDG', decimals: 6 }],
+    // "New" chip without the thin-chain caution: new to this wallet, not
+    // a thin network.
+    recentlyAdded: true,
   }),
 ]);
 

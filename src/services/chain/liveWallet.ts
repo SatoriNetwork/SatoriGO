@@ -108,7 +108,30 @@ import {
 import { buildTransferAssetScriptFromHash160 } from './assetScript';
 import { ELECTRUM_METHODS, SATORI_ASSET } from './network';
 import type { WalletDataProvider } from '../provider';
-import { EVM_NETWORK, loadEvmModules, type WalletEngine, type WalletFamily } from './engine';
+import {
+  EVM_NETWORK,
+  MONERO_NETWORK,
+  ZCASH_NETWORK,
+  TAO_NETWORK,
+  loadEvmModules,
+  loadMoneroModules,
+  moneroPhraseUsedBefore,
+  type WalletEngine,
+  type WalletFamily,
+  type WalletOrigin,
+} from './engine';
+// Type only (erased): a VALUE import from monero/ would pull the Monero engine
+// into a build made without --monero, which vite.config.ts refuses.
+import type { MoneroKeys } from './monero/keys';
+// The Zcash and Substrate engines have no build flag (their design notes §13):
+// pure TypeScript, no manifest host, no CSP change, so they are static imports
+// like the UTXO chain code. Only the key layer and the cache deleters are
+// needed here; reads and sends live in the store modules.
+import { zcashKeysFromSeed, zcashWatchAddresses, cloneZcashKeys, zeroZcashKeys, type ZcashKeys } from './zcash/keys';
+import { deleteZcashHistory } from './zcash/historyCache';
+import { miniSecretFromMnemonic, accountFromMiniSecret, zeroSubstrateAccount, type SubstrateAccount } from './substrate/keys';
+import { deleteTaoHistory } from './substrate/historyClient';
+import { GATEWAY_CLIENT_TOKEN, gatewayUrl } from '../gateway';
 import { bytesToHex } from '@noble/hashes/utils';
 
 // Stored per-wallet network id. 'mainnet'/'testnet' are the LEGACY Evrmore ids
@@ -130,12 +153,39 @@ export type LiveNetworkId =
   | 'bitcoinblake2b-mainnet';
 
 /** Re-exported from engine.ts (its home): the `network` sentinel of an EVM account. */
-export { EVM_NETWORK };
-export type StoredNetworkId = LiveNetworkId | typeof EVM_NETWORK;
+export { EVM_NETWORK, MONERO_NETWORK, ZCASH_NETWORK, TAO_NETWORK };
+export type StoredNetworkId =
+  | LiveNetworkId
+  | typeof EVM_NETWORK
+  | typeof MONERO_NETWORK
+  | typeof ZCASH_NETWORK
+  | typeof TAO_NETWORK;
 
 /** The EVM modules once loaded through the build flag (null in a build without
  *  the engine). Type only; the value arrives via loadEvmModules(). */
 type EvmModules = NonNullable<Awaited<ReturnType<typeof loadEvmModules>>>;
+/** Same for the Monero engine (the Monero engine design notes §13). */
+type MoneroModules = NonNullable<Awaited<ReturnType<typeof loadMoneroModules>>>;
+
+/** What revealSecret() resolves: the one secret that restores THIS entry, in
+ *  the form the entry's family exports. A Monero entry answers its 25 legacy
+ *  words plus the restore height (Cake and Feather ask for both), never the
+ *  BIP39 phrase a sibling was derived from: that phrase has its own reveal on
+ *  its own entry (the Monero engine design notes §9). */
+export type RevealedSecret =
+  | { kind: 'mnemonic'; mnemonic: string }
+  | { kind: 'private-key'; wif: string }
+  | { kind: 'monero-legacy-seed'; words: string[]; restoreHeight: number };
+
+/** A Monero entry's vault holds one of two things (the Monero engine design
+ *  notes §9): the BIP39 phrase it was derived from (a vault-copy sibling of a
+ *  seed wallet) or 25 legacy Monero words (an import). The two never collide
+ *  on length: BIP39 phrases have 12, 15, 18, 21 or 24 words, a Monero seed has
+ *  exactly 25, so the word count is the discriminator and no extra field is
+ *  stored. */
+export function isLegacyMoneroSecret(mnemonic: string): boolean {
+  return mnemonic.trim().split(/\s+/).length === 25;
+}
 
 /** Legacy single-wallet record shape (storage key `liveWallet`). Retained only
  *  so the one-time migration can read a pre-multi-wallet install. */
@@ -149,6 +199,12 @@ interface LiveWalletMeta {
 /** A wallet is either HD (BIP39 seed, many addresses) or a single imported
  *  private key (one address — how Satori-network wallets are generated). */
 export type WalletKind = 'seed' | 'pk';
+
+/** Where a Monero entry's keys come from. 'phrase': derived from the BIP39
+ *  phrase of a seed wallet ("Add Monero", cake-exodus scheme, a sibling in
+ *  that wallet's seed group). 'words': imported from its own 25 Monero words,
+ *  which ARE the spend key: no derivation path, no phrase, no seed group. */
+export type MoneroKeySource = 'phrase' | 'words';
 
 /** One entry in the multi-wallet list. Each wallet has its own name, network and
  *  encrypted vault; only its `id` and metadata (never a plaintext secret) leak
@@ -201,9 +257,45 @@ export interface WalletEntry {
   /** EVM seed entries only: the lowercased EIP-55 address of INDEX 0 of this
    *  seed. Public and deterministic; groups the accounts of one seed in the UI
    *  and keeps their passwords in sync. Absent on entries stored before the
-   *  feature (backfilled on unlock). */
+   *  feature (backfilled on unlock).
+   *
+   *  ALSO SET ON A MONERO SIBLING and backfilled onto its source (the Monero
+   *  engine design notes §9): "Add Monero" copies the source seed wallet's
+   *  vault byte for byte, and a shared group is what makes changePassword and
+   *  the app-key migration move both records in one write. A UTXO source
+   *  without a group gets its own lowercased primary address as the group id;
+   *  the UI's account grouping is EVM-only (walletGroups.ts), so a UTXO entry
+   *  carrying a group renders exactly as before. */
   seedGroup?: string;
+  /** Monero only (the Monero engine design notes §6.6): the block height the
+   *  wallet scans from. Public data. Tip minus 20 when "Add Monero" made the
+   *  entry, the user's date or height for an import, changed by "Rescan". */
+  restoreHeight?: number;
+  /** Monero only: which gateway node set the wallet reads through ('main').
+   *  Public data. */
+  moneroNodeSet?: string;
+  /** Monero only: 'phrase' for a sibling derived by "Add Monero", 'words' for
+   *  an import from 25 Monero words. Public data. An entry stored before the
+   *  field is read from its seed group: a sibling always carries one, an
+   *  import never does (summaryOf). */
+  moneroKeySource?: MoneroKeySource;
+  /** Zcash only (the Zcash engine design notes §6.2, §9): the fifteen
+   *  transparent watch addresses (/0/0..9 then /1/0..4), /0/0 first. PUBLIC
+   *  data, cached on the entry so the read side can refresh a balance without
+   *  the keys. Written by addZcashAccount, backfilled at unlock when absent. */
+  zcashWatch?: string[];
+  /** Seed entries: where the phrase came from. 'generated' when create() made
+   *  it here, 'imported' when the user typed it. Absent on every entry stored
+   *  before this field existed, and READ AS UNKNOWN, which is treated like
+   *  'imported' wherever it matters. The one reader today is "Add Monero"
+   *  (addMoneroAccount): a phrase that existed before this install can carry
+   *  Monero funds from another device or wallet, so its sibling scans from
+   *  the release floor; only a phrase generated here can start at today's
+   *  tip. Public data. */
+  origin?: WalletOrigin;
 }
+
+export type { WalletOrigin } from './engine';
 
 /**
  * Upper bound on derived receive addresses per wallet (UI/scan sanity cap).
@@ -453,6 +545,24 @@ export interface WalletSummary {
   hdIndex?: number;
   /** EVM seed accounts only: the seed's index-0 address, lowercased (groups accounts). */
   seedGroup?: string;
+  /** Monero only: the restore height (WalletEntry.restoreHeight), mirrored so
+   *  Settings can show it without a store read. */
+  restoreHeight?: number;
+  /** Monero only: the gateway node set (WalletEntry.moneroNodeSet). */
+  moneroNodeSet?: string;
+  /** Monero only: 'phrase' (derived from a seed wallet's phrase, a member of
+   *  its seed group) or 'words' (imported from 25 Monero words: no phrase, no
+   *  derivation path, no seed group). Always present on a Monero summary. */
+  moneroKeySource?: MoneroKeySource;
+  /** Zcash only: the fifteen public watch addresses (WalletEntry.zcashWatch),
+   *  mirrored so the read side (zcashBalances.ts) can refresh without a store
+   *  read or a key. A copy; never the entry's own array. */
+  zcashWatch?: string[];
+  /** Present only when the entry recorded it (WalletEntry.origin): 'generated'
+   *  for a phrase created on this install, 'imported' for one the user typed.
+   *  Absent = unknown, an entry from before the field. The chain switcher's
+   *  "Add Monero" step reads it to preset "used with Monero before". */
+  origin?: WalletOrigin;
 }
 
 /**
@@ -813,6 +923,35 @@ export class LiveWalletService implements WalletEngine {
    *  is created, imported or unlocked. Null until then, and forever null in a
    *  build without the engine (every EVM operation then refuses clearly). */
   private evm: EvmModules | null = null;
+  /** The Monero engine, same rule as `evm` above (loaded on first use through
+   *  loadMoneroModules(), forever null in a build without --monero). */
+  private monero: MoneroModules | null = null;
+  /**
+   * ACTIVE Monero wallet: its spend and view keys (null when locked or when
+   * the active wallet is another family). SAME RULES AS THE SEED: page memory
+   * only, zeroed on lock() and on every activation of another secret. This is
+   * the secret a Monero entry unlocks to, in place of `seed`/`pk`: derived at
+   * unlock from the vault (BIP39 phrase or 25 words, the Monero engine design
+   * notes §2/§3), and what moneroKeysOfActive() copies for the scanner. The
+   * BIP39 seed of a sibling entry is NOT kept: a Monero wallet has no UTXO or
+   * EVM key to derive, so keeping it would only widen what a leak costs.
+   */
+  private moneroKeys: MoneroKeys | null = null;
+  /**
+   * ACTIVE Zcash wallet: the fifteen transparent keys (the Zcash engine design
+   * notes §9), derived from the BIP39 seed at unlock and zeroed on lock(),
+   * exactly like `moneroKeys`. The seed itself is NOT kept for a Zcash entry.
+   * zcashKeysOfActive() hands the builder a copy.
+   */
+  private zcashKeys: ZcashKeys | null = null;
+  /**
+   * ACTIVE Bittensor wallet: the sr25519 mini secret and its public key (the
+   * Bittensor engine design notes §9). Derived from the phrase's ENTROPY plus
+   * passphrase at unlock (never from the 64-byte BIP39 seed: Substrate wallets
+   * feed PBKDF2 the entropy, §2.1), zeroed on lock(). substrateAccountOfActive()
+   * hands the signer a copy.
+   */
+  private substrateAccount: SubstrateAccount | null = null;
   /**
    * The wallet THIS PAGE is on. Every "the ACTIVE wallet" method in this file
    * means this one, and activeWalletId() answers it synchronously.
@@ -1026,14 +1165,21 @@ export class LiveWalletService implements WalletEngine {
       return;
     }
     this.activeEvmChainKey = null;
+    // A Monero, Zcash or Bittensor wallet has no UTXO chain either: the
+    // Electrum side stays idle exactly as it does for an EVM account (each of
+    // them reads and relays through the gateway).
+    if (this.activeFamily === 'monero' || this.activeFamily === 'zcash' || this.activeFamily === 'substrate') return;
     this.setActiveNetwork(this.utxoNetworkOf(entry.network));
   }
 
-  /** The UTXO chain id of a stored `network`, for a wallet that IS utxo. An EVM
-   *  sentinel here is a family-blind caller's bug and resolves to Evrmore mainnet
-   *  only for read paths that cannot get here (every activation is family-gated). */
+  /** The UTXO chain id of a stored `network`, for a wallet that IS utxo. An EVM,
+   *  Monero, Zcash or Bittensor sentinel here is a family-blind caller's bug and
+   *  resolves to Evrmore mainnet only for read paths that cannot get here (every
+   *  activation is family-gated). */
   private utxoNetworkOf(network: StoredNetworkId): LiveNetworkId {
-    return network === EVM_NETWORK ? 'mainnet' : network;
+    return network === EVM_NETWORK || network === MONERO_NETWORK || network === ZCASH_NETWORK || network === TAO_NETWORK
+      ? 'mainnet'
+      : network;
   }
 
   /** The EVM modules, loading them through the build flag on first use. Throws a
@@ -1052,6 +1198,121 @@ export class LiveWalletService implements WalletEngine {
   private evmModules(): EvmModules {
     if (!this.evm) throw new Error('EVM engine not loaded');
     return this.evm;
+  }
+
+  /** The Monero engine, loading it through the build flag on first use. Throws
+   *  the same shape of error as requireEvm() in a build without --monero, so a
+   *  Monero wallet can never be added, imported or unlocked by a package that
+   *  does not carry the engine. */
+  private async requireMonero(): Promise<MoneroModules> {
+    if (this.monero) return this.monero;
+    const mods = await loadMoneroModules();
+    if (!mods) throw new Error('This build of Satori GO has no Monero engine.');
+    this.monero = mods;
+    return mods;
+  }
+
+  /** The Monero engine when a Monero wallet is ACTIVE (loaded to activate it);
+   *  synchronous, for getAddress() and the other paths that cannot await. */
+  private moneroModules(): MoneroModules {
+    if (!this.monero) throw new Error('Monero engine not loaded');
+    return this.monero;
+  }
+
+  /**
+   * The keys a Monero entry's vault plaintext decodes to (the Monero engine
+   * design notes §2 and §3): 25 legacy words are the spend key in another
+   * encoding; anything else is the BIP39 phrase (plus its passphrase, through
+   * the same envelope every seed wallet uses) under the shipped scheme. The
+   * plaintext is the caller's to drop; the keys are a fresh set the caller owns.
+   */
+  private moneroKeysFromSecret(monero: MoneroModules, secret: string): MoneroKeys {
+    const { mnemonic, passphrase } = decodeSeedSecret(secret);
+    if (isLegacyMoneroSecret(mnemonic)) return monero.moneroKeysFromLegacyWords(mnemonic);
+    return monero.moneroKeysFromBip39(mnemonic, passphrase);
+  }
+
+  /** Make a Monero key set the active in-memory secret (zeroing any prior
+   *  seed, key or Monero keys). The keys are taken over, not copied. */
+  private setActiveMoneroKeys(keys: MoneroKeys): void {
+    this.seed?.fill(0);
+    this.seed = null;
+    this.pk?.fill(0);
+    this.pk = null;
+    this.dropMoneroKeys();
+    this.dropZcashKeys();
+    this.dropSubstrateAccount();
+    this.moneroKeys = keys;
+    this.activeKind = 'seed';
+  }
+
+  private dropMoneroKeys(): void {
+    if (this.moneroKeys) {
+      this.moneroKeys.spendSec.fill(0);
+      this.moneroKeys.viewSec.fill(0);
+      this.moneroKeys.spendPub.fill(0);
+      this.moneroKeys.viewPub.fill(0);
+      this.moneroKeys = null;
+    }
+  }
+
+  /** Make a Zcash key set the active in-memory secret (zeroing any prior seed,
+   *  key or engine keys). The keys are taken over, not copied. */
+  private setActiveZcashKeys(keys: ZcashKeys): void {
+    this.seed?.fill(0);
+    this.seed = null;
+    this.pk?.fill(0);
+    this.pk = null;
+    this.dropMoneroKeys();
+    this.dropZcashKeys();
+    this.dropSubstrateAccount();
+    this.zcashKeys = keys;
+    this.activeKind = 'seed';
+  }
+
+  private dropZcashKeys(): void {
+    if (this.zcashKeys) {
+      zeroZcashKeys(this.zcashKeys);
+      this.zcashKeys = null;
+    }
+  }
+
+  /** Make a Substrate account the active in-memory secret (same zeroing rule). */
+  private setActiveSubstrateAccount(account: SubstrateAccount): void {
+    this.seed?.fill(0);
+    this.seed = null;
+    this.pk?.fill(0);
+    this.pk = null;
+    this.dropMoneroKeys();
+    this.dropZcashKeys();
+    this.dropSubstrateAccount();
+    this.substrateAccount = account;
+    this.activeKind = 'seed';
+  }
+
+  private dropSubstrateAccount(): void {
+    if (this.substrateAccount) {
+      zeroSubstrateAccount(this.substrateAccount);
+      this.substrateAccount = null;
+    }
+  }
+
+  /**
+   * The Substrate account a seed wallet's vault plaintext derives to (the
+   * Bittensor engine design notes §2.1): PBKDF2 over the phrase's ENTROPY with
+   * the BIP39 passphrase in the salt, never over the 64-byte seed. The
+   * plaintext is the caller's to drop; the account is a fresh object the
+   * caller owns (zero it with zeroSubstrateAccount when done).
+   */
+  private substrateAccountFromSecret(secret: string): SubstrateAccount {
+    const { mnemonic, passphrase } = decodeSeedSecret(secret);
+    const mini = miniSecretFromMnemonic(mnemonic, passphrase);
+    try {
+      // accountFromMiniSecret COPIES the mini secret; this local is wiped here.
+      return accountFromMiniSecret(mini);
+    } finally {
+      mini.fill(0);
+    }
   }
 
   private netFor(network: LiveNetworkId): EvrmoreNetwork {
@@ -1137,10 +1398,15 @@ export class LiveWalletService implements WalletEngine {
     },
   ): Promise<{ mnemonic: string }> {
     const mnemonic = generateMnemonic(opts?.strength ?? 128);
-    await this.addWallet(mnemonic, password, opts?.network ?? 'mainnet', opts?.name, opts?.passphrase ?? '', {
-      family: opts?.family,
-      evmChainKey: opts?.evmChainKey,
-    });
+    await this.addWallet(
+      mnemonic,
+      password,
+      opts?.network ?? 'mainnet',
+      opts?.name,
+      opts?.passphrase ?? '',
+      { family: opts?.family, evmChainKey: opts?.evmChainKey },
+      'generated',
+    );
     return { mnemonic };
   }
 
@@ -1162,10 +1428,12 @@ export class LiveWalletService implements WalletEngine {
   ): Promise<void> {
     const trimmed = mnemonic.trim().replace(/\s+/g, ' ');
     if (!validateMnemonic(trimmed)) throw new Error('Invalid recovery phrase');
-    await this.addWallet(trimmed, password, network, name, passphrase, family);
+    await this.addWallet(trimmed, password, network, name, passphrase, family, 'imported');
   }
 
-  /** Encrypt the mnemonic, append a seed-wallet entry, set it active and unlock it. */
+  /** Encrypt the mnemonic, append a seed-wallet entry, set it active and unlock it.
+   *  `origin` records whether the phrase was generated here or typed in
+   *  (WalletEntry.origin); "Add Monero" reads it later. */
   private async addWallet(
     mnemonic: string,
     password: string,
@@ -1173,6 +1441,7 @@ export class LiveWalletService implements WalletEngine {
     name?: string,
     passphrase = '',
     family?: { family?: WalletFamily; evmChainKey?: string },
+    origin?: WalletOrigin,
   ): Promise<void> {
     const isEvm = family?.family === 'evm';
     // Load (and thereby require) the engine BEFORE anything is written: a build
@@ -1214,11 +1483,22 @@ export class LiveWalletService implements WalletEngine {
           // account of these words joins (the EVM accounts design notes).
           hdIndex: 0,
           seedGroup: address.toLowerCase(),
+          ...(origin ? { origin } : {}),
         };
       } else {
         const net = this.netFor(network);
         const address = deriveAddress(seed, net, 0, 0, 0).address;
-        created = { id, name: walletName, network, vault, createdAt: Date.now(), kind: 'seed', address, passwordless };
+        created = {
+          id,
+          name: walletName,
+          network,
+          vault,
+          createdAt: Date.now(),
+          kind: 'seed',
+          address,
+          passwordless,
+          ...(origin ? { origin } : {}),
+        };
       }
       store.wallets.push(created);
       store.activeId = id;
@@ -1924,6 +2204,15 @@ export class LiveWalletService implements WalletEngine {
     if (!pending) return { ok: false, reason: 'no-pending' };
     if (mode === 'merge' && !pending.preview.canMerge) return { ok: false, reason: 'merge-unsafe' };
     let written: number | typeof NO_WRITE;
+    // A replace drops every wallet the file does not carry. The Monero ones
+    // among them leave a scan cache behind (IndexedDB, keyed by wallet id):
+    // their ids are collected inside the write, on the store the write is
+    // based on, and the rows go once the replace is on disk.
+    const droppedMonero: string[] = [];
+    // Same for the Zcash history caches and the Bittensor local send
+    // histories (chrome.storage.local, keyed by wallet id).
+    const droppedZcash: string[] = [];
+    const droppedSubstrate: string[] = [];
     try {
       written = await this.updateStore((store) => {
         if (mode === 'merge') {
@@ -1932,6 +2221,17 @@ export class LiveWalletService implements WalletEngine {
           if (added.length === 0) return NO_WRITE;
           store.wallets.push(...added);
           return added.length;
+        }
+        const kept = new Set(pending.store.wallets.map((w) => w.id));
+        droppedMonero.length = 0;
+        droppedZcash.length = 0;
+        droppedSubstrate.length = 0;
+        for (const w of store.wallets) {
+          if (kept.has(w.id)) continue;
+          const family = w.family ?? 'utxo';
+          if (family === 'monero') droppedMonero.push(w.id);
+          else if (family === 'zcash') droppedZcash.push(w.id);
+          else if (family === 'substrate') droppedSubstrate.push(w.id);
         }
         store.wallets = pending.store.wallets;
         store.activeId = pending.store.activeId || (pending.store.wallets[0]?.id ?? '');
@@ -1949,6 +2249,21 @@ export class LiveWalletService implements WalletEngine {
       // record that has been replaced.
       this.activeId = null;
       this.lockApp();
+      if (droppedMonero.length > 0) {
+        try {
+          const monero = await loadMoneroModules();
+          if (monero) for (const id of droppedMonero) await monero.deleteMoneroCache(id).catch(() => {});
+        } catch {
+          /* best effort, as in removeWallet */
+        }
+      }
+      for (const id of droppedZcash) {
+        await deleteZcashHistory(id).catch(() => {});
+        await getStorage()
+          .remove(`zec:sends:${id}`)
+          .catch(() => {});
+      }
+      for (const id of droppedSubstrate) await deleteTaoHistory(id).catch(() => {});
     }
     return { ok: true, wallets: written === NO_WRITE ? 0 : written };
   }
@@ -2253,11 +2568,43 @@ export class LiveWalletService implements WalletEngine {
     if (secret === null) return false;
     // An EVM wallet needs the engine to derive anything: load it first so a
     // build without it refuses the unlock instead of activating a wallet it
-    // cannot address or sign for.
+    // cannot address or sign for. Same for a Monero wallet and its engine.
     const evm = (entry.family ?? 'utxo') === 'evm' ? await this.requireEvm() : null;
+    const monero = (entry.family ?? 'utxo') === 'monero' ? await this.requireMonero() : null;
     this.activateEntry(entry);
     let address: string;
-    if (entry.kind === 'pk') {
+    // A Zcash sibling's watch set, when the entry lacks it (a record restored
+    // from a backup written by hand, or one this unlock is the first to see).
+    let zcashWatch: string[] | undefined;
+    if (monero) {
+      // The vault holds the BIP39 phrase (a sibling) or the 25 words (an
+      // import); either way the Monero keys are what this wallet unlocks to,
+      // and the BIP39 seed is deliberately NOT kept (see `moneroKeys`).
+      const keys = this.moneroKeysFromSecret(monero, secret);
+      this.setActiveMoneroKeys(keys);
+      address = monero.primaryAddress(keys);
+    } else if ((entry.family ?? 'utxo') === 'zcash') {
+      // A Zcash sibling: the vault holds the BIP39 phrase; the fifteen
+      // transparent keys are what it unlocks to, and the seed is wiped as soon
+      // as they are derived (the Zcash engine design notes §9).
+      const { mnemonic, passphrase } = decodeSeedSecret(secret);
+      const seed = await mnemonicToSeed(mnemonic, passphrase);
+      let keys: ZcashKeys;
+      try {
+        keys = zcashKeysFromSeed(seed);
+      } finally {
+        seed.fill(0);
+      }
+      this.setActiveZcashKeys(keys);
+      address = keys.primary.address;
+      if (!entry.zcashWatch || entry.zcashWatch.length === 0) zcashWatch = zcashWatchAddresses(keys);
+    } else if ((entry.family ?? 'utxo') === 'substrate') {
+      // A Bittensor sibling: the mini secret comes from the phrase's ENTROPY
+      // (never the seed), so the words are decoded here and dropped.
+      const account = this.substrateAccountFromSecret(secret);
+      this.setActiveSubstrateAccount(account);
+      address = account.address;
+    } else if (entry.kind === 'pk') {
       const { privateKey, compressed } = parsePrivateKey(secret);
       this.setActivePk(privateKey, compressed);
       address = evm
@@ -2282,6 +2629,10 @@ export class LiveWalletService implements WalletEngine {
     }
     // An EVM seed entry stored before accounts existed learns its group here.
     if (this.ensureSeedGroup(entry)) dirty = true;
+    if (zcashWatch) {
+      entry.zcashWatch = zcashWatch;
+      dirty = true;
+    }
     if (dirty) {
       // BY WALLET ID onto the store the write is based on, for the same reason
       // the migration below does it: `store` was read before ~300 ms of scrypt,
@@ -2292,6 +2643,7 @@ export class LiveWalletService implements WalletEngine {
         address: entry.address,
         hdIndex: entry.hdIndex,
         seedGroup: entry.seedGroup,
+        zcashWatch,
       };
       try {
         await this.updateStore((fresh) => {
@@ -2308,6 +2660,10 @@ export class LiveWalletService implements WalletEngine {
           }
           if (!target.seedGroup && patch.seedGroup) {
             target.seedGroup = patch.seedGroup;
+            touched = true;
+          }
+          if ((!target.zcashWatch || target.zcashWatch.length === 0) && patch.zcashWatch) {
+            target.zcashWatch = [...patch.zcashWatch];
             touched = true;
           }
           // Another page may have backfilled the same fields already: writing
@@ -2512,6 +2868,9 @@ export class LiveWalletService implements WalletEngine {
   private setActiveSeed(seed: Uint8Array): void {
     this.pk?.fill(0);
     this.pk = null;
+    this.dropMoneroKeys();
+    this.dropZcashKeys();
+    this.dropSubstrateAccount();
     this.seed = seed;
     this.activeKind = 'seed';
   }
@@ -2520,6 +2879,9 @@ export class LiveWalletService implements WalletEngine {
   private setActivePk(privateKey: Uint8Array, compressed: boolean): void {
     this.seed?.fill(0);
     this.seed = null;
+    this.dropMoneroKeys();
+    this.dropZcashKeys();
+    this.dropSubstrateAccount();
     this.pk = privateKey;
     this.pkCompressed = compressed;
     this.activeKind = 'pk';
@@ -2530,11 +2892,20 @@ export class LiveWalletService implements WalletEngine {
     this.seed = null;
     this.pk?.fill(0);
     this.pk = null;
+    this.dropMoneroKeys();
+    this.dropZcashKeys();
+    this.dropSubstrateAccount();
     this.allowBroadcast = false;
   }
 
   isUnlocked(): boolean {
-    return this.seed !== null || this.pk !== null;
+    return (
+      this.seed !== null ||
+      this.pk !== null ||
+      this.moneroKeys !== null ||
+      this.zcashKeys !== null ||
+      this.substrateAccount !== null
+    );
   }
 
   network(): LiveNetworkId {
@@ -2549,31 +2920,7 @@ export class LiveWalletService implements WalletEngine {
     // "active" means the wallet THIS PAGE is on, the same one every other method
     // here acts on, not whichever wallet another window last switched to.
     const activeId = this.activeId ?? store.activeId;
-    return store.wallets.map((w) => ({
-      id: w.id,
-      name: w.name,
-      network: w.network,
-      createdAt: w.createdAt,
-      active: w.id === activeId,
-      kind: w.kind ?? 'seed',
-      address: w.address ?? '',
-      passwordless: w.passwordless ?? false,
-      family: w.family ?? 'utxo',
-      // Conditional for the same reason as evmChainKey below: a wallet on an
-      // install with no app password must keep the EXACT key set listWallets()
-      // has always returned (liveWallet.test.ts pins it as the no-secret-leaks
-      // contract). Both are public metadata; neither can appear before the user
-      // has opted in.
-      ...(isVaultRecordV2(w.vault) ? { appProtected: true } : {}),
-      ...(w.noSendPassword ? { noSendPassword: true } : {}),
-      // Only present on an EVM account: a UTXO summary keeps its exact key set
-      // (liveWallet.test.ts pins that set as the no-secret-leaks contract).
-      ...(w.evmChainKey !== undefined ? { evmChainKey: w.evmChainKey } : {}),
-      // Same rule for the account fields. Both are public and derived from
-      // public data, but a UTXO or 'pk' summary must not sprout EVM-only keys.
-      ...(w.hdIndex !== undefined ? { hdIndex: w.hdIndex } : {}),
-      ...(w.seedGroup !== undefined ? { seedGroup: w.seedGroup } : {}),
-    }));
+    return store.wallets.map((w) => this.summaryOf(w, activeId));
   }
 
   /** The active wallet's id, or null if there are no wallets. Synchronous: reads
@@ -2688,6 +3035,10 @@ export class LiveWalletService implements WalletEngine {
       const idx = store.wallets.findIndex((w) => w.id === id);
       if (idx === -1) return NO_WRITE;
       const wasStoreActive = store.activeId === id;
+      const family = store.wallets[idx].family ?? 'utxo';
+      const wasMonero = family === 'monero';
+      const wasZcash = family === 'zcash';
+      const wasSubstrate = family === 'substrate';
       store.wallets.splice(idx, 1);
       if (wasStoreActive) store.activeId = store.wallets.length > 0 ? store.wallets[0].id : '';
       const droppedAppKey = store.wallets.length === 0 && !!store.appKey;
@@ -2698,7 +3049,7 @@ export class LiveWalletService implements WalletEngine {
       const promoted = wasOurs
         ? (store.wallets.find((w) => w.id === store.activeId) ?? store.wallets[0])
         : undefined;
-      return { droppedAppKey, promoted: promoted ? { ...promoted } : null };
+      return { droppedAppKey, promoted: promoted ? { ...promoted } : null, wasMonero, wasZcash, wasSubstrate };
     });
     if (removed === NO_WRITE) return;
     if (wasOurs) {
@@ -2708,6 +3059,29 @@ export class LiveWalletService implements WalletEngine {
     }
     // The record is gone, so the key derived from it is a key to nothing.
     if (removed.droppedAppKey) this.setMasterKey(null);
+    // A Monero wallet's scan cache (IndexedDB, the Monero engine design notes
+    // §6.5) is its whole receive and spend history: it goes with the wallet.
+    // Best effort, after the removal is on disk; a cache that could not be
+    // deleted is unreadable without the keys anyway.
+    if (removed.wasMonero) {
+      try {
+        const monero = await loadMoneroModules();
+        if (monero) await monero.deleteMoneroCache(id);
+      } catch {
+        /* see above */
+      }
+    }
+    // A Zcash wallet's history cache (`zec:history:<id>`, public chain data,
+    // the Zcash engine design notes §9) and its local send records go with
+    // it; so does a Bittensor wallet's local send history (`taoHistory:<id>`).
+    // Best effort, same as the Monero cache above.
+    if (removed.wasZcash) {
+      await deleteZcashHistory(id).catch(() => {});
+      await getStorage()
+        .remove(`zec:sends:${id}`)
+        .catch(() => {});
+    }
+    if (removed.wasSubstrate) await deleteTaoHistory(id).catch(() => {});
   }
 
   // --- reveal secrets (password-gated) ------------------------------------
@@ -2716,6 +3090,11 @@ export class LiveWalletService implements WalletEngine {
    *  or null on a wrong password. Returns null for a pk-wallet (which has NO
    *  recovery phrase — only a private key). Does not alter session state. */
   async revealMnemonic(password: string): Promise<string | null> {
+    // A Monero entry's recovery view is its 25 words plus the restore height
+    // (revealSecret), never the BIP39 phrase a sibling was derived from: that
+    // phrase is revealed on the entry it belongs to (the Monero engine design
+    // notes §9).
+    if (this.activeFamily === 'monero') return null;
     const secret = await this.revealSeedSecret(password);
     // The WORDS only: a caller showing this to the user must never be handed the
     // envelope, and the passphrase is revealed separately and deliberately.
@@ -2738,7 +3117,12 @@ export class LiveWalletService implements WalletEngine {
     if (entry.kind === 'pk') return null; // pk-wallets have no seed phrase
     const raw = await this.revealEntrySecret(store, entry, password);
     if (raw === null) return null;
-    return decodeSeedSecret(raw);
+    const decoded = decodeSeedSecret(raw);
+    // An imported Monero wallet holds 25 Monero words, not a BIP39 phrase:
+    // there is no seed here to derive another chain from, so enableChain must
+    // see "nothing", never 25 words it would try to import as BIP39.
+    if ((entry.family ?? 'utxo') === 'monero' && isLegacyMoneroSecret(decoded.mnemonic)) return null;
+    return decoded;
   }
 
   /**
@@ -2773,6 +3157,11 @@ export class LiveWalletService implements WalletEngine {
     const store = await this.loadStore();
     const entry = this.sessionEntry(store);
     if (!entry) return null;
+    // A Monero wallet has no WIF and no per-address key: its secret is the 25
+    // words revealSecret() answers. A Zcash or Bittensor sibling's one secret
+    // is its recovery phrase (revealMnemonic); no per-address key is offered.
+    const family = entry.family ?? 'utxo';
+    if (family === 'monero' || family === 'zcash' || family === 'substrate') return null;
     const secret = await this.revealEntrySecret(store, entry, password);
     if (secret === null) return null;
     if (entry.kind === 'pk') return secret; // stored value is already the canonical WIF (or the raw hex key for EVM)
@@ -2860,6 +3249,15 @@ export class LiveWalletService implements WalletEngine {
       // UTXO key material (WIF, P2PKH address) has no meaning for an EVM account.
       throw new Error('deriveKey is a UTXO operation; the active wallet is an EVM account');
     }
+    if (this.activeFamily === 'monero') {
+      throw new Error('deriveKey is a UTXO operation; the active wallet is a Monero wallet');
+    }
+    if (this.activeFamily === 'zcash') {
+      throw new Error('deriveKey is a UTXO operation; the active wallet is a Zcash wallet');
+    }
+    if (this.activeFamily === 'substrate') {
+      throw new Error('deriveKey is a UTXO operation; the active wallet is a Bittensor wallet');
+    }
     if (this.activeKind === 'pk') {
       if (!this.pk) throw new Error('Live wallet is locked');
       return privateKeyToDerived(this.pk, this.net, this.pkCompressed);
@@ -2869,6 +3267,14 @@ export class LiveWalletService implements WalletEngine {
 
   getAddress(index = 0): string {
     if (this.activeFamily === 'evm') return this.evmAddress();
+    // ONE primary address per Monero wallet: subaddresses are the scanner's
+    // (Set B) and Receive's business, never a derivation index here.
+    if (this.activeFamily === 'monero') return this.moneroModules().primaryAddress(this.requireMoneroKeys());
+    // ONE shown address per Zcash wallet (/0/0, also the change address); the
+    // other fourteen are watched, never offered (the Zcash engine design notes
+    // §6.2). One account per Bittensor wallet.
+    if (this.activeFamily === 'zcash') return this.requireZcashKeys().primary.address;
+    if (this.activeFamily === 'substrate') return this.requireSubstrateAccount().address;
     return this.deriveKey(index).address;
   }
 
@@ -2903,6 +3309,518 @@ export class LiveWalletService implements WalletEngine {
       entry.evmChainKey = key;
     });
     this.activeEvmChainKey = key;
+  }
+
+  // --- Monero (family 'monero', the Monero engine design notes §8/§9) --------
+
+  private requireMoneroKeys(): MoneroKeys {
+    if (this.activeFamily !== 'monero' || !this.moneroKeys) throw new Error('Live wallet is locked');
+    return this.moneroKeys;
+  }
+
+  /** A COPY of the active Monero wallet's keys, for the scanner (openMoneroWallet
+   *  takes them at open and keeps no reference). The caller zeroes the copy.
+   *  Throws when locked or when the active wallet is not a Monero wallet. */
+  moneroKeysOfActive(): MoneroKeys {
+    const k = this.requireMoneroKeys();
+    return {
+      spendSec: new Uint8Array(k.spendSec),
+      viewSec: new Uint8Array(k.viewSec),
+      spendPub: new Uint8Array(k.spendPub),
+      viewPub: new Uint8Array(k.viewPub),
+    };
+  }
+
+  /**
+   * "Add Monero": a SIBLING entry of the ACTIVE, UNLOCKED seed wallet
+   * `sourceWalletId`, holding a byte-for-byte COPY of its vault (the same trick
+   * addEvmAccount uses, the Monero engine design notes §9). No new secret is
+   * stored: the Monero keys are re-derived from the BIP39 phrase at every
+   * unlock, and here from the seed already in memory, so nothing is retyped
+   * and the phrase does not leave the vault.
+   *
+   * THE RESTORE HEIGHT (§6.6) depends on whether these keys can already hold
+   * funds. Tip minus a small margin is right ONLY for a phrase whose Monero
+   * sibling is being made for the first time anywhere: a phrase generated on
+   * this install. A phrase the user typed in (restored from another device,
+   * or the same BIP39 words already funded in Cake Wallet, which is the whole
+   * point of the cake-exodus scheme) can have received Monero at any height
+   * since the release, and a sibling started at today's tip would sync to
+   * "synced, 0 XMR" with the funds sitting untouched below its range. So:
+   * `opts.usedBefore` true starts at MONERO_RELEASE_HEIGHT (no Satori-derived
+   * funds can predate it); false starts at tip minus the margin; absent, the
+   * entry's own origin decides, and an entry that did not record one (stored
+   * before the field existed) is treated as imported. The switcher presets
+   * the checkbox the same way and lets the user override it. The node is
+   * asked BEFORE anything is written, so an unreachable gateway leaves
+   * nothing behind, and a sibling never has to guess its height.
+   *
+   * The sibling and its source share a `seedGroup` (backfilled onto the source
+   * when it has none) so changePassword and the app-key migration move both
+   * records in one write. The new entry becomes active AND unlocked (the keys
+   * replace the seed in memory), which is the same landing every other "enable
+   * this chain" gesture gives.
+   *
+   * Throws 'locked' when the source is not this page's unlocked wallet,
+   * 'not-a-seed-wallet' for a pk or Monero source, 'already-added' when a
+   * Monero entry with this address exists.
+   */
+  async addMoneroAccount(
+    sourceWalletId: string,
+    name?: string,
+    opts?: { usedBefore?: boolean; restoreHeight?: number },
+  ): Promise<WalletSummary> {
+    const monero = await this.requireMonero();
+    const wanted = opts?.restoreHeight;
+    if (wanted !== undefined && !(Number.isSafeInteger(wanted) && wanted >= 0)) throw new Error('bad-restore-height');
+    const store = await this.loadStore();
+    const source = store.wallets.find((w) => w.id === sourceWalletId);
+    if (!source) throw new Error('unknown-wallet');
+    if ((source.kind ?? 'seed') !== 'seed' || (source.family ?? 'utxo') === 'monero') {
+      throw new Error('not-a-seed-wallet');
+    }
+    if (this.activeId !== sourceWalletId || this.activeKind !== 'seed' || !this.seed) throw new Error('locked');
+    const usedBefore = opts?.usedBefore ?? moneroPhraseUsedBefore(source);
+    const keys = monero.moneroKeysFromBip39Seed(this.seed);
+    try {
+      const address = monero.primaryAddress(keys);
+      const nodeSet = 'main';
+      const info = await monero.moneroDaemonInfo(gatewayUrl(), GATEWAY_CLIENT_TOKEN, nodeSet);
+      // A height from the user's "First used around" date wins (clamped to the
+      // tip); otherwise the used-before answer picks the release floor or the tip.
+      const restoreHeight = wanted !== undefined
+        ? Math.min(wanted, info.height)
+        : usedBefore ? monero.MONERO_RELEASE_HEIGHT : monero.restoreHeightForNewWallet(info.height);
+      const created = await this.updateStore((fresh) => {
+        const src = fresh.wallets.find((w) => w.id === sourceWalletId);
+        if (!src) throw new Error('unknown-wallet');
+        if (fresh.wallets.some((w) => (w.family ?? 'utxo') === 'monero' && w.address === address)) {
+          throw new Error('already-added');
+        }
+        // The group id: the source's own, or (a UTXO seed wallet, which never
+        // had one) its lowercased primary address, public and deterministic.
+        const seedGroup = src.seedGroup ?? (src.address || address).toLowerCase();
+        if (!src.seedGroup) src.seedGroup = seedGroup;
+        const id = genWalletId(new Set(fresh.wallets.map((w) => w.id)));
+        const walletName = name?.trim() || `${src.name} (Monero)`;
+        const entry: WalletEntry = {
+          id,
+          name: walletName,
+          network: MONERO_NETWORK,
+          vault: { ...src.vault },
+          createdAt: Date.now(),
+          kind: 'seed',
+          address,
+          passwordless: src.passwordless ?? false,
+          // The convenience flag follows the copied vault, as it does for an
+          // EVM account: one secret under one password answers "ask before
+          // sending?" one way.
+          ...(src.noSendPassword ? { noSendPassword: true } : {}),
+          family: 'monero',
+          restoreHeight,
+          moneroNodeSet: nodeSet,
+          moneroKeySource: 'phrase',
+          seedGroup,
+        };
+        fresh.wallets.push(entry);
+        fresh.activeId = id;
+        return entry;
+      });
+      if (created === NO_WRITE) throw new Error('could not save the wallet');
+      this.activateEntry(created);
+      // The keys are taken over by the session (zeroed on lock); the BIP39
+      // seed of the source goes with setActiveMoneroKeys.
+      this.setActiveMoneroKeys(keys);
+      return this.summaryOf(created);
+    } catch (e) {
+      if (this.moneroKeys !== keys) monero.zeroMoneroKeys(keys);
+      throw e;
+    }
+  }
+
+  /**
+   * Import a Monero wallet from its 25 legacy words (the Monero engine design
+   * notes §3, §9): its own entry, its own vault holding the words as the
+   * secret (they ARE the spend key, and storing them keeps revealSecret a
+   * decrypt rather than a re-encode). `restoreHeight` is the user's creation
+   * date or height (§6.6); the words carry no birthday, so it is required.
+   *
+   * THE VAULT PASSWORD. When this session holds the app master key (an app
+   * password is set and the app is open), the vault is written as v2 under
+   * that key, exactly where an unlock would migrate it to anyway. Otherwise
+   * `password` protects it as a v1 vault, and without one the import is
+   * refused: a wallet whose words sit under an empty passphrase is the state
+   * the app-password design exists to end, so it is never created here.
+   *
+   * Prefix-matched words are stored NORMALIZED (the full words), so what the
+   * user reveals later is what Monero wallets accept. The new entry becomes
+   * active and unlocked. Throws MoneroMnemonicError on bad words and
+   * 'already-added' when this wallet's address is already imported.
+   */
+  async importMoneroWallet(
+    words25: string,
+    restoreHeight: number,
+    name?: string,
+    password?: string,
+  ): Promise<WalletSummary> {
+    const monero = await this.requireMonero();
+    if (!Number.isSafeInteger(restoreHeight) || restoreHeight < 0) {
+      throw new Error('Restore height must be a whole number, zero or more.');
+    }
+    const words = monero.normalizeLegacyWords(words25).join(' ');
+    const keys = monero.moneroKeysFromLegacyWords(words);
+    try {
+      const address = monero.primaryAddress(keys);
+      const store = await this.loadStore();
+      let vault: StoredVaultRecord;
+      if (await this.masterKeyBelongsTo(store)) {
+        vault = await createVaultV2(words, this.masterKey as Uint8Array);
+      } else if (password && password.length > 0) {
+        vault = await createVault(words, password);
+      } else {
+        throw new Error('Set a password to protect this wallet.');
+      }
+      const created = await this.updateStore((fresh) => {
+        if (fresh.wallets.some((w) => (w.family ?? 'utxo') === 'monero' && w.address === address)) {
+          throw new Error('already-added');
+        }
+        const id = genWalletId(new Set(fresh.wallets.map((w) => w.id)));
+        const count = fresh.wallets.filter((w) => (w.family ?? 'utxo') === 'monero').length;
+        const walletName = name?.trim() || (count === 0 ? 'Monero wallet' : `Monero wallet ${count + 1}`);
+        const entry: WalletEntry = {
+          id,
+          name: walletName,
+          network: MONERO_NETWORK,
+          vault,
+          createdAt: Date.now(),
+          kind: 'seed',
+          address,
+          passwordless: false,
+          family: 'monero',
+          restoreHeight,
+          moneroNodeSet: 'main',
+          // The truth the UI shows for this wallet: 25 words, no derivation
+          // path, no seed group (the chain switcher treats it as standalone).
+          moneroKeySource: 'words',
+        };
+        fresh.wallets.push(entry);
+        fresh.activeId = id;
+        return entry;
+      });
+      if (created === NO_WRITE) throw new Error('could not save the wallet');
+      this.activateEntry(created);
+      this.setActiveMoneroKeys(keys);
+      return this.summaryOf(created);
+    } catch (e) {
+      if (this.moneroKeys !== keys) monero.zeroMoneroKeys(keys);
+      throw e;
+    }
+  }
+
+  // --- Zcash (family 'zcash', the Zcash engine design notes §8/§9) ------------
+
+  private requireZcashKeys(): ZcashKeys {
+    if (this.activeFamily !== 'zcash' || !this.zcashKeys) throw new Error('Live wallet is locked');
+    return this.zcashKeys;
+  }
+
+  /** A COPY of the active Zcash wallet's fifteen keys, for the transaction
+   *  builder (which borrows keys and never zeroes them). The caller zeroes the
+   *  copy with zeroZcashKeys as soon as the build is done. Throws when locked
+   *  or when the active wallet is not a Zcash wallet. */
+  zcashKeysOfActive(): ZcashKeys {
+    return cloneZcashKeys(this.requireZcashKeys());
+  }
+
+  /**
+   * "Add Zcash": a SIBLING entry of the ACTIVE, UNLOCKED seed wallet
+   * `sourceWalletId`, holding a byte-for-byte COPY of its vault (the
+   * addMoneroAccount shape without a restore height, the Zcash engine design
+   * notes §9). No new secret is stored: the fifteen transparent keys are
+   * re-derived from the BIP39 seed at every unlock, and here from the seed
+   * already in memory. The watch addresses are public and cached on the entry
+   * so the read side never needs a key.
+   *
+   * The sibling and its source share a `seedGroup` (backfilled onto the source
+   * when it has none). The new entry becomes active AND unlocked (the keys
+   * replace the seed in memory). Throws 'locked' when the source is not this
+   * page's unlocked wallet, 'not-a-seed-wallet' for a pk or engine-family
+   * source, 'already-added' when a Zcash entry with this address exists.
+   */
+  async addZcashAccount(sourceWalletId: string, name?: string, opts?: { password?: string }): Promise<WalletSummary> {
+    const store = await this.loadStore();
+    const source = store.wallets.find((w) => w.id === sourceWalletId);
+    if (!source) throw new Error('unknown-wallet');
+    const sourceFamily = source.family ?? 'utxo';
+    if ((source.kind ?? 'seed') !== 'seed' || sourceFamily === 'zcash') throw new Error('not-a-seed-wallet');
+    if (this.activeId !== sourceWalletId || this.activeKind !== 'seed' || !this.isUnlocked()) throw new Error('locked');
+    let keys: ZcashKeys;
+    if (this.seed) {
+      keys = zcashKeysFromSeed(this.seed);
+    } else {
+      // The active wallet is a Monero or Bittensor sibling: it unlocked to its
+      // own keys and kept no BIP39 seed (see `moneroKeys`), so the phrase is
+      // read from the vault with the password the switcher collected and the
+      // seed it makes is wiped as soon as the keys exist. An import from 25
+      // Monero words has no phrase to derive from.
+      if (opts?.password === undefined) throw new Error('locked');
+      const secret = await this.decryptEntrySecret(store, source, source.passwordless ? '' : opts.password);
+      if (secret === null) throw new Error('wrong-password');
+      const { mnemonic, passphrase } = decodeSeedSecret(secret);
+      if (isLegacyMoneroSecret(mnemonic)) throw new Error('not-a-seed-wallet');
+      const seed = await mnemonicToSeed(mnemonic, passphrase);
+      try {
+        keys = zcashKeysFromSeed(seed);
+      } finally {
+        seed.fill(0);
+      }
+    }
+    try {
+      const address = keys.primary.address;
+      const zcashWatch = zcashWatchAddresses(keys);
+      const created = await this.updateStore((fresh) => {
+        const src = fresh.wallets.find((w) => w.id === sourceWalletId);
+        if (!src) throw new Error('unknown-wallet');
+        if (fresh.wallets.some((w) => (w.family ?? 'utxo') === 'zcash' && w.address === address)) {
+          throw new Error('already-added');
+        }
+        const seedGroup = src.seedGroup ?? (src.address || address).toLowerCase();
+        if (!src.seedGroup) src.seedGroup = seedGroup;
+        const id = genWalletId(new Set(fresh.wallets.map((w) => w.id)));
+        const walletName = name?.trim() || `${src.name} (Zcash)`;
+        const entry: WalletEntry = {
+          id,
+          name: walletName,
+          network: ZCASH_NETWORK,
+          vault: { ...src.vault },
+          createdAt: Date.now(),
+          kind: 'seed',
+          address,
+          passwordless: src.passwordless ?? false,
+          ...(src.noSendPassword ? { noSendPassword: true } : {}),
+          family: 'zcash',
+          zcashWatch,
+          seedGroup,
+          ...(src.origin !== undefined ? { origin: src.origin } : {}),
+        };
+        fresh.wallets.push(entry);
+        fresh.activeId = id;
+        return entry;
+      });
+      if (created === NO_WRITE) throw new Error('could not save the wallet');
+      this.activateEntry(created);
+      // The keys are taken over by the session (zeroed on lock); the BIP39
+      // seed of the source goes with setActiveZcashKeys.
+      this.setActiveZcashKeys(keys);
+      return this.summaryOf(created);
+    } catch (e) {
+      if (this.zcashKeys !== keys) zeroZcashKeys(keys);
+      throw e;
+    }
+  }
+
+  // --- Bittensor (family 'substrate', the Bittensor engine design notes §8/§9) -
+
+  private requireSubstrateAccount(): SubstrateAccount {
+    if (this.activeFamily !== 'substrate' || !this.substrateAccount) throw new Error('Live wallet is locked');
+    return this.substrateAccount;
+  }
+
+  /** A COPY of the active Bittensor account (mini secret, public key,
+   *  address) for the signer. The caller zeroes the copy with
+   *  zeroSubstrateAccount as soon as the signature is made. Throws when locked
+   *  or when the active wallet is not a Bittensor wallet. */
+  substrateAccountOfActive(): SubstrateAccount {
+    const a = this.requireSubstrateAccount();
+    return { miniSecret: new Uint8Array(a.miniSecret), publicKey: new Uint8Array(a.publicKey), address: a.address };
+  }
+
+  /**
+   * "Add Bittensor": a SIBLING entry of the ACTIVE, UNLOCKED seed wallet
+   * `sourceWalletId`, a byte-for-byte vault copy like addZcashAccount. THE ONE
+   * DIFFERENCE (the Bittensor engine design notes §9): the account is derived
+   * from the phrase's ENTROPY plus passphrase, not from the 64-byte seed this
+   * service keeps in memory, so the source vault is decrypted here with
+   * `password` (the one the switcher already collected) and the words are
+   * dropped the moment the mini secret exists. Throws 'wrong-password' when
+   * the vault does not open, 'locked', 'not-a-seed-wallet' and 'already-added'
+   * as the other sibling actions do.
+   */
+  async addSubstrateAccount(sourceWalletId: string, password: string, name?: string): Promise<WalletSummary> {
+    const store = await this.loadStore();
+    const source = store.wallets.find((w) => w.id === sourceWalletId);
+    if (!source) throw new Error('unknown-wallet');
+    const sourceFamily = source.family ?? 'utxo';
+    if ((source.kind ?? 'seed') !== 'seed' || sourceFamily === 'substrate') throw new Error('not-a-seed-wallet');
+    if (this.activeId !== sourceWalletId || this.activeKind !== 'seed' || !this.isUnlocked()) throw new Error('locked');
+    // The ONLY variable that ever holds the words; dropped right after use.
+    let secret: string | null = await this.decryptEntrySecret(store, source, source.passwordless ? '' : password);
+    if (secret === null) throw new Error('wrong-password');
+    let account: SubstrateAccount;
+    try {
+      if (isLegacyMoneroSecret(decodeSeedSecret(secret).mnemonic)) throw new Error('not-a-seed-wallet');
+      account = this.substrateAccountFromSecret(secret);
+    } finally {
+      secret = null;
+    }
+    try {
+      const address = account.address;
+      const created = await this.updateStore((fresh) => {
+        const src = fresh.wallets.find((w) => w.id === sourceWalletId);
+        if (!src) throw new Error('unknown-wallet');
+        if (fresh.wallets.some((w) => (w.family ?? 'utxo') === 'substrate' && w.address === address)) {
+          throw new Error('already-added');
+        }
+        const seedGroup = src.seedGroup ?? (src.address || address).toLowerCase();
+        if (!src.seedGroup) src.seedGroup = seedGroup;
+        const id = genWalletId(new Set(fresh.wallets.map((w) => w.id)));
+        const walletName = name?.trim() || `${src.name} (Bittensor)`;
+        const entry: WalletEntry = {
+          id,
+          name: walletName,
+          network: TAO_NETWORK,
+          vault: { ...src.vault },
+          createdAt: Date.now(),
+          kind: 'seed',
+          address,
+          passwordless: src.passwordless ?? false,
+          ...(src.noSendPassword ? { noSendPassword: true } : {}),
+          family: 'substrate',
+          seedGroup,
+          ...(src.origin !== undefined ? { origin: src.origin } : {}),
+        };
+        fresh.wallets.push(entry);
+        fresh.activeId = id;
+        return entry;
+      });
+      if (created === NO_WRITE) throw new Error('could not save the wallet');
+      this.activateEntry(created);
+      this.setActiveSubstrateAccount(account);
+      return this.summaryOf(created);
+    } catch (e) {
+      if (this.substrateAccount !== account) zeroSubstrateAccount(account);
+      throw e;
+    }
+  }
+
+  /**
+   * Persist a new restore height on a Monero entry ("Rescan from height",
+   * §6.6), then make the scan follow it: the wallet open in THIS page (if it
+   * is this one) is recreated at the new height with its cache dropped
+   * (MoneroWalletHost.setRestoreHeight); a wallet that is not open just loses
+   * its cache, so its next open rebuilds from the new height. The store's
+   * next refresh runs the rescan.
+   */
+  async setMoneroRestoreHeight(walletId: string, height: number, opts?: { daemonHeight?: number }): Promise<void> {
+    if (!Number.isSafeInteger(height) || height < 0) {
+      throw new Error('Restore height must be a whole number, zero or more.');
+    }
+    // A height above the chain tip would "sync" instantly to an empty wallet
+    // (no block at or after it holds anything yet), so a funded wallet would
+    // read as 0 XMR. The tip is the caller's (the store keeps the daemon
+    // height of the open wallet); with none known the bound is not applied.
+    const tip = opts?.daemonHeight;
+    if (typeof tip === 'number' && Number.isFinite(tip) && tip > 0 && height > tip) {
+      throw new Error(`The Monero network is at block ${tip.toLocaleString('en-US')}. Enter a height at or below it.`);
+    }
+    const monero = await this.requireMonero();
+    await this.updateStore((store) => {
+      const entry = store.wallets.find((w) => w.id === walletId);
+      if (!entry || (entry.family ?? 'utxo') !== 'monero') throw new Error('not-a-monero-wallet');
+      // The SAME height is still a rescan request (the user pressed Rescan):
+      // the entry is rewritten unchanged and the scan below still restarts,
+      // instead of the old NO_WRITE short-circuit that silently did nothing.
+      entry.restoreHeight = height;
+      return true as const;
+    });
+    const host = monero.activeMoneroHost();
+    if (host && host.walletId === walletId) {
+      await host.setRestoreHeight(height);
+    } else {
+      await monero.deleteMoneroCache(walletId).catch(() => {});
+    }
+  }
+
+  /**
+   * The ONE secret that restores the ACTIVE wallet, password-gated, in the form
+   * its family exports: a Monero entry answers its 25 legacy words and the
+   * restore height (derived from the BIP39 phrase for a sibling, decrypted for
+   * an import; never the phrase itself here), a seed wallet its phrase, a pk
+   * wallet its key. Null on a wrong password.
+   */
+  async revealSecret(password: string): Promise<RevealedSecret | null> {
+    const store = await this.loadStore();
+    const entry = this.sessionEntry(store);
+    if (!entry) return null;
+    if ((entry.family ?? 'utxo') !== 'monero') {
+      if ((entry.kind ?? 'seed') === 'pk') {
+        const wif = await this.revealPrivateKeyWif(password);
+        return wif === null ? null : { kind: 'private-key', wif };
+      }
+      const mnemonic = await this.revealMnemonic(password);
+      return mnemonic === null ? null : { kind: 'mnemonic', mnemonic };
+    }
+    const monero = await this.requireMonero();
+    const raw = await this.revealEntrySecret(store, entry, password);
+    if (raw === null) return null;
+    const restoreHeight = entry.restoreHeight ?? monero.MONERO_RELEASE_HEIGHT;
+    const { mnemonic } = decodeSeedSecret(raw);
+    if (isLegacyMoneroSecret(mnemonic)) {
+      return { kind: 'monero-legacy-seed', words: monero.normalizeLegacyWords(mnemonic), restoreHeight };
+    }
+    // A sibling: the words are COMPUTED from the phrase for display, never
+    // persisted (§9). The derived keys live only for this call.
+    const keys = this.moneroKeysFromSecret(monero, raw);
+    try {
+      return { kind: 'monero-legacy-seed', words: monero.spendKeyToLegacyWords(keys.spendSec), restoreHeight };
+    } finally {
+      monero.zeroMoneroKeys(keys);
+    }
+  }
+
+  /** The public, secret-free summary of one entry: what listWallets() answers
+   *  for every wallet and what the Monero add/import paths hand back. */
+  private summaryOf(w: WalletEntry, activeId: string | null = this.activeId): WalletSummary {
+    return {
+      id: w.id,
+      name: w.name,
+      network: w.network,
+      createdAt: w.createdAt,
+      active: w.id === activeId,
+      kind: w.kind ?? 'seed',
+      address: w.address ?? '',
+      passwordless: w.passwordless ?? false,
+      family: w.family ?? 'utxo',
+      // Conditional for the same reason as evmChainKey below: a wallet on an
+      // install with no app password must keep the EXACT key set listWallets()
+      // has always returned (liveWallet.test.ts pins it as the no-secret-leaks
+      // contract). Both are public metadata; neither can appear before the user
+      // has opted in.
+      ...(isVaultRecordV2(w.vault) ? { appProtected: true } : {}),
+      ...(w.noSendPassword ? { noSendPassword: true } : {}),
+      // Only present on an EVM account: a UTXO summary keeps its exact key set
+      // (liveWallet.test.ts pins that set as the no-secret-leaks contract).
+      ...(w.evmChainKey !== undefined ? { evmChainKey: w.evmChainKey } : {}),
+      // Same rule for the account fields. Both are public and derived from
+      // public data, but a UTXO or 'pk' summary must not sprout EVM-only keys.
+      ...(w.hdIndex !== undefined ? { hdIndex: w.hdIndex } : {}),
+      ...(w.seedGroup !== undefined ? { seedGroup: w.seedGroup } : {}),
+      // Monero-only public fields, present only on a Monero entry for the same
+      // exact-key-set reason.
+      ...(w.restoreHeight !== undefined ? { restoreHeight: w.restoreHeight } : {}),
+      ...(w.moneroNodeSet !== undefined ? { moneroNodeSet: w.moneroNodeSet } : {}),
+      // Every Monero summary answers its key source. An entry stored before
+      // the field is read from its seed group: "Add Monero" always shares one
+      // with its source, an import from 25 words never has one.
+      ...((w.family ?? 'utxo') === 'monero'
+        ? { moneroKeySource: w.moneroKeySource ?? (w.seedGroup ? 'phrase' : 'words') }
+        : {}),
+      // Zcash-only public field, a copy so no caller can edit the entry's own.
+      ...(w.zcashWatch !== undefined ? { zcashWatch: [...w.zcashWatch] } : {}),
+      // Present only on entries that recorded it, for the exact-key-set reason
+      // above (a pre-field entry keeps the summary it always had).
+      ...(w.origin !== undefined ? { origin: w.origin } : {}),
+    };
   }
 
   // --- EVM accounts on one seed (the EVM accounts design notes) ---------------
@@ -3177,6 +4095,8 @@ export class LiveWalletService implements WalletEngine {
   async listAddresses(): Promise<{ index: number; address: string }[]> {
     // One account = one address on the EVM family (design decision, evm-engine.md, section 1).
     if (this.activeFamily === 'evm') return [{ index: 0, address: this.evmAddress() }];
+    // One primary address on Monero too (subaddresses live in the scanner).
+    if (this.activeFamily === 'monero') return [{ index: 0, address: this.getAddress(0) }];
     const keys = await this.allKeys();
     return keys.map((k, i) => ({ index: i, address: k.address }));
   }
@@ -3806,6 +4726,18 @@ export class LiveWalletService implements WalletEngine {
     await getStorage().remove(WALLETS_KEY);
     await getStorage().remove(LEGACY_KEY);
     this.activeId = null;
+    // The Monero scan caches (IndexedDB, the Monero engine design notes §6.5)
+    // are keyed by wallet id, and every id just went with the store: nothing
+    // could ever address those rows again, and each one is a wallet's whole
+    // encrypted history. The database goes as a whole. Best effort, after the
+    // records are gone; a row that could not be dropped is unreadable without
+    // the keys anyway.
+    try {
+      const monero = await loadMoneroModules();
+      if (monero) await monero.deleteAllMoneroCaches();
+    } catch {
+      /* see above */
+    }
   }
 }
 

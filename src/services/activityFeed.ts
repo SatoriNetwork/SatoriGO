@@ -64,10 +64,17 @@ export function mergeActivity(
   txs: LiveTransaction[],
   events: StakingEvent[],
 ): ActivityItem[] {
+  // The id is the txid, which is what every reader expects. A second row
+  // with the SAME txid (a chain whose history can list one transaction on
+  // both sides) gets a direction-suffixed id, so React keys never collide.
+  const seen = new Map<string, number>();
   const items: ActivityItem[] = [
-    ...txs.map(
-      (tx): TxActivityItem => ({ kind: 'tx', id: tx.txid, timestamp: tx.timestamp, tx }),
-    ),
+    ...txs.map((tx): TxActivityItem => {
+      const n = (seen.get(tx.txid) ?? 0) + 1;
+      seen.set(tx.txid, n);
+      const id = n === 1 ? tx.txid : `${tx.txid}-${tx.direction}-${n}`;
+      return { kind: 'tx', id, timestamp: tx.timestamp, tx };
+    }),
     ...events.map(
       (event): StakingActivityItem => ({
         kind: 'staking',

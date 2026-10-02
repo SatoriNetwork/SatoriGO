@@ -159,12 +159,15 @@ describe('walletOnChain', () => {
     expect(mod.walletOnChain([], 'mainnet')).toBe(null);
   });
 
-  it('returns the only wallet on that chain', () => {
+  it('returns the only wallet on that chain when it is the active phrase\'s sibling', () => {
     const wallets = [
       summary({ id: 'a', network: 'mainnet', active: true }),
-      summary({ id: 'r', network: 'ravencoin-mainnet' }),
+      summary({ id: 'r', name: 'a (Ravencoin)', network: 'ravencoin-mainnet' }),
     ];
     expect(mod.walletOnChain(wallets, 'ravencoin-mainnet')?.id).toBe('r');
+    // An unrelated wallet there is not "the wallet for this chain": null, so
+    // the switcher offers Add for the active phrase.
+    expect(mod.walletOnChain([wallets[0], summary({ id: 'z', network: 'ravencoin-mainnet' })], 'ravencoin-mainnet')).toBe(null);
   });
 
   it('prefers the ACTIVE wallet sibling (same base name) over the first match', () => {
@@ -187,9 +190,21 @@ describe('walletOnChain', () => {
     expect(mod.walletOnChain(wallets, 'litecoin-mainnet')?.id).toBe('l2');
   });
 
-  it('falls back to the FIRST wallet on the chain when no sibling matches', () => {
+  it('a SEED wallet with no sibling on the chain gets null, never another phrase\'s wallet (X01/X02)', () => {
+    // The owner's chain-scoping rule: the switcher acts on the active
+    // wallet's own recovery phrase. "Nothing alike" has no Ravencoin sibling,
+    // so the switcher must offer Add for it, not jump to Alpha's wallet.
     const wallets = [
       summary({ id: 'e1', network: 'mainnet', name: 'Nothing alike', active: true }),
+      summary({ id: 'r1', network: 'ravencoin-mainnet', name: 'Alpha' }),
+      summary({ id: 'r2', network: 'ravencoin-mainnet', name: 'Beta' }),
+    ];
+    expect(mod.walletOnChain(wallets, 'ravencoin-mainnet')).toBe(null);
+  });
+
+  it('a wallet OUTSIDE any seed group (imported key) keeps the old rule: FIRST wallet on the chain', () => {
+    const wallets = [
+      summary({ id: 'p1', network: 'mainnet', name: 'Satori key', kind: 'pk', active: true }),
       summary({ id: 'r1', network: 'ravencoin-mainnet', name: 'Alpha' }),
       summary({ id: 'r2', network: 'ravencoin-mainnet', name: 'Beta' }),
     ];
@@ -197,6 +212,80 @@ describe('walletOnChain', () => {
     // ...and "first" means first in the given order — no hidden sort.
     const reversed = [wallets[0], wallets[2], wallets[1]];
     expect(mod.walletOnChain(reversed, 'ravencoin-mainnet')?.id).toBe('r2');
+    // Its own enableChain sibling still wins over "first".
+    const withSibling = [wallets[0], wallets[1], summary({ id: 'r3', network: 'ravencoin-mainnet', name: 'Satori key (Ravencoin)' })];
+    expect(mod.walletOnChain(withSibling, 'ravencoin-mainnet')?.id).toBe('r3');
+  });
+
+  it('a Monero wallet imported from 25 words is outside every seed group: FIRST wallet on the chain', () => {
+    const words = summary({
+      id: 'x1',
+      network: 'xmr:mainnet',
+      family: 'monero',
+      name: 'Monero wallet',
+      active: true,
+      moneroKeySource: 'words',
+    });
+    const wallets = [words, summary({ id: 'a', network: 'mainnet', name: 'Alpha' }), summary({ id: 'b', network: 'mainnet', name: 'Beta' })];
+    expect(mod.walletOnChain(wallets, 'mainnet')?.id).toBe('a');
+    // The same wallet as a phrase-derived sibling would get null instead.
+    const phrase = { ...words, moneroKeySource: 'phrase' as const };
+    expect(mod.walletOnChain([phrase, wallets[1], wallets[2]], 'mainnet')).toBe(null);
+  });
+
+  it('siblings whose groups live in DIFFERENT namespaces (one added from the EVM account, one from the Evrmore wallet) are still one phrase', () => {
+    // The 1.4.3 review case: "Wallet 1" (Evrmore) + "Wallet 1 (EVM)". Zcash was
+    // added while the EVM account was active, so it carries the EVM group
+    // (0x...); Bittensor was added from Evrmore, which backfilled its own
+    // E-address as the group. Strict group compare called them different
+    // phrases: on Evrmore the Zcash row offered Add (which then failed with
+    // "already have a Zcash wallet"), and on Zcash the Evrmore row offered Add
+    // (which created a DUPLICATE Evrmore wallet).
+    const evmGroup = '0x' + 'ab'.repeat(20);
+    const utxoGroup = 'eqfvlzzqxbq7zvkwz5umxhpmdxqhlhp4w3';
+    const evr = summary({ id: 'evr', network: 'mainnet', name: 'Wallet 1', seedGroup: utxoGroup, createdAt: 1 });
+    const evm = summary({ id: 'evm', network: 'evm', family: 'evm', name: 'Wallet 1 (EVM)', seedGroup: evmGroup, createdAt: 2 });
+    const zec = summary({ id: 'zec', network: 'zec:mainnet', family: 'zcash', name: 'Wallet 1 (Zcash)', seedGroup: evmGroup, createdAt: 3 });
+    const tao = summary({ id: 'tao', network: 'tao:mainnet', family: 'substrate', name: 'Wallet 1 (Bittensor)', seedGroup: utxoGroup, createdAt: 4 });
+    const withActive = (id: string) => [evr, evm, zec, tao].map((w) => ({ ...w, active: w.id === id }));
+
+    expect(mod.walletOnChain(withActive('evr'), 'zec:mainnet')?.id).toBe('zec');
+    expect(mod.walletOnChain(withActive('zec'), 'mainnet')?.id).toBe('evr');
+    expect(mod.walletOnChain(withActive('zec'), 'tao:mainnet')?.id).toBe('tao');
+    expect(mod.walletOnChain(withActive('tao'), 'zec:mainnet')?.id).toBe('zec');
+    expect(mod.walletOnChain(withActive('evm'), 'zec:mainnet')?.id).toBe('zec');
+    expect(mod.walletOnChain(withActive('evm'), 'tao:mainnet')?.id).toBe('tao');
+    expect(mod.walletOnChain(withActive('tao'), 'evm:base')?.id).toBe('evm');
+
+    // Inside ONE namespace the group is still the proof: another phrase's
+    // Zcash wallet that happens to share the name is never picked.
+    const otherZec = summary({ id: 'zec2', network: 'zec:mainnet', family: 'zcash', name: 'Wallet 1 (Zcash)', seedGroup: '0x' + 'cd'.repeat(20), createdAt: 5 });
+    expect(mod.walletOnChain([...withActive('evm'), otherZec], 'zec:mainnet')?.id).toBe('zec');
+    expect(mod.walletOnChain([{ ...evm, active: true, seedGroup: '0x' + 'cd'.repeat(20) }, zec, tao], 'zec:mainnet')).toBe(null);
+  });
+
+  it('siblings are joined by a shared seedGroup even after one was renamed', () => {
+    // "My XMR" was "Wallet 1 (Monero)" once; the group id (backfilled onto the
+    // source by Add Monero) still says they are one phrase, both ways.
+    const source = summary({ id: 'w1', network: 'mainnet', name: 'Wallet 1', seedGroup: 'eaddr', createdAt: 1 });
+    const xmr = summary({ id: 'x1', network: 'xmr:mainnet', family: 'monero', name: 'My XMR', seedGroup: 'eaddr', createdAt: 2 });
+    const other = summary({ id: 'w2', network: 'mainnet', name: 'Wallet 2', createdAt: 0 });
+    expect(mod.walletOnChain([other, { ...source, active: true }, xmr], 'xmr:mainnet')?.id).toBe('x1');
+    expect(mod.walletOnChain([other, source, { ...xmr, active: true }], 'mainnet')?.id).toBe('w1');
+    // ...and the renamed sibling still finds the group's name-tagged Ravencoin
+    // wallet (made before the group existed, so it carries no seedGroup).
+    const rvn = summary({ id: 'r1', network: 'ravencoin-mainnet', name: 'Wallet 1 (Ravencoin)', createdAt: 3 });
+    expect(mod.walletOnChain([rvn, source, { ...xmr, active: true }], 'ravencoin-mainnet')?.id).toBe('r1');
+    // Wallet 2 has none of this: Add, not a jump into Wallet 1's group.
+    expect(mod.walletOnChain([{ ...other, active: true }, source, xmr, rvn], 'xmr:mainnet')).toBe(null);
+    expect(mod.walletOnChain([{ ...other, active: true }, source, xmr, rvn], 'ravencoin-mainnet')).toBe(null);
+  });
+
+  it('belongsToSeedGroup: a phrase wallet yes, an imported key and a 25-word Monero import no', () => {
+    expect(mod.belongsToSeedGroup(summary({ id: 'a', network: 'mainnet' }))).toBe(true);
+    expect(mod.belongsToSeedGroup(summary({ id: 'a', network: 'mainnet', kind: 'pk' }))).toBe(false);
+    expect(mod.belongsToSeedGroup({ kind: 'seed', moneroKeySource: 'phrase' })).toBe(true);
+    expect(mod.belongsToSeedGroup({ kind: 'seed', moneroKeySource: 'words' })).toBe(false);
   });
 
   it('is deterministic: repeated calls on identical input agree', () => {
@@ -239,14 +328,16 @@ describe('wallet family (EVM engine seam, family absent = utxo)', () => {
     expect(mod.walletsOnChain([evm()], 'mainnet')).toEqual([]);
   });
 
-  it('walletOnChain skips an ACTIVE EVM wallet when picking a sibling, and never returns it', () => {
+  it('walletOnChain from an ACTIVE EVM seed account lands only on ITS phrase\'s UTXO sibling', () => {
     const wallets = [
-      summary({ ...evm(), active: true }),
+      summary({ ...evm(), name: 'Mine (EVM)', active: true }),
       summary({ id: 'x', name: 'Other (Ravencoin)', network: 'ravencoin-mainnet' }),
       summary({ id: 'y', name: 'Mine (Ravencoin)', network: 'ravencoin-mainnet' }),
     ];
-    // No utxo sibling can exist for an EVM account: FIRST wins, deterministically.
-    expect(mod.walletOnChain(wallets, 'ravencoin-mainnet')?.id).toBe('x');
+    expect(mod.walletOnChain(wallets, 'ravencoin-mainnet')?.id).toBe('y');
+    // No sibling of this phrase there: null (the switcher offers Add), never
+    // another phrase's wallet, and never the EVM account itself.
+    expect(mod.walletOnChain([wallets[0], wallets[1]], 'ravencoin-mainnet')).toBe(null);
     expect(mod.walletOnChain([summary({ ...evm(), active: true })], 'mainnet')).toBe(null);
   });
 

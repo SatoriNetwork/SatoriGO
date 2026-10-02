@@ -1,6 +1,6 @@
 // Multi-target build orchestrator.
 //
-//   node scripts/build.mjs --target=chrome|edge|firefox|all [--evm]
+//   node scripts/build.mjs --target=chrome|edge|firefox|all [--evm] [--monero]
 //
 // Runs typecheck ONCE, then a vite build per requested target. Each target's
 // manifest.json lives under platforms/<target>/ (public/ no longer carries it),
@@ -15,8 +15,19 @@
 // the build if an evm/ module reaches any chunk, and this script additionally
 // greps the emitted JS for EVM-only markers, so the tree-shake is verified twice
 // rather than assumed.
+//
+// --monero does the same for the Monero engine (src/services/chain/monero/ and
+// monero-ts; the Monero engine design notes §13): MONERO_ENABLED=1 flips
+// `__MONERO_ENABLED__`, the two worker files (monero-ts's prebuilt
+// monero.worker.js and the wrapper public/xmr-worker.js) are shipped, and the
+// target manifest's CSP gains 'wasm-unsafe-eval' and worker-src 'self' (the
+// WASM is instantiated from bytes embedded in the worker). WITHOUT it the
+// output must contain none of that: no monero/ module in any chunk
+// (vite.config.ts), no MONERO_MARKERS in the emitted JS, no worker files, and
+// the committed CSP byte for byte. Owner decision 2026-09-28: ON for every
+// package (`npm run build*` passes it); this script still verifies both ways.
 import { spawnSync } from 'node:child_process';
-import { cpSync, copyFileSync, existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { cpSync, copyFileSync, existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { allEvmHostPatterns, evmGatewayUrl, evmHostPermissions } from './evm-hosts.mjs';
@@ -29,6 +40,7 @@ const arg = process.argv.find((a) => a.startsWith('--target='));
 const requested = (arg ? arg.slice('--target='.length) : 'chrome').toLowerCase();
 const targets = requested === 'all' ? ALL : [requested];
 const evm = process.argv.includes('--evm');
+const monero = process.argv.includes('--monero');
 // Where the output goes, which since 2026-08-27 is NO LONGER decided by --evm.
 // It used to be: a build without the engine was "the store build" and went to
 // dist/store/<target>. The owner's call that EVM ships to the store removed the
@@ -56,6 +68,127 @@ const EVM_MARKERS = [
   // --evm carries no staking code at all.
   'api.epix.zone',
 ];
+
+// Strings that exist ONLY in the Monero engine and its worker files (the Monero
+// engine design notes §13): the wrapper's file name (workerHost.ts), the
+// gateway route prefix (rpc.ts / workerHost.ts), the prebuilt worker's file
+// name (importScripts in the wrapper), the wallet class of the monero-ts
+// bundle (in its page entry and its worker alike; verified present in
+// 0.11.16, unlike the design's 'SubAddr', which is in neither), and the HKDF
+// salt of the scan cache (keys.ts). The module-id guard in vite.config.ts is
+// the primary check; this grep, run over EVERY .js in dist (the copied worker
+// files included), is the independent second look, in both directions.
+const MONERO_MARKERS = ['xmr-worker.js', '/xmr/', 'monero.worker.js', 'MoneroWalletFull', 'satori-go/monero/v1'];
+// The two files copied into the dist root, unhashed, only with --monero
+// (public/xmr-worker.js is copied by vite with the rest of public/ and REMOVED
+// from a flagless build below). Never the .map file.
+const MONERO_WORKER_FILES = ['monero.worker.js', 'xmr-worker.js'];
+// What the CSP gains with --monero, and must not have without it.
+const MONERO_CSP_SCRIPT_SRC = "'wasm-unsafe-eval'";
+const MONERO_CSP_WORKER_SRC = "worker-src 'self'";
+
+/** Add 'wasm-unsafe-eval' to script-src and a worker-src 'self' directive to
+ *  the target manifest's extension_pages CSP (the Monero engine design notes
+ *  §6.2). The committed manifests are never edited: the injection happens on
+ *  the COPY in dist, only with --monero, so a flagless package stays
+ *  CSP-identical to the last release. Idempotent. */
+function injectMoneroCsp(manifestPath) {
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  const csp = manifest.content_security_policy?.extension_pages;
+  if (typeof csp !== 'string' || !csp) {
+    console.error(`${path.relative(root, manifestPath)} has no content_security_policy.extension_pages to extend for Monero.`);
+    process.exit(1);
+  }
+  const directives = csp
+    .split(';')
+    .map((d) => d.trim())
+    .filter(Boolean);
+  const scriptIdx = directives.findIndex((d) => /^script-src(\s|$)/.test(d));
+  if (scriptIdx === -1) {
+    console.error(`${path.relative(root, manifestPath)}: the CSP has no script-src directive to add ${MONERO_CSP_SCRIPT_SRC} to.`);
+    process.exit(1);
+  }
+  if (!directives[scriptIdx].split(/\s+/).includes(MONERO_CSP_SCRIPT_SRC)) {
+    directives[scriptIdx] = `${directives[scriptIdx]} ${MONERO_CSP_SCRIPT_SRC}`;
+  }
+  if (!directives.some((d) => /^worker-src(\s|$)/.test(d))) {
+    // Right after script-src, which it refines.
+    directives.splice(scriptIdx + 1, 0, MONERO_CSP_WORKER_SRC);
+  }
+  manifest.content_security_policy.extension_pages = directives.join('; ');
+  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
+  console.log(`  manifest: CSP script-src +${MONERO_CSP_SCRIPT_SRC}, +${MONERO_CSP_WORKER_SRC} (Monero worker)`);
+}
+
+/** A flagless build keeps the committed CSP exactly: no wasm-unsafe-eval, no
+ *  worker-src. Compared against the source manifest, not just grepped, so an
+ *  unrelated CSP edit cannot slip through as "still no Monero". */
+function assertNoMoneroCsp(manifestPath, sourceManifestPath) {
+  const built = JSON.parse(readFileSync(manifestPath, 'utf8')).content_security_policy?.extension_pages ?? '';
+  const source = JSON.parse(readFileSync(sourceManifestPath, 'utf8')).content_security_policy?.extension_pages ?? '';
+  if (built !== source) {
+    console.error(`The CSP of a build made WITHOUT --monero differs from ${path.relative(root, sourceManifestPath)}:\n  built:  ${built}\n  source: ${source}`);
+    process.exit(1);
+  }
+  if (built.includes(MONERO_CSP_SCRIPT_SRC) || /worker-src/.test(built)) {
+    console.error(`The committed CSP already carries a Monero directive; the build cannot tell a flagless package apart: ${built}`);
+    process.exit(1);
+  }
+}
+
+/** The POSITIVE guard: a --monero build MUST carry the engine, both worker
+ *  files and every marker, or the popup would offer no Monero row at runtime
+ *  (loadMoneroChainInfo() answering null) with nothing saying why. */
+function assertMoneroSymbols(dist) {
+  for (const f of MONERO_WORKER_FILES) {
+    if (!existsSync(path.join(dist, f))) {
+      console.error(`Monero worker file MISSING from a build made WITH --monero: ${f}`);
+      process.exit(1);
+    }
+  }
+  const present = new Set();
+  for (const file of jsFiles(dist)) {
+    const text = readFileSync(file, 'utf8');
+    for (const marker of MONERO_MARKERS) if (text.includes(marker)) present.add(marker);
+  }
+  const missing = MONERO_MARKERS.filter((m) => !present.has(m));
+  if (missing.length > 0) {
+    console.error('Monero engine MISSING from a build made WITH --monero (the popup would show no Monero):');
+    for (const m of missing) console.error(`  marker not found: ${m}`);
+    console.error('Check the __MONERO_ENABLED__ guard and the dynamic import in src/services/chain/engine.ts.');
+    process.exit(1);
+  }
+  console.log(`  Monero engine present in dist (all ${MONERO_MARKERS.length} markers found, ${MONERO_WORKER_FILES.join(' + ')} shipped)`);
+}
+
+function assertNoMoneroSymbols(dist) {
+  for (const f of MONERO_WORKER_FILES) {
+    if (existsSync(path.join(dist, f))) {
+      console.error(`Monero worker file found in a build made WITHOUT --monero: ${f}`);
+      process.exit(1);
+    }
+  }
+  const hits = [];
+  for (const file of jsFiles(dist)) {
+    const text = readFileSync(file, 'utf8');
+    for (const marker of MONERO_MARKERS) {
+      if (text.includes(marker)) hits.push(`${path.relative(root, file)}: ${marker}`);
+    }
+  }
+  if (hits.length > 0) {
+    console.error('Monero symbols found in a build made WITHOUT --monero:');
+    for (const h of hits) console.error(`  ${h}`);
+    process.exit(1);
+  }
+  // What this proves, precisely: no Monero ENGINE (src/services/chain/monero/,
+  // monero-ts, the worker files, the CSP change), which vite.config.ts also
+  // fails a flagless build on. The registry and the store's family switch
+  // ('xmr:mainnet', walletFamily === 'monero') stay in the main chunk, exactly
+  // as the EVM registry does in a build without --evm: they are what lets a
+  // flagless build recognise (and refuse to open) a Monero entry that arrives
+  // through a backup restore, instead of misreading it as a UTXO wallet.
+  console.log(`  no Monero engine in dist (checked ${MONERO_MARKERS.length} engine markers), no worker files, committed CSP`);
+}
 
 // The EVM hosts. Injected into the target manifest's host_permissions ONLY
 // with --evm; a build without it must not carry them (checked below), so a
@@ -211,6 +344,7 @@ function writeBuildInfo(dist, target) {
     target,
     version: pkgVersion,
     evm,
+    monero,
     // Not gated on --evm: prices go through the gateway in every build.
     gatewayUrl: evmGateway || '',
     builtAt: new Date().toISOString(),
@@ -256,15 +390,25 @@ function outDirFor(target) {
 }
 
 for (const target of targets) {
-  console.log(`build ${target}${evm ? ' (EVM enabled)' : ''}...`);
+  console.log(`build ${target}${evm ? ' (EVM enabled)' : ''}${monero ? ' (Monero enabled)' : ''}...`);
   const relOut = outDirFor(target);
   // The guard, stated as a rule rather than a convention: a build with no EVM
-  // engine may never land in the directory the owner has loaded.
-  if (!evm && path.normalize(relOut) === path.normalize(path.join('dist', target))) {
-    console.error(`refusing to write a build with no EVM engine into dist/${target}: that is the loaded directory`);
+  // engine may never land in the directory the owner has loaded. The same for
+  // Monero since 2026-09-28: it ships in every package, so a flagless build
+  // landing there would make the Monero wallet vanish from the loaded
+  // extension exactly as the EVM chains once did (2026-08-25).
+  if ((!evm || !monero) && path.normalize(relOut) === path.normalize(path.join('dist', target))) {
+    console.error(
+      `refusing to write a build with no ${!evm ? 'EVM' : 'Monero'} engine into dist/${target}: that is the loaded directory`,
+    );
     process.exit(1);
   }
-  run(node, [viteBin, 'build'], { TARGET: target, EVM_ENABLED: evm ? '1' : '0', OUT_DIR: relOut.split(path.sep).join('/') });
+  run(node, [viteBin, 'build'], {
+    TARGET: target,
+    EVM_ENABLED: evm ? '1' : '0',
+    MONERO_ENABLED: monero ? '1' : '0',
+    OUT_DIR: relOut.split(path.sep).join('/'),
+  });
 
   const dist = path.join(root, relOut);
   copyFileSync(path.join(root, 'platforms', target, 'manifest.json'), path.join(dist, 'manifest.json'));
@@ -289,9 +433,27 @@ for (const target of targets) {
     assertNoEvmSymbols(dist);
     assertNoEvmHosts(manifestOut);
   }
+  // Monero (the Monero engine design notes §13): the worker files, their
+  // licences and the CSP with the flag; without it the wrapper vite copied
+  // from public/ is REMOVED first (it is both a leak and a marker hit), then
+  // the negative checks run against the emitted JS and the untouched CSP.
+  const xmrDist = path.join(root, 'node_modules', 'monero-ts', 'dist');
+  if (monero) {
+    copyFileSync(path.join(xmrDist, 'monero.worker.js'), path.join(dist, 'monero.worker.js'));
+    copyFileSync(path.join(xmrDist, 'monero.worker.js.LICENSE.txt'), path.join(dist, 'monero.worker.js.LICENSE.txt'));
+    copyFileSync(path.join(root, 'node_modules', 'monero-ts', 'LICENSE.txt'), path.join(dist, 'monero-ts.LICENSE.txt'));
+    injectMoneroCsp(manifestOut);
+    assertMoneroSymbols(dist);
+  } else {
+    rmSync(path.join(dist, 'xmr-worker.js'), { force: true });
+    assertNoMoneroSymbols(dist);
+    assertNoMoneroCsp(manifestOut, path.join(root, 'platforms', target, 'manifest.json'));
+  }
   assertGatewayPrices(dist, manifestOut);
   writeBuildInfo(dist, target);
-  console.log(`  -> ${relOut.split(path.sep).join('/')} (v${pkgVersion}, ${evm ? `EVM${evmGateway ? ' + gateway' : ''}` : 'no EVM'})`);
+  console.log(
+    `  -> ${relOut.split(path.sep).join('/')} (v${pkgVersion}, ${evm ? `EVM${evmGateway ? ' + gateway' : ''}` : 'no EVM'}, ${monero ? 'Monero' : 'no Monero'})`,
+  );
 }
 
 // After ANY build, say plainly what the loaded directory now holds. A store
@@ -302,8 +464,11 @@ for (const target of targets) {
   if (existsSync(loaded)) {
     try {
       const info = JSON.parse(readFileSync(loaded, 'utf8'));
-      console.log(`  dist/chrome (the loaded directory) holds v${info.version}, ${info.evm ? 'EVM' : 'NO EVM'}, built ${info.builtAt}`);
+      console.log(
+        `  dist/chrome (the loaded directory) holds v${info.version}, ${info.evm ? 'EVM' : 'NO EVM'}, ${info.monero ? 'Monero' : 'NO Monero'}, built ${info.builtAt}`,
+      );
       if (!info.evm) console.log('  WARNING: dist/chrome has no EVM engine. Run `npm run build:evm`.');
+      if (!info.monero) console.log('  WARNING: dist/chrome has no Monero engine. Run `npm run build:evm`.');
     } catch { /* an unreadable build-info is not worth failing a build over */ }
   }
 }

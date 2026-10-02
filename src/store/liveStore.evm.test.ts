@@ -114,7 +114,7 @@ async function settle(ms = 60) {
 
 describe('EVM chains in the store', () => {
   it('1. init loads the EVM chains into state (empty without the engine)', async () => {
-    expect(state().evm.chains.map((c) => c.key)).toEqual(['base', 'bsc', 'ethereum', 'epix']);
+    expect(state().evm.chains.map((c) => c.key)).toEqual(['base', 'bsc', 'ethereum', 'epix', 'avalanche', 'robinhood']);
     expect(state().evm.activeChainKey).toBe(null);
     // Epix has an indexer but no Alchemy: Activity has a source (no "cannot be
     // listed" notice), while Import/discovery stay hidden (they need alchemy_*).
@@ -163,17 +163,20 @@ describe('EVM chains in the store', () => {
   }, 30_000);
 
   it('3. chainsWithWallets: an EVM account enables every EVM chain and no UTXO chain; walletsOnChain scopes recipients by family', async () => {
-    await state().importWallet(VECTOR_MNEMONIC, PW, 'EVM', 'evm:base');
-    await state().importWallet(VECTOR_MNEMONIC, PW, 'RVN', 'ravencoin-mainnet');
+    // Named as the siblings they are (one phrase): walletOnChain is scoped to
+    // the active wallet's seed group, so unrelated names would read as two
+    // phrases and answer null for each other's chains.
+    await state().importWallet(VECTOR_MNEMONIC, PW, 'Mine (EVM)', 'evm:base');
+    await state().importWallet(VECTOR_MNEMONIC, PW, 'Mine (Ravencoin)', 'ravencoin-mainnet');
     await state().loadWallets();
     const enabled = mod.chainsWithWallets(state().wallets, state().evm.chains.map((c) => c.key));
     expect(enabled.has('evm:base')).toBe(true);
     expect(enabled.has('evm:bsc')).toBe(true);
     expect(enabled.has('ravencoin-mainnet')).toBe(true);
     expect(enabled.has('mainnet')).toBe(false);
-    expect(mod.walletsOnChain(state().wallets, 'evm:bsc').map((w) => w.name)).toEqual(['EVM']);
-    expect(mod.walletsOnChain(state().wallets, 'ravencoin-mainnet').map((w) => w.name)).toEqual(['RVN']);
-    expect(mod.walletOnChain(state().wallets, 'evm:base')?.name).toBe('EVM');
+    expect(mod.walletsOnChain(state().wallets, 'evm:bsc').map((w) => w.name)).toEqual(['Mine (EVM)']);
+    expect(mod.walletsOnChain(state().wallets, 'ravencoin-mainnet').map((w) => w.name)).toEqual(['Mine (Ravencoin)']);
+    expect(mod.walletOnChain(state().wallets, 'evm:base')?.name).toBe('Mine (EVM)');
   }, 30_000);
 
   it('4. switchChain to another EVM chain stays on the account, changes the shown chain and re-reads balances', async () => {
@@ -200,15 +203,15 @@ describe('EVM chains in the store', () => {
   }, 30_000);
 
   it('5. switchChain from an EVM account to a UTXO chain switches WALLETS (and never reads as "already there")', async () => {
-    await state().importWallet(VECTOR_MNEMONIC, PW, 'RVN', 'ravencoin-mainnet');
-    await state().importWallet(VECTOR_MNEMONIC, PW, 'EVM', 'evm:base');
+    await state().importWallet(VECTOR_MNEMONIC, PW, 'Mine (Ravencoin)', 'ravencoin-mainnet');
+    await state().importWallet(VECTOR_MNEMONIC, PW, 'Mine (EVM)', 'evm:base');
     await state().loadWallets();
     const evmId = state().activeWalletId;
     // The idle Electrum side still says ravencoin; that must NOT short-circuit.
     expect(mod.activeChainId()).toBe('ravencoin-mainnet');
     await state().switchChain('ravencoin-mainnet');
     expect(state().activeWalletId).not.toBe(evmId);
-    expect(state().wallets.find((w) => w.active)?.name).toBe('RVN');
+    expect(state().wallets.find((w) => w.active)?.name).toBe('Mine (Ravencoin)');
     expect(mod.activeFamily()).toBe('utxo');
     expect(state().evm.activeChainKey).toBe(null);
     // And back to Base lands on the EVM account (locked: it needs its password).

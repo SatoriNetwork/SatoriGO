@@ -32,6 +32,19 @@ describe('officialLogoUrl', () => {
     expect(neox).not.toBe(rvn);
     expect(neox).not.toBe(doge);
     expect(neox).not.toBe(officialLogoUrl('btgs'));
+    // Monero has its own mark, never the Evrmore fallback or another chain's.
+    const xmr = officialLogoUrl('xmr');
+    for (const other of [evr, satori, rvn, wjk, btc, doge, neox, officialLogoUrl('btgs'), officialLogoUrl('btcb2')]) {
+      expect(xmr).not.toBe(other);
+    }
+    // Zcash, Bittensor and Avalanche each have their own mark too, distinct
+    // from every other slot and from each other.
+    const zec = officialLogoUrl('zec');
+    const tao = officialLogoUrl('tao');
+    const avax = officialLogoUrl('avax');
+    const others = [evr, satori, rvn, wjk, btc, doge, neox, xmr, officialLogoUrl('btgs'), officialLogoUrl('btcb2')];
+    for (const mark of [zec, tao, avax]) for (const other of others) expect(mark).not.toBe(other);
+    expect(new Set([zec, tao, avax]).size).toBe(3);
     // 'header' has no dedicated asset yet; falls back to the EVR logo.
     expect(header).toBe(evr);
   });
@@ -96,6 +109,16 @@ describe('TokenIcon', () => {
   it('is case-insensitive for the NEOX asset id', () => {
     const { container } = render(<TokenIcon assetId="neox" />);
     expect(container.querySelector('[data-logo-slot="neox"]')).not.toBeNull();
+  });
+
+  it('draws the Robinhood Chain network mark for evm:robinhood, distinct from its coin (ETH)', () => {
+    const { container } = render(<TokenIcon assetId="evm:robinhood" />);
+    const frame = container.querySelector('[data-static-mark="Robinhood Chain"]');
+    expect(frame).not.toBeNull();
+    const src = container.querySelector('img')?.getAttribute('src');
+    const eth = render(<TokenIcon assetId="ETH" />).container.querySelector('img')?.getAttribute('src');
+    expect(src).toBeTruthy();
+    expect(src).not.toBe(eth);
   });
 
   it('still falls back to a generic badge for an unrelated asset', () => {

@@ -7,6 +7,7 @@ import { ConstellationField } from '../../components/ConstellationField';
 import { AccountAvatar } from '../../components/AccountAvatar';
 import { useLiveStore, chainDisplayName, nativeTickerFor } from '../../store/liveStore';
 import { groupWallets, flattenGroups, shortAccountAddress, memberLabel } from './walletGroups';
+import { walletKindTag } from './walletKindTag';
 
 type LiveLockProps = Record<string, never>;
 
@@ -250,7 +251,7 @@ export function LiveLock(_props: LiveLockProps) {
           <span className="mono lock-selected-addr">{shortAccountAddress(activeWallet.address)}</span>
         )}
         <span className="lock-selected-chips">
-          <span className="chip neutral">{activeWallet.kind === 'pk' ? 'Satori' : 'Seed'}</span>
+          <span className="chip neutral">{walletKindTag(activeWallet)}</span>
           <span className="chip neutral" data-testid="live-lock-selected-chain">
             {selectedTicker}
           </span>
@@ -352,7 +353,7 @@ export function LiveLock(_props: LiveLockProps) {
               {w.kind === 'pk' && <BrandLogo slot="satori" size={16} alt="Satori" />}
               {isOtherChain && <TokenIcon assetId={walletTicker} size={16} />}
               <span className="lock-wallet-name">{w.name}</span>
-              <span className="chip neutral lock-chip">{w.kind === 'pk' ? 'Satori' : 'Seed'}</span>
+              <span className="chip neutral lock-chip">{walletKindTag(w)}</span>
               {isOtherChain && (
                 <span className="chip neutral lock-chip" data-testid={`live-lock-wallet-chain-${i}`}>
                   {walletTicker}

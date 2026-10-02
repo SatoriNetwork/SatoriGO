@@ -20,7 +20,8 @@ import { AlertTriangle, Download, KeyRound, Upload } from 'lucide-react';
 import { Button } from '../../components/Button';
 import { TextField, PasswordField } from '../../components/TextField';
 import { CopyButton } from '../../components/CopyButton';
-import { useLiveStore } from '../../store/liveStore';
+import { useLiveStore, chainDisplayName } from '../../store/liveStore';
+import { EVM_NETWORK } from '../../services/chain/engine';
 import type { BackupPreview } from '../../services/chain/liveWallet';
 
 /** The shortest an app password may be, mirrored for the backup file: a file
@@ -36,6 +37,19 @@ const MIN_PASSWORD = 8;
  * timer rather than immediately: revoking it in the same tick can cancel the
  * download it was created for.
  */
+/** A stored network id as the user knows the chain: "Evrmore", "Monero",
+ *  "EVM" (one account across every EVM chain), never the raw 'mainnet' or
+ *  'xmr:mainnet' the file carries. An id this build cannot name (a file from
+ *  a newer build) falls back to the id itself. */
+export function backupNetworkLabel(network: string): string {
+  if (network === EVM_NETWORK) return 'EVM';
+  try {
+    return chainDisplayName(network) || network;
+  } catch {
+    return network;
+  }
+}
+
 function downloadText(fileName: string, text: string): void {
   const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
   const a = document.createElement('a');
@@ -477,8 +491,8 @@ export function RestorePanel({ onDone }: { onDone: () => void }) {
           {preview.wallets.map((w) => (
             <div key={w.id} style={{ fontSize: 12, lineHeight: 1.7 }}>
               {w.name}
-              <span className="text-faint" style={{ marginLeft: 6, fontSize: 11 }}>
-                {w.network}
+              <span className="text-faint" style={{ marginLeft: 6, fontSize: 11 }} data-testid={`live-rec-restore-net-${w.id}`}>
+                {backupNetworkLabel(w.network)}
               </span>
             </div>
           ))}

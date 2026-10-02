@@ -919,9 +919,13 @@ describe('LiveWalletService', () => {
     expect(list.find((w) => w.id === id2)?.name).toBe('Savings');
     expect(list.find((w) => w.id === id1)?.name).toBe('Wallet 1');
     // No secret material ever leaks through the summary (only public metadata).
+    // `origin` ('generated' here) records where the phrase came from, which is
+    // public: it says nothing about the words themselves.
     expect(Object.keys(list[0]).sort()).toEqual(
-      ['active', 'address', 'createdAt', 'family', 'id', 'kind', 'name', 'network', 'passwordless'].sort(),
+      ['active', 'address', 'createdAt', 'family', 'id', 'kind', 'name', 'network', 'origin', 'passwordless'].sort(),
     );
+    expect(list[0].origin).toBe('generated');
+    expect(list.find((w) => w.id === id2)?.origin).toBe('imported');
     // `family` is resolved, never absent, and a UTXO summary carries no evmChainKey.
     expect(list[0].family).toBe('utxo');
     expect(list[0]).not.toHaveProperty('vault');

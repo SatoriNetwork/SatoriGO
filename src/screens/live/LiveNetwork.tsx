@@ -3,6 +3,8 @@ import { RefreshCw } from 'lucide-react';
 
 import { BrandLogo } from '../../components/BrandLogo';
 import { getSatoriStats, type SatoriStats } from '../../services/satoriStats';
+import { convertUsd, formatFiatValue, type FiatCurrency, type FxRates } from '../../services/fiat';
+import { useFiat } from './useFiat';
 
 /**
  * Satori Network statistics, laid out the way satorinet.io's own "Statistics"
@@ -13,7 +15,6 @@ import { getSatoriStats, type SatoriStats } from '../../services/satoriStats';
 
 const nf0 = new Intl.NumberFormat('en-US');
 const nf3 = new Intl.NumberFormat('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
-const nf2 = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 interface Tile {
   label: string;
@@ -21,8 +22,12 @@ interface Tile {
   caption: string;
 }
 
-function buildTiles(s: SatoriStats | null): Tile[] {
-  const money = (v: number | null | undefined) => (v === null || v === undefined ? null : `$${nf2.format(v)}`);
+/** satorinet.io reports its price (and so the stake cost) in USD. Shown in the
+ *  display currency through the gateway's cross rate, or left in USD and
+ *  labelled USD when no rate is known. Exported for tests. */
+export function buildTiles(s: SatoriStats | null, currency: FiatCurrency = 'USD', fx: FxRates = {}): Tile[] {
+  const money = (v: number | null | undefined) =>
+    v === null || v === undefined ? null : formatFiatValue(convertUsd(v, currency, fx));
   const count = (v: number | null | undefined) => (v === null || v === undefined ? null : nf0.format(v));
 
   return [
@@ -58,7 +63,8 @@ export function LiveNetwork() {
     void load(false);
   }, [load]);
 
-  const tiles = buildTiles(stats);
+  const { currency, fx } = useFiat();
+  const tiles = buildTiles(stats, currency, fx);
 
   return (
     <div className="screen-enter" data-testid="live-network">
@@ -103,8 +109,7 @@ export function LiveNetwork() {
           href="https://satorinet.io"
           target="_blank"
           rel="noopener noreferrer"
-          className="text-dim"
-          style={{ textDecoration: 'underline', textUnderlineOffset: 2 }}
+          className="link"
           data-testid="live-network-homepage"
         >
           satorinet.io

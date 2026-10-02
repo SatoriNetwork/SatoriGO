@@ -14,20 +14,24 @@ import {
 } from './chains';
 
 describe('1. registry shape', () => {
-  it('holds exactly four chains, keys base, bsc, ethereum, epix in that order (base stays first: it is the default)', () => {
-    expect(EVM_CHAINS).toHaveLength(4);
-    expect(EVM_CHAINS.map((c) => c.key)).toEqual(['base', 'bsc', 'ethereum', 'epix']);
+  it('holds exactly six chains, keys base, bsc, ethereum, epix, avalanche, robinhood in that order (base stays first: it is the default)', () => {
+    expect(EVM_CHAINS).toHaveLength(6);
+    expect(EVM_CHAINS.map((c) => c.key)).toEqual(['base', 'bsc', 'ethereum', 'epix', 'avalanche', 'robinhood']);
   });
 });
 
 describe('2. chain ids', () => {
-  it('base is 8453, bsc is 56, ethereum is 1, epix is 1916, all unique', () => {
+  it('base is 8453, bsc is 56, ethereum is 1, epix is 1916, avalanche is 43114, robinhood is 4663, all unique', () => {
     const base = evmChainByKey('base');
     const bsc = evmChainByKey('bsc');
     expect(base?.chainId).toBe(8453);
     expect(bsc?.chainId).toBe(56);
     expect(evmChainByKey('ethereum')?.chainId).toBe(1);
     expect(evmChainByKey('epix')?.chainId).toBe(1916);
+    expect(evmChainByKey('avalanche')?.chainId).toBe(43114);
+    expect(evmChainById(43114)?.key).toBe('avalanche');
+    expect(evmChainByKey('robinhood')?.chainId).toBe(4663);
+    expect(evmChainById(4663)?.key).toBe('robinhood');
   });
 
   it('chainIds are unique across the registry', () => {
@@ -61,6 +65,65 @@ describe('3. fee models and L1 data fee', () => {
 
   it('epix is eip1559 (base fee read live 2026-08-20, 20 gwei on every block)', () => {
     expect(evmChainByKey('epix')?.feeModel).toBe('eip1559');
+  });
+});
+
+describe('3d. avalanche: an ordinary Alchemy-served EVM row (docs/design/avalanche.md)', () => {
+  it('carries the values verified live through the gateway on 2026-09-29', () => {
+    const avax = evmChainByKey('avalanche');
+    if (!avax) throw new Error('avalanche chain missing from registry');
+    expect(avax.displayName).toBe('Avalanche');
+    expect(avax.nativeTicker).toBe('AVAX');
+    expect(avax.nativeDecimals).toBe(18);
+    expect(avax.alchemyNetwork).toBe('avax-mainnet');
+    expect(avax.trustWalletChain).toBe('avalanchec');
+    expect(avax.tokenListSlug).toBe('avalanche');
+    expect(avax.explorerTxUrl).toBe('https://snowtrace.io/tx/{txid}');
+    expect(avax.homepage).toBe('https://www.avax.network');
+    // baseFeePerGas was non-zero on every block of eth_feeHistory.
+    expect(avax.feeModel).toBe('eip1559');
+    expect(avax.l1DataFee).toBeUndefined();
+    // With alchemyNetwork set, history comes from Alchemy: no Blockscout row.
+    expect(avax.indexer).toBeUndefined();
+    expect(avax.staking).toBeUndefined();
+    // New to this wallet, not a thin network.
+    expect(avax.recentlyAdded).toBe(true);
+    expect(avax.young).toBeUndefined();
+    expect(evmChainIdHex(avax)).toBe('0xa86a');
+    // symbol()/decimals() as the contracts answered them (Tether's is "USDt").
+    expect(avax.defaultTokens).toEqual([
+      { address: '0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E', symbol: 'USDC', decimals: 6 },
+      { address: '0x9702230A8Ea53601f5cD2dc00fDBc13d4dF4A8c7', symbol: 'USDt', decimals: 6 },
+    ]);
+  });
+});
+
+describe('3e. robinhood: an Arbitrum Nitro L2 row (docs/design/robinhood.md)', () => {
+  it('carries the values verified live on the public RPC on 2026-10-02', () => {
+    const rh = evmChainByKey('robinhood');
+    if (!rh) throw new Error('robinhood chain missing from registry');
+    expect(rh.displayName).toBe('Robinhood Chain');
+    expect(rh.nativeTicker).toBe('ETH');
+    expect(rh.nativeDecimals).toBe(18);
+    expect(rh.rpc).toEqual(['https://rpc.mainnet.chain.robinhood.com']);
+    expect(rh.alchemyNetwork).toBe('robinhood-mainnet');
+    expect(rh.trustWalletChain).toBe('robinhoodchain');
+    expect(rh.tokenListSlug).toBe('robinhood');
+    expect(rh.explorerTxUrl).toBe('https://robinhoodchain.blockscout.com/tx/{txid}');
+    expect(rh.homepage).toBe('https://robinhood.com/chain');
+    // baseFeePerGas was non-zero on every block of eth_feeHistory.
+    expect(rh.feeModel).toBe('eip1559');
+    // Arbitrum Nitro folds the L1 cost into gas: no OP-stack surcharge.
+    expect(rh.l1DataFee).toBeUndefined();
+    expect(rh.indexer).toBeUndefined();
+    expect(rh.staking).toBeUndefined();
+    expect(rh.recentlyAdded).toBe(true);
+    expect(rh.young).toBeUndefined();
+    expect(evmChainIdHex(rh)).toBe('0x1237');
+    // symbol()/decimals() as the contract answered them.
+    expect(rh.defaultTokens).toEqual([
+      { address: '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168', symbol: 'USDG', decimals: 6 },
+    ]);
   });
 });
 

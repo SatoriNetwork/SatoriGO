@@ -30,6 +30,7 @@ import { MemoryStorageAdapter, setStorageForTests, type KeyValueStorage } from '
 import { setTokenLogos } from '../../store/tokenLogoRegistry';
 import type { LiveAssetBalance } from '../../services/chain/electrumProvider';
 import { NavProvider } from './LiveNav';
+import { useSettingsStore } from '../../store/settingsStore';
 
 class NoNetWebSocket {
   static readonly OPEN = 1;
@@ -379,5 +380,85 @@ describe('LiveHome asset rows carry no remove control', () => {
 
     expect(screen.queryByTestId(/^live-remove-asset-/)).toBeNull();
     expect(screen.queryByLabelText(/^Remove /)).toBeNull();
+  });
+});
+
+describe('LiveHome fiat figures follow the display currency', () => {
+  const PRICED = {
+    assets: [asset('EVR', 100, true), asset('SATORIEVR', 10)],
+    pinnedAssets: [],
+    hiddenAssets: [],
+    prices: { EVR: 0.01, SATORIEVR: 0.2 },
+    // EVR from CoinGecko in all three currencies; SATORIEVR from the satorinet
+    // fallback, USD only, so it must be converted with the cross rate.
+    priceTable: {
+      EVR: { usd: 0.01, eur: 0.0086, pln: 0.037, source: 'coingecko' },
+      SATORIEVR: { usd: 0.2, source: 'satorinet' },
+    },
+  };
+
+  afterEach(() => {
+    useSettingsStore.setState((s) => ({ settings: { ...s.settings, currency: 'USD' } }));
+  });
+
+  it('USD by default', () => {
+    storeMod.useLiveStore.setState(PRICED);
+    renderHome();
+    expect(screen.getByTestId('live-asset-usd-EVR')).toHaveTextContent('$1.00');
+    expect(screen.getByTestId('live-asset-usd-SATORIEVR')).toHaveTextContent('$2.00');
+    expect(screen.getByTestId('total-balance')).toHaveTextContent('$3.00');
+  });
+
+  it('EUR: the source figure where published, the cross rate where not', () => {
+    useSettingsStore.setState((s) => ({ settings: { ...s.settings, currency: 'EUR' } }));
+    storeMod.useLiveStore.setState(PRICED);
+    renderHome();
+    expect(screen.getByTestId('live-asset-usd-EVR')).toHaveTextContent('€0.86');
+    // 10 x 0.2 USD x 0.86 EUR/USD
+    expect(screen.getByTestId('live-asset-usd-SATORIEVR')).toHaveTextContent('€1.72');
+    expect(screen.getByTestId('total-balance')).toHaveTextContent('€2.58');
+  });
+
+  it('PLN is written with zł after the number', () => {
+    useSettingsStore.setState((s) => ({ settings: { ...s.settings, currency: 'PLN' } }));
+    storeMod.useLiveStore.setState(PRICED);
+    renderHome();
+    expect(screen.getByTestId('live-asset-usd-EVR').textContent).toContain('3.70 zł');
+    expect(screen.getByTestId('total-balance').textContent).toBe('11.10 zł');
+  });
+
+  it('with no cross rate a USD-only price stays USD, and so does the total', () => {
+    useSettingsStore.setState((s) => ({ settings: { ...s.settings, currency: 'EUR' } }));
+    storeMod.useLiveStore.setState({ ...PRICED, priceTable: { EVR: { usd: 0.01 }, SATORIEVR: { usd: 0.2 } } });
+    renderHome();
+    expect(screen.getByTestId('live-asset-usd-SATORIEVR')).toHaveTextContent('$2.00');
+    expect(screen.getByTestId('total-balance')).toHaveTextContent('$3.00');
+    expect(screen.getByTestId('total-balance').textContent).not.toContain('€');
+  });
+});
+
+describe('LiveHome header wallet name', () => {
+  it('drops the chain tag in the header only, keeping the full name as the tooltip and accessible name', () => {
+    storeMod.useLiveStore.setState({
+      wallets: [
+        {
+          id: 'w-tao',
+          name: 'Wallet 1 (Bittensor)',
+          network: 'tao:mainnet',
+          family: 'substrate',
+          createdAt: 1,
+          active: true,
+          kind: 'seed',
+          address: '5F' + 'a'.repeat(46),
+          passwordless: false,
+        },
+      ],
+      activeWalletId: 'w-tao',
+    } as unknown as Parameters<typeof storeMod.useLiveStore.setState>[0]);
+    renderHome();
+    const label = screen.getByTestId('live-wallet-switcher-name');
+    expect(label).toHaveTextContent(/^Wallet 1$/);
+    expect(label).toHaveAttribute('title', 'Wallet 1 (Bittensor)');
+    expect(screen.getByTestId('live-wallet-switcher')).toHaveAttribute('aria-label', 'Switch wallet, Wallet 1 (Bittensor)');
   });
 });

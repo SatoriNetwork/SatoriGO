@@ -1,7 +1,7 @@
 // Root of the wallet UI — renders the correct screen based on the store phase.
 // Mounted directly by App.tsx once display settings + branding have loaded.
 
-import { useEffect, useState } from 'react';
+import { Suspense, lazy, useEffect, useState } from 'react';
 import { useLiveStore, computeDisplayedAssets, stakingSupported, evmStakingSupported, nativeTickerFor } from '../../store/liveStore';
 import { LiveOnboarding } from './LiveOnboarding';
 import { LiveLock } from './LiveLock';
@@ -17,7 +17,46 @@ import { LiveTxDetail } from './LiveTxDetail';
 import { LiveAddressBook } from './LiveAddressBook';
 import { LiveStaking } from './LiveStaking';
 import { LiveStakeEvm } from './LiveStakeEvm';
+// The Zcash and Bittensor screens are STATIC imports: neither engine has a
+// build flag (their design notes §13), so nothing about them is code-split.
+import { LiveSendZcash } from './LiveSendZcash';
+import { LiveReceiveZcash } from './LiveReceiveZcash';
+import { LiveSendTao } from './LiveSendTao';
+import { LiveReceiveTao } from './LiveReceiveTao';
 import { NavProvider, type HomeTab, type NavSection } from './LiveNav';
+
+// THE MONERO SCREENS ARE LAZY, AND ONLY BEHIND THE FLAG. LiveSendMonero (via
+// store/moneroSend.ts) and LiveReceiveMonero import VALUES from
+// src/services/chain/monero/ (address validation, XMR formatting), which a
+// package built without --monero must not contain (vite.config.ts fails the
+// build if a monero/ module reaches a chunk). `__MONERO_ENABLED__` is a
+// literal after vite's define, so in a flagless build each of these is the
+// constant null and Rollup drops the dynamic import with the dead branch; in
+// a --monero build they are code-split chunks loaded on first use, the same
+// way the engine itself is (engine.ts loadMoneroModules). A null here can
+// never be reached at runtime: without the engine the store's `monero.chain`
+// is null, so no Monero wallet can be added and no Monero route is offered.
+const LiveSendMonero = __MONERO_ENABLED__
+  ? lazy(() => import('./LiveSendMonero').then((m) => ({ default: m.LiveSendMonero })))
+  : null;
+const LiveReceiveMonero = __MONERO_ENABLED__
+  ? lazy(() => import('./LiveReceiveMonero').then((m) => ({ default: m.LiveReceiveMonero })))
+  : null;
+const LiveImportMonero = __MONERO_ENABLED__
+  ? lazy(() => import('./LiveImportMonero').then((m) => ({ default: m.LiveImportMonero })))
+  : null;
+
+/** The one loading frame every lazy Monero screen shows while its chunk
+ *  arrives (a few hundred ms on first use, instant afterwards). */
+function LazyFrame() {
+  return (
+    <div className="app-frame" data-testid="live-lazy-screen">
+      <div className="result-screen">
+        <span className="spinner lg" style={{ color: 'var(--accent)' }} />
+      </div>
+    </div>
+  );
+}
 
 // Discriminated subview. `receive`/`send` carry the asset they were opened from
 // (when launched from an asset-detail screen) so Back returns to that detail
@@ -33,7 +72,11 @@ type LiveSubView =
   // screen on one route, reached from the asset detail and (on a chain with
   // native staking) from the Home action row.
   | { name: 'staking'; from?: 'home' }
-  | { name: 'tx'; txid: string };
+  | { name: 'tx'; txid: string }
+  // "Import Monero wallet" (25 words plus a restore height), reached from
+  // Settings > Wallets on a ready wallet; the first-run entry lives in
+  // LiveOnboarding. Only offered when this build carries the engine.
+  | { name: 'xmr-import' };
 
 export function LiveApp() {
   const phase = useLiveStore((s) => s.phase);
@@ -261,27 +304,44 @@ export function LiveApp() {
     />
   );
 
+  // Family routing of Receive and Send (the Monero engine design notes §8):
+  // a third branch beside UTXO and EVM, decided by the active wallet's family
+  // and never by a chain name.
+  const activeFamilyNow = wallets.find((w) => w.id === activeWalletId)?.family ?? 'utxo';
+  const isMoneroActive = activeFamilyNow === 'monero';
+  const isZcashActive = activeFamilyNow === 'zcash';
+  const isTaoActive = activeFamilyNow === 'substrate';
+
   if (subView.name === 'receive') {
     const asset = subView.asset;
-    return wrap(
-      <LiveReceive
-        initialAsset={asset}
-        onBack={() => setSubView(asset ? { name: 'asset', asset } : { name: 'home' })}
-      />,
-    );
+    const onBack = () => setSubView(asset ? { name: 'asset', asset } : { name: 'home' });
+    if (isMoneroActive && LiveReceiveMonero) {
+      return wrap(
+        <Suspense fallback={<LazyFrame />}>
+          <LiveReceiveMonero onBack={onBack} />
+        </Suspense>,
+      );
+    }
+    if (isZcashActive) return wrap(<LiveReceiveZcash onBack={onBack} />);
+    if (isTaoActive) return wrap(<LiveReceiveTao onBack={onBack} />);
+    return wrap(<LiveReceive initialAsset={asset} onBack={onBack} />);
   }
 
   if (subView.name === 'send') {
     const asset = subView.asset;
-    const isEvmActive = wallets.find((w) => w.id === activeWalletId)?.family === 'evm';
-    const SendScreen = isEvmActive ? LiveSendEvm : LiveSend;
-    return wrap(
-      <SendScreen
-        asset={asset}
-        onBack={() => setSubView(asset ? { name: 'asset', asset } : { name: 'home' })}
-        onDone={() => setSubView({ name: 'home' })}
-      />,
-    );
+    const onBack = () => setSubView(asset ? { name: 'asset', asset } : { name: 'home' });
+    const onDone = () => setSubView({ name: 'home' });
+    if (isMoneroActive && LiveSendMonero) {
+      return wrap(
+        <Suspense fallback={<LazyFrame />}>
+          <LiveSendMonero onBack={onBack} onDone={onDone} />
+        </Suspense>,
+      );
+    }
+    if (isZcashActive) return wrap(<LiveSendZcash onBack={onBack} onDone={onDone} />);
+    if (isTaoActive) return wrap(<LiveSendTao onBack={onBack} onDone={onDone} />);
+    const SendScreen = activeFamilyNow === 'evm' ? LiveSendEvm : LiveSend;
+    return wrap(<SendScreen asset={asset} onBack={onBack} onDone={onDone} />);
   }
 
   if (subView.name === 'settings') {
@@ -289,7 +349,25 @@ export function LiveApp() {
       <LiveSettings
         onBack={() => setSubView({ name: 'home' })}
         onOpenAddressBook={() => setSubView({ name: 'addressbook' })}
+        onImportMonero={LiveImportMonero ? () => setSubView({ name: 'xmr-import' }) : undefined}
       />,
+    );
+  }
+
+  if (subView.name === 'xmr-import') {
+    if (!LiveImportMonero) return wrap(home);
+    return wrap(
+      <Suspense fallback={<LazyFrame />}>
+        <LiveImportMonero
+          onBack={() => setSubView({ name: 'settings' })}
+          // The service has already made the imported wallet active and
+          // unlocked; the store lands on it (address, list, first scan).
+          onImported={() => {
+            setSubView({ name: 'home' });
+            void useLiveStore.getState().openAddedMoneroWallet();
+          }}
+        />
+      </Suspense>,
     );
   }
 

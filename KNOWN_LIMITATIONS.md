@@ -1,6 +1,6 @@
 # Known limitations
 
-Current, honest limitations of the wallet (v1.4.2).
+Current, honest limitations of the wallet (v1.5.0).
 
 Satori GO is a non-custodial multi-chain wallet. Eight coin networks and four
 EVM networks ship in this version, and every one of them has had a funded send
@@ -345,12 +345,45 @@ confirmed by the owner on mainnet (item 7). Nothing below is marketing.
     The chain is Bitcoin's history under the Knots BLAKE2b proof of work, with
     little mining power behind it, one public Electrum server (Fulcrum, reached
     only through the gateway bridge: it has no browser-usable listener), one
-    thin price source (the NonKYC BTCB2/USDT market), and a ticker that only
-    that exchange uses so far. Every send
+    thin price source (the NonKYC market, still listed there as BTCB2/USDT).
+    The wallet shows the ticker XBT, which the exchanges have moved to; note
+    that some older exchanges use XBT for Bitcoin itself. Every send
     the wallet makes there is signed with SIGHASH_UNIFIED, so it is invalid on
     Bitcoin; but a Bitcoin spend of a pre-fork coin, from any wallet, also moves
     the BLAKE2b twin of that coin until the BLAKE2b side has been sent to
     yourself once.
+
+39. **Monero scans only while the wallet window is open, and received Monero
+    is spendable only after 10 confirmations.** (Funded sends both ways were
+    confirmed by the owner on 2026-10-02.) Monero locks every new output, the
+    change of your own send included, for 10 blocks, about 20 minutes; until
+    then Home shows the amount as "unlocking". Reading a Monero balance needs the view key, which
+    stays in the open wallet window, so there are no desktop notifications for
+    incoming Monero and a long-closed wallet catches up when it is opened. The
+    scan is bounded by the restore height: a wallet imported without its real
+    creation date, or a phrase used with Monero elsewhere before, scans from
+    that point and costs about 24 KB and a fraction of a second per block. The
+    Monero engine is a WebAssembly build of the official Monero code
+    (monero-ts), which needs 'wasm-unsafe-eval' in the extension's CSP and adds
+    about 3.6 MB to the package.
+
+40. **Zcash is transparent-only.** (Funded sends both ways were confirmed by
+    the owner on 2026-10-02.) The wallet derives one t1 address per phrase (plus fourteen watched
+    ones), so a balance on it is public, like Bitcoin. Shielded pools and
+    unified addresses are not supported: a u1 recipient without a transparent
+    part and a zs1 recipient are refused, and a coinbase (mining) output in the
+    watch set is shown but can never be spent from this wallet, which is the
+    protocol's rule. Reads and sends go through the Satori GO gateway to public
+    lightwalletd servers, which therefore see the wallet's addresses. There are
+    no desktop notifications for incoming Zcash.
+
+41. **Bittensor shows only the sends made from this wallet.** (Funded sends
+    were confirmed by the owner on 2026-10-02.) The balance is always read from the network,
+    but incoming transfers are not listed: v1 records local sends and links to
+    the full history on taostats.io. Staking, delegation and the Bittensor EVM
+    layer are out of scope. Sending is blocked with a notice if the network
+    changes its transaction format before the wallet is updated; balance and
+    receive keep working. There are no desktop notifications for incoming TAO.
 
 Real P2SH output support, taproot key ownership, inscription and BGC-20
 awareness, gap-limit address discovery, BIP39 passphrases at wallet creation,

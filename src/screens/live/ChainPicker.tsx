@@ -36,6 +36,12 @@ import {
 // component exactly as store-free as before while it learns to widen its value
 // type to cover an EVM chain.
 import { evmChainTarget, isEvmChainTarget, type EvmChainInfo, type EvmChainTarget } from '../../store/evmChains';
+// Same for moneroChains: plain data and one string helper, no store import.
+import { MONERO_TARGET, type MoneroChainInfo, type MoneroChainTarget } from '../../store/moneroChains';
+// Zcash and Bittensor: plain-data rows that exist in every build (no flag,
+// their design notes §13), so the switcher always lists them.
+import { ZCASH_CHAIN, ZCASH_TARGET, type ZcashChainTarget } from '../../store/zcashChain';
+import { TAO_CHAIN, TAO_TARGET, type TaoChainTarget } from '../../store/taoChain';
 
 /** One UTXO chain per wallet entry (scope decision for this phase: no "both"
  *  option). 'mainnet' is the legacy LiveNetworkId for Evrmore mainnet. */
@@ -55,8 +61,21 @@ export type UtxoChainChoice = Extract<
 /** A pickable chain: any UTXO chain above, OR the `evm:<key>` target of an EVM
  *  chain this build carries. An EVM choice is ONE account that spans every EVM
  *  chain (see the EVM engine design notes §1), so it is a single extra row here,
- *  not one row per EVM chain the way UTXO chains are. */
+ *  not one row per EVM chain the way UTXO chains are. Monero is deliberately
+ *  NOT pickable: "Add Monero" is a sibling action on an existing seed wallet,
+ *  never a first-run choice (the Monero engine design notes §10). */
 export type ChainChoice = UtxoChainChoice | EvmChainTarget;
+
+/** Every chain id the header SWITCHER can list: the pickable ones plus the
+ *  Monero, Zcash and Bittensor targets, which are switched to or added there
+ *  (sibling actions on a seed wallet) but never created from scratch. */
+export type SwitcherChainId = ChainChoice | MoneroChainTarget | ZcashChainTarget | TaoChainTarget;
+
+/** The engine-family targets the switcher lists that are NOT UTXO ids: a
+ *  caller must never feed one of these to networkFor(). */
+export function isEngineChainTarget(id: string): id is MoneroChainTarget | ZcashChainTarget | TaoChainTarget {
+  return id === MONERO_TARGET || id === ZCASH_TARGET || id === TAO_TARGET;
+}
 
 // The picker VALUE is the LiveNetworkId, which is not always the params' chainId:
 // Evrmore's is the legacy bare 'mainnet' (kept so existing installs keep working),
@@ -119,6 +138,24 @@ export function chainOptionsFor(evmChains?: readonly EvmChainInfo[]): SegmentedO
     icon: <TokenIcon assetId={`evm:${c.key}`} size={14} />,
   }));
   return [...CHAIN_OPTIONS, ...evmOptions];
+}
+
+/** The switcher's row list: every pickable chain, plus the Monero row when
+ *  `moneroChain` is given (the switcher passes `s.monero.chain`, null in a
+ *  build without --monero), then the Zcash and Bittensor rows (every build),
+ *  appended last so the owner's order above stays. */
+export function switcherChainOptionsFor(
+  evmChains?: readonly EvmChainInfo[],
+  moneroChain?: MoneroChainInfo | null,
+): SegmentedOption<SwitcherChainId>[] {
+  const moneroOptions: SegmentedOption<SwitcherChainId>[] = moneroChain
+    ? [{ value: MONERO_TARGET, label: moneroChain.displayName, icon: <TokenIcon assetId={moneroChain.nativeTicker} size={14} /> }]
+    : [];
+  const engineOptions: SegmentedOption<SwitcherChainId>[] = [
+    { value: ZCASH_TARGET, label: ZCASH_CHAIN.displayName, icon: <TokenIcon assetId={ZCASH_CHAIN.nativeTicker} size={14} /> },
+    { value: TAO_TARGET, label: TAO_CHAIN.displayName, icon: <TokenIcon assetId={TAO_CHAIN.nativeTicker} size={14} /> },
+  ];
+  return [...chainOptionsFor(evmChains), ...moneroOptions, ...engineOptions];
 }
 
 /** Canonical chainId for a UTXO picker value. Evrmore's value is the legacy

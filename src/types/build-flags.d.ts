@@ -5,6 +5,11 @@
 /** True only for `scripts/build.mjs --evm` builds. Default: false. */
 declare const __EVM_ENABLED__: boolean;
 
+/** True only for `scripts/build.mjs --monero` builds (the Monero engine design
+ *  notes §13). Default: false, so a build made without the flag and every unit
+ *  test see a wallet with no Monero engine in it. */
+declare const __MONERO_ENABLED__: boolean;
+
 /** Alchemy API key for DEV EVM builds (empty in tests, in store builds, and
  *  when platforms/evm-secrets.local.json is absent). See vite.config.ts. */
 declare const __ALCHEMY_API_KEY__: string;

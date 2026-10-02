@@ -149,13 +149,10 @@ describe('NEOXA_MAINNET parameters (NeoxaChain/Neoxa src/chainparams.cpp)', () =
     // this chain is waiting on is its own server, not network maturity, so the
     // caution NOTICE would be the wrong signal, and it is not raised.
     expect(isYoungChain(net)).toBe(false);
-    // It IS marked "New" in the chain list, because it is new HERE (owner,
-    // 2026-08-26). That is the whole reason the two flags are separate: the
-    // label is about this wallet, the warning is a claim about the network,
-    // and reusing one for the other would have told users something false
-    // about a chain that has been running for years.
-    expect(isNewChain(net)).toBe(true);
-    expect(net.recentlyAdded).toBe(true);
+    // No "New" chip either since 1.5.0: the chip marks only the chains added
+    // in the current release (owner, 2026-09-29), and Neoxa came in 1.4.0.
+    expect(isNewChain(net)).toBe(false);
+    expect(net.recentlyAdded).toBeUndefined();
   });
 
   it("carries the STANDARD BIP32 bytes — Bitcoin's, not BTGS's and not Dogecoin's", () => {

@@ -1,6 +1,13 @@
 // Address book — a persisted list of saved recipients ({label, address}). Reachable
 // from Live Settings. Addresses are validated with the chain layer before saving.
 // The Send screen reuses the same store list via its inline contacts picker.
+//
+// CHAIN-SCOPED, list and save alike (the owner's rule for every recipient
+// picker): the list shows only the contacts valid on the ACTIVE chain, through
+// the same predicate that gates saving (contactsForChain / isValidContactAddress).
+// An Evrmore wallet listing Monero contacts it could never send to was the
+// 1.4.3 audit's V09/V10 finding. A filter, not a delete: switching chains
+// brings that chain's contacts back.
 
 import { useState } from 'react';
 import { ChevronLeft, BookUser, Trash2, Plus, Pencil, Check, X } from 'lucide-react';
@@ -9,7 +16,7 @@ import { TextField } from '../../components/TextField';
 import { CopyButton } from '../../components/CopyButton';
 import { SyncStatusPill } from '../../components/SyncStatusPill';
 import { EmptyState } from '../../components/EmptyState';
-import { useLiveStore, chainDisplayName } from '../../store/liveStore';
+import { useLiveStore, chainDisplayName, activeChainTarget, contactsForChain } from '../../store/liveStore';
 import { LiveNav } from './LiveNav';
 
 interface LiveAddressBookProps {
@@ -25,6 +32,10 @@ function short8(address: string): string {
 
 export function LiveAddressBook({ onBack, onPick }: LiveAddressBookProps) {
   const addressBook = useLiveStore((s) => s.addressBook);
+  // Selected through the store so a wallet or chain switch (which changes
+  // store state) re-renders this list for the chain now active.
+  const chainId = useLiveStore(() => activeChainTarget());
+  const chainContacts = contactsForChain(addressBook, chainId);
   const addContact = useLiveStore((s) => s.addContact);
   const renameContact = useLiveStore((s) => s.renameContact);
   const removeContact = useLiveStore((s) => s.removeContact);
@@ -120,15 +131,19 @@ export function LiveAddressBook({ onBack, onPick }: LiveAddressBookProps) {
 
         {/* Contact list */}
         <div className="section-label">Saved contacts</div>
-        {addressBook.length === 0 ? (
+        {chainContacts.length === 0 ? (
           <EmptyState
             icon={<BookUser size={20} />}
-            title="No contacts yet"
-            description="Add a recipient above to save it here."
+            title={addressBook.length === 0 ? 'No contacts yet' : `No ${chainDisplayName()} contacts yet`}
+            description={
+              addressBook.length === 0
+                ? 'Add a recipient above to save it here.'
+                : 'Contacts saved on other chains stay in the book and show when that chain is active.'
+            }
           />
         ) : (
-          <div className="stack">
-            {addressBook.map((c) => {
+          <div className="stack" data-testid="live-address-book-list">
+            {chainContacts.map((c) => {
               const isEditing = editingAddress === c.address;
               if (isEditing) {
                 return (

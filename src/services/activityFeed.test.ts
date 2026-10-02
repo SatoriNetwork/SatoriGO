@@ -184,3 +184,20 @@ describe('paginate', () => {
     expect(paginate([3, 1, 2], 1).items).toEqual([3, 1, 2]);
   });
 });
+
+describe('mergeActivity: React keys stay unique', () => {
+  it('a second row with the SAME txid gets a distinct id (the first keeps the plain txid)', () => {
+    const items = mergeActivity(
+      [
+        tx({ txid: 'dup', timestamp: 20, direction: 'out' }),
+        tx({ txid: 'dup', timestamp: 20, direction: 'in' }),
+        tx({ txid: 'solo', timestamp: 10 }),
+      ],
+      [],
+    );
+    const ids = items.map((i) => i.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids).toContain('dup');
+    expect(ids).toContain('solo');
+  });
+});

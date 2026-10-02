@@ -192,6 +192,11 @@ export async function fetchSatorinetQuote(): Promise<PriceQuote | undefined> {
  *  Tickers may be missing (a source was down); an absent ticker simply carries
  *  no price this round and the store keeps whatever it had. Unknown fields and
  *  unknown TICKERS are both fine: extra tickers are kept as published. */
+/** New ticker -> the key the gateway may still publish it under. Bitcoin
+ *  BLAKE2b became XBT on 2026-10-02 (owner: the exchanges moved to it); older
+ *  wallets keep asking for BTCB2, so the gateway serves both for a while. */
+export const RENAMED_TICKERS: Readonly<Record<string, string>> = { XBT: 'BTCB2' };
+
 export function parseGatewayPrices(json: unknown, fetchedAt: number): AssetPrices {
   const body = json && typeof json === 'object' ? (json as { prices?: unknown }) : undefined;
   const raw = body?.prices;
@@ -214,6 +219,10 @@ export function parseGatewayPrices(json: unknown, fetchedAt: number): AssetPrice
     if (typeof row.source === 'string' && row.source) quote.source = row.source;
     // A ticker with nothing usable in it is not worth carrying.
     if (Object.keys(quote).length > 0) quotes[ticker.trim().toUpperCase()] = quote;
+  }
+  // A renamed ticker reads its old key until the gateway publishes the new one.
+  for (const [now, before] of Object.entries(RENAMED_TICKERS)) {
+    if (!quotes[now] && quotes[before]) quotes[now] = quotes[before];
   }
   return fromQuotes(quotes, fetchedAt);
 }

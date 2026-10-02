@@ -18,7 +18,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { UntrustedTokenBanner } from '../../components/UntrustedTokenBadge';
 import { RecipientRiskBanners } from '../../components/RecipientRiskBanners';
-import { ChevronLeft, AlertTriangle, CheckCircle, Wallet } from 'lucide-react';
+import { ChevronLeft, AlertTriangle, CheckCircle } from 'lucide-react';
 import { Button } from '../../components/Button';
 import { TextField, PasswordField } from '../../components/TextField';
 import { useLiveStore, activeEvmChain, walletsOnChain } from '../../store/liveStore';
@@ -27,6 +27,7 @@ import { formatAmount } from '../../services/chain/amounts';
 import { displaySymbol } from '../../services/displaySymbol';
 import { shortAccountAddress, filterAccountsForChain } from './walletGroups';
 import { LiveNav } from './LiveNav';
+import { ContactsPicker, MyWalletsPicker, SaveContactPanel } from './RecipientPickers';
 
 interface LiveSendEvmProps {
   onBack(): void;
@@ -40,9 +41,6 @@ interface LiveSendEvmProps {
  *  so this screen names no import from the flag-guarded evm/ directory; the
  *  store's own actions accept these exact strings. */
 type FeeLevel = 'slow' | 'normal' | 'fast';
-/** Up to this many own wallets are offered as chips; more become a dropdown. */
-const MY_WALLETS_CHIPS_MAX = 4;
-
 const FEE_LEVELS: readonly FeeLevel[] = ['slow', 'normal', 'fast'];
 const FEE_LEVEL_LABEL: Record<FeeLevel, string> = { slow: 'Slow', normal: 'Normal', fast: 'Fast' };
 
@@ -74,6 +72,7 @@ export function LiveSendEvm({ onBack, onDone, asset }: LiveSendEvmProps) {
   const wallets = useLiveStore((s) => s.wallets);
   const activeWalletId = useLiveStore((s) => s.activeWalletId);
   const addressBook = useLiveStore((s) => s.addressBook);
+  const addContact = useLiveStore((s) => s.addContact);
   const evmAccountsOnChain = useLiveStore((s) => s.evmAccountsOnChain);
   const txs = useLiveStore((s) => s.txs);
   const myAddress = useLiveStore((s) => s.address);
@@ -293,186 +292,193 @@ export function LiveSendEvm({ onBack, onDone, asset }: LiveSendEvmProps) {
           <h2>Review send</h2>
           <span />
         </div>
-        <div className="app-content" data-testid="live-send-review">
-          {plan.asset.kind === 'token' && <UntrustedTokenBanner symbol={plan.asset.symbol} />}
-          {/* The same recipient warnings the form showed, repeated here: this
-              is the last screen before the transaction is real. */}
-          {reviewRisk && reviewRisk.to.toLowerCase() === plan.to.toLowerCase() && (
-            <RecipientRiskBanners
-              firstTime={reviewRisk.firstTime}
-              lookalikeOf={reviewRisk.lookalikeOf ? shortAccountAddress(reviewRisk.lookalikeOf) : null}
-              isContract={reviewRisk.isContract}
-            />
-          )}
-          <div className="banner warning" style={{ marginBottom: 14 }}>
-            <AlertTriangle size={14} />
-            This broadcasts a real {amountUnit} transaction on {chain.displayName}. Sends cannot be undone.
-          </div>
+        {/* Review split (same send-pinned pair as the form): the summary
+            scrolls in .send-scroll while the whole Confirm & Send section
+            (arm tick, password, error, Back + Confirm) stays pinned below it,
+            so the primary button is visible without scrolling on 400x600. */}
+        <div className="app-content send-pinned" data-testid="live-send-review">
+          <div className="send-scroll">
+            {plan.asset.kind === 'token' && <UntrustedTokenBanner symbol={plan.asset.symbol} />}
+            {/* The same recipient warnings the form showed, repeated here: this
+                is the last screen before the transaction is real. */}
+            {reviewRisk && reviewRisk.to.toLowerCase() === plan.to.toLowerCase() && (
+              <RecipientRiskBanners
+                firstTime={reviewRisk.firstTime}
+                lookalikeOf={reviewRisk.lookalikeOf ? shortAccountAddress(reviewRisk.lookalikeOf) : null}
+                isContract={reviewRisk.isContract}
+              />
+            )}
+            <div className="banner warning" style={{ marginBottom: 14 }}>
+              <AlertTriangle size={14} />
+              This broadcasts a real {amountUnit} transaction on {chain.displayName}. Sends cannot be undone.
+            </div>
 
-          <div className="card solid" style={{ marginBottom: 14 }}>
-            <div className="summary-table">
-              <div className="sum-row">
-                <span className="sum-key">To</span>
-                <span className="sum-val mono" style={{ fontSize: 11, wordBreak: 'break-all' }}>{plan.to}</span>
-              </div>
-              <div className="sum-row">
-                <span className="sum-key">Amount</span>
-                <span className="sum-val">
-                  {formatAmount(plan.amountBase, plan.asset.decimals)} {amountUnit}
-                </span>
-              </div>
-              <div className="sum-row">
-                <span className="sum-key">Network</span>
-                <span className="sum-val">{chain.displayName}</span>
-              </div>
-              <div className="sum-row" data-testid="live-review-fee">
-                <span className="sum-key">Estimated fee</span>
-                <span className="sum-val">
-                  {formatAmount(quote.estimatedTotal, chain.nativeDecimals)} {chain.nativeTicker}
-                </span>
-              </div>
-              <div className="sum-row">
-                <span className="sum-key">Maximum fee</span>
-                <span className="sum-val">
-                  {formatAmount(quote.maxTotal, chain.nativeDecimals)} {chain.nativeTicker}
-                </span>
-              </div>
-              {chain.l1DataFee && (
-                <div className="sum-row" data-testid="live-review-l1-fee">
-                  <span className="sum-key">Includes L1 data fee</span>
+            <div className="card solid" style={{ marginBottom: 14 }}>
+              <div className="summary-table">
+                <div className="sum-row">
+                  <span className="sum-key">To</span>
+                  <span className="sum-val mono" style={{ fontSize: 11, wordBreak: 'break-all' }}>{plan.to}</span>
+                </div>
+                <div className="sum-row">
+                  <span className="sum-key">Amount</span>
                   <span className="sum-val">
-                    {formatAmount(quote.l1DataFee, chain.nativeDecimals)} {chain.nativeTicker}
+                    {formatAmount(plan.amountBase, plan.asset.decimals)} {amountUnit}
                   </span>
                 </div>
-              )}
-              <div className="sum-row">
-                <span className="sum-key text-dim" style={{ fontSize: 11 }}>{perGasLabel}</span>
-                <span className="sum-val text-dim" style={{ fontSize: 11 }}>{formatAmount(perGas, 9)} gwei</span>
+                <div className="sum-row">
+                  <span className="sum-key">Network</span>
+                  <span className="sum-val">{chain.displayName}</span>
+                </div>
+                <div className="sum-row" data-testid="live-review-fee">
+                  <span className="sum-key">Estimated fee</span>
+                  <span className="sum-val">
+                    {formatAmount(quote.estimatedTotal, chain.nativeDecimals)} {chain.nativeTicker}
+                  </span>
+                </div>
+                <div className="sum-row">
+                  <span className="sum-key">Maximum fee</span>
+                  <span className="sum-val">
+                    {formatAmount(quote.maxTotal, chain.nativeDecimals)} {chain.nativeTicker}
+                  </span>
+                </div>
+                {chain.l1DataFee && (
+                  <div className="sum-row" data-testid="live-review-l1-fee">
+                    <span className="sum-key">Includes L1 data fee</span>
+                    <span className="sum-val">
+                      {formatAmount(quote.l1DataFee, chain.nativeDecimals)} {chain.nativeTicker}
+                    </span>
+                  </div>
+                )}
+                <div className="sum-row">
+                  <span className="sum-key text-dim" style={{ fontSize: 11 }}>{perGasLabel}</span>
+                  <span className="sum-val text-dim" style={{ fontSize: 11 }}>{formatAmount(perGas, 9)} gwei</span>
+                </div>
+                <div className="sum-row">
+                  <span className="sum-key text-dim" style={{ fontSize: 11 }}>Gas limit</span>
+                  <span className="sum-val text-dim" style={{ fontSize: 11 }}>{quote.gasLimit.toString()}</span>
+                </div>
               </div>
-              <div className="sum-row">
-                <span className="sum-key text-dim" style={{ fontSize: 11 }}>Gas limit</span>
-                <span className="sum-val text-dim" style={{ fontSize: 11 }}>{quote.gasLimit.toString()}</span>
+            </div>
+
+            <div className="section-label">Speed</div>
+            <div style={{ display: 'flex', gap: 6, marginBottom: 14 }}>
+              {FEE_LEVELS.map((lvl) => {
+                const isPicked = plan.level === lvl;
+                return (
+                  <button
+                    key={lvl}
+                    type="button"
+                    className={isPicked ? 'chip' : 'chip neutral'}
+                    data-testid={`live-fee-option-${lvl}`}
+                    aria-pressed={isPicked}
+                    onClick={() => { void selectEvmFeeLevel(lvl); }}
+                    style={{ flex: 1, justifyContent: 'center', cursor: 'pointer' }}
+                  >
+                    {FEE_LEVEL_LABEL[lvl]}
+                  </button>
+                );
+              })}
+            </div>
+
+            {plan.shortfall && (
+              <div className="banner danger" style={{ marginBottom: 14 }} data-testid="live-send-shortfall">
+                <AlertTriangle size={14} />
+                {plan.shortfall}
               </div>
-            </div>
-          </div>
-
-          <div className="section-label">Speed</div>
-          <div style={{ display: 'flex', gap: 6, marginBottom: 14 }}>
-            {FEE_LEVELS.map((lvl) => {
-              const isPicked = plan.level === lvl;
-              return (
-                <button
-                  key={lvl}
-                  type="button"
-                  className={isPicked ? 'chip' : 'chip neutral'}
-                  data-testid={`live-fee-option-${lvl}`}
-                  aria-pressed={isPicked}
-                  onClick={() => { void selectEvmFeeLevel(lvl); }}
-                  style={{ flex: 1, justifyContent: 'center', cursor: 'pointer' }}
-                >
-                  {FEE_LEVEL_LABEL[lvl]}
-                </button>
-              );
-            })}
-          </div>
-
-          {plan.shortfall && (
-            <div className="banner danger" style={{ marginBottom: 14 }} data-testid="live-send-shortfall">
-              <AlertTriangle size={14} />
-              {plan.shortfall}
-            </div>
-          )}
-          {plan.capRefusal && (
-            <div className="banner danger" style={{ marginBottom: 14 }} data-testid="live-send-cap-refusal">
-              <AlertTriangle size={14} />
-              {plan.capRefusal}
-            </div>
-          )}
-
-          <div className="section-label">Confirm &amp; Send</div>
-          <div className="card" style={{ marginBottom: 14 }}>
-            <div
-              role="checkbox"
-              aria-checked={armed}
-              tabIndex={0}
-              data-testid="live-arm-checkbox"
-              onClick={() => handleArmToggle(!armed)}
-              onKeyDown={(e) => {
-                if (e.key === ' ' || e.key === 'Enter') {
-                  e.preventDefault();
-                  handleArmToggle(!armed);
-                }
-              }}
-              style={{ display: 'flex', gap: 10, alignItems: 'flex-start', cursor: 'pointer' }}
-            >
+            )}
+            {plan.capRefusal && (
+              <div className="banner danger" style={{ marginBottom: 14 }} data-testid="live-send-cap-refusal">
+                <AlertTriangle size={14} />
+                {plan.capRefusal}
+              </div>
+            )}
+          </div>{/* /send-scroll */}
+          <div className="send-cta">
+            <div className="section-label">Confirm &amp; Send</div>
+            <div className="card" style={{ marginBottom: 14 }}>
               <div
-                style={{
-                  width: 18,
-                  height: 18,
-                  borderRadius: 5,
-                  border: `2px solid ${armed ? 'var(--danger)' : 'var(--border-strong)'}`,
-                  background: armed ? 'var(--danger-bg)' : 'transparent',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  flexShrink: 0,
-                  marginTop: 1,
-                  transition: 'all 0.15s',
+                role="checkbox"
+                aria-checked={armed}
+                tabIndex={0}
+                data-testid="live-arm-checkbox"
+                onClick={() => handleArmToggle(!armed)}
+                onKeyDown={(e) => {
+                  if (e.key === ' ' || e.key === 'Enter') {
+                    e.preventDefault();
+                    handleArmToggle(!armed);
+                  }
                 }}
+                style={{ display: 'flex', gap: 10, alignItems: 'flex-start', cursor: 'pointer' }}
               >
-                {armed && <span style={{ color: 'var(--danger)', fontSize: 11, fontWeight: 700 }}>✓</span>}
-              </div>
-              <span style={{ fontSize: 12, lineHeight: 1.5 }}>
-                I understand this sends real {amountUnit} and cannot be undone.
-              </span>
-            </div>
-          </div>
-
-          {requirePassword && (
-            <div style={{ marginBottom: 14 }}>
-              <PasswordField
-                label="Wallet password"
-                showLabel="Show password"
-                hideLabel="Hide password"
-                value={password}
-                onChange={(e) => {
-                  setPassword(e.target.value);
-                  setPasswordError('');
-                }}
-                placeholder="Enter your password to confirm"
-                testId="live-send-password"
-              />
-              {passwordError && (
-                <span
-                  role="alert"
-                  data-testid="live-send-password-error"
-                  style={{ fontSize: 11.5, color: 'var(--danger)', display: 'block', marginTop: 4 }}
+                <div
+                  style={{
+                    width: 18,
+                    height: 18,
+                    borderRadius: 5,
+                    border: `2px solid ${armed ? 'var(--danger)' : 'var(--border-strong)'}`,
+                    background: armed ? 'var(--danger-bg)' : 'transparent',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    flexShrink: 0,
+                    marginTop: 1,
+                    transition: 'all 0.15s',
+                  }}
                 >
-                  {passwordError}
+                  {armed && <span style={{ color: 'var(--danger)', fontSize: 11, fontWeight: 700 }}>✓</span>}
+                </div>
+                <span style={{ fontSize: 12, lineHeight: 1.5 }}>
+                  I understand this sends real {amountUnit} and cannot be undone.
                 </span>
-              )}
+              </div>
             </div>
-          )}
 
-          {confirmError && (
-            <div className="banner danger" style={{ marginBottom: 14 }} data-testid="live-send-error">
-              {confirmError}
+            {requirePassword && (
+              <div style={{ marginBottom: 14 }}>
+                <PasswordField
+                  label="Wallet password"
+                  showLabel="Show password"
+                  hideLabel="Hide password"
+                  value={password}
+                  onChange={(e) => {
+                    setPassword(e.target.value);
+                    setPasswordError('');
+                  }}
+                  placeholder="Enter your password to confirm"
+                  testId="live-send-password"
+                />
+                {passwordError && (
+                  <span
+                    role="alert"
+                    data-testid="live-send-password-error"
+                    style={{ fontSize: 11.5, color: 'var(--danger)', display: 'block', marginTop: 4 }}
+                  >
+                    {passwordError}
+                  </span>
+                )}
+              </div>
+            )}
+
+            {confirmError && (
+              <div className="banner danger" style={{ marginBottom: 14 }} data-testid="live-send-error">
+                {confirmError}
+              </div>
+            )}
+
+            <div style={{ display: 'flex', gap: 9 }}>
+              <Button variant="secondary" onClick={handleBackFromReview} data-testid="live-send-review-back">Back</Button>
+              <Button
+                block
+                variant="danger"
+                disabled={sendDisabled}
+                loading={confirming}
+                onClick={() => { void handleConfirm(); }}
+                data-testid="live-broadcast"
+              >
+                Confirm &amp; Send
+              </Button>
             </div>
-          )}
-
-          <div style={{ display: 'flex', gap: 9 }}>
-            <Button variant="secondary" onClick={handleBackFromReview} data-testid="live-send-review-back">Back</Button>
-            <Button
-              block
-              variant="danger"
-              disabled={sendDisabled}
-              loading={confirming}
-              onClick={() => { void handleConfirm(); }}
-              data-testid="live-broadcast"
-            >
-              Confirm &amp; Send
-            </Button>
-          </div>
+          </div>{/* /send-cta */}
         </div>
       </div>
     );
@@ -531,6 +537,12 @@ export function LiveSendEvm({ onBack, onDone, asset }: LiveSendEvmProps) {
     (w) => w.id !== activeWalletId && w.address,
   );
   const contacts = addressBook.filter((c) => EVM_ADDRESS_RE.test(c.address));
+  // "Save to address book" for a typed recipient: not for a contact already
+  // saved, and not for one of the user's own accounts (already a chip above).
+  const canSaveContact =
+    EVM_ADDRESS_RE.test(trimmedTo) &&
+    !addressBook.some((c) => c.address.toLowerCase() === trimmedTo.toLowerCase()) &&
+    !myWallets.some((w) => w.address.toLowerCase() === trimmedTo.toLowerCase());
 
   const fillPct = (pct: number) => {
     const value = (availableBase * BigInt(pct)) / 100n;
@@ -599,70 +611,25 @@ export function LiveSendEvm({ onBack, onDone, asset }: LiveSendEvmProps) {
               testId="live-send-to"
             />
 
-            {/* Past a handful of accounts the chip grid would eat the screen (a
-                seed can carry 20 accounts): a dropdown then, chips for 1 to 4. */}
-            {myWallets.length > MY_WALLETS_CHIPS_MAX && (
-              <div data-testid="live-send-my-wallets" style={{ margin: '10px 0 12px' }}>
-                <select
-                  data-testid="live-send-my-wallets-select"
-                  className="live-picker"
-                  value={myWallets.find((w) => w.address.toLowerCase() === to.trim().toLowerCase())?.address ?? ''}
-                  onChange={(e) => { if (e.target.value) setTo(e.target.value); }}
-                  aria-label="Send to one of my accounts"
-                  style={{ width: '100%' }}
-                >
-                  <option value="">Send to one of my accounts ({myWallets.length})…</option>
-                  {myWallets.map((w) => (
-                    <option key={w.id} value={w.address}>
-                      {w.name} · {w.address.slice(0, 6)}…{w.address.slice(-4)}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            )}
-            {myWallets.length > 0 && myWallets.length <= MY_WALLETS_CHIPS_MAX && (
-              <div data-testid="live-send-my-wallets" style={{ margin: '10px 0 12px' }}>
-                <div className="section-label" style={{ marginTop: 0, marginBottom: 6 }}>My wallets</div>
-                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                  {myWallets.map((w, i) => (
-                    <button
-                      key={w.id}
-                      type="button"
-                      className="chip"
-                      onClick={() => setTo(w.address)}
-                      aria-label={`Send to my wallet ${w.name}`}
-                      title={`${w.name}: ${w.address}`}
-                      data-testid={`live-send-wallet-${i}`}
-                      style={{ cursor: 'pointer' }}
-                    >
-                      <Wallet size={11} style={{ flexShrink: 0 }} />
-                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{w.name}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {contacts.length > 0 && (
-              <div style={{ display: 'flex', gap: 8, margin: '2px 0 12px', flexWrap: 'wrap' }}>
-                <select
-                  data-testid="live-send-contacts"
-                  className="live-picker"
-                  value=""
-                  onChange={(e) => { if (e.target.value) setTo(e.target.value); }}
-                  aria-label="From address book"
-                  style={{ flex: 1, minWidth: 128 }}
-                >
-                  <option value="">From address book…</option>
-                  {contacts.map((c) => (
-                    <option key={c.address} value={c.address}>
-                      {c.label} · {c.address.slice(0, 10)}…
-                    </option>
-                  ))}
-                </select>
-              </div>
-            )}
-
+            {/* Quick-pick your OWN accounts, saved contacts and "Save to address
+                book": the same three components every Send screen shares
+                (RecipientPickers.tsx). Both lists are EVM-scoped above. */}
+            <MyWalletsPicker
+              wallets={myWallets}
+              current={trimmedTo}
+              onPick={setTo}
+              testIdPrefix="live-send"
+              noun="accounts"
+              shortLen={6}
+              caseInsensitive
+            />
+            <ContactsPicker contacts={contacts} onPick={setTo} testIdPrefix="live-send" shortLen={10} />
+            <SaveContactPanel
+              canSave={canSaveContact}
+              recipient={trimmedTo}
+              onSave={(label) => addContact(label, trimmedTo)}
+              testIdPrefix="live-send"
+            />
             <TextField
               label={`Amount (${shownSymbol})`}
               placeholder="0.00"

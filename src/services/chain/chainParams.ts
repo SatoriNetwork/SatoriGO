@@ -425,7 +425,7 @@
 //      chain from validating its own addresses.
 
 /** Ticker of a chain's native coin. Widen this (and networkFor) to add a chain. */
-export type NativeTicker = 'EVR' | 'RVN' | 'BTGS' | 'LTC' | 'WJK' | 'BTC' | 'DOGE' | 'NEOX' | 'BTCB2';
+export type NativeTicker = 'EVR' | 'RVN' | 'BTGS' | 'LTC' | 'WJK' | 'BTC' | 'DOGE' | 'NEOX' | 'XBT';
 
 /** Canonical identity of a supported chain+network. */
 export type ChainId =
@@ -588,7 +588,8 @@ export interface EvrmoreNetwork {
    * get a "New" label would print a warning about someone else's project that
    * is simply untrue.
    *
-   * Both flags show the "New" chip in the chain list. Only `young` warns.
+   * Only this flag shows the "New" chip in the chain list, and only for the
+   * chains of the current release (clear it at the next one). Only `young` warns.
    */
   recentlyAdded?: boolean;
 }
@@ -599,10 +600,12 @@ export function isYoungChain(net: EvrmoreNetwork): boolean {
   return net.young === true;
 }
 
-/** Whether the chain list marks this chain "New": either it is new here, or its
- *  network is young (which is also worth flagging at the moment of choosing). */
+/** Whether the chain list marks this chain "New": only when it was added to
+ *  this wallet in the current release (owner, 2026-09-29: the chip belongs to
+ *  the newest chains only). `young` no longer shows it; it keeps the caution
+ *  notice on Home. */
 export function isNewChain(net: EvrmoreNetwork): boolean {
-  return net.recentlyAdded === true || net.young === true;
+  return net.recentlyAdded === true;
 }
 
 /** Alias for the generalised (multi-chain) network type. The `EvrmoreNetwork`
@@ -847,12 +850,13 @@ export const BITCOIN_MAINNET: EvrmoreNetwork = {
 //     SIGHASH_ALL).
 //   - NO ASSET PROTOCOL, no public wss:// server (Fulcrum listens on TCP/SSL
 //     only), so the pool is the gateway bridge alone (see network.ts).
-//   - Ticker BTCB2, confirmed by the owner 2026-09-07 with the NonKYC market
+//   - Ticker XBT since 2026-10-02 (owner: the exchanges now use it); it was
+//     BTCB2 from 2026-09-07, confirmed then with the NonKYC market
 //     BTCB2/USDT (https://nonkyc.io/market/BTCB2_USDT), which is also the price
 //     source behind the gateway. The project itself calls the coin "Bitcoin".
 //     The ticker is a display/price key only: nothing persisted uses it.
 //   - THE NETWORK IS YOUNG (little hashrate, few miners): `young` keeps the
-//     caution notice on, and `recentlyAdded` marks it New in the chain list.
+//     caution notice on. (No "New" chip since 1.5.0: that is for the newest chains only.)
 export const BITCOIN_BLAKE2B_MAINNET: EvrmoreNetwork = {
   id: 'mainnet',
   chainId: 'bitcoinblake2b-mainnet',
@@ -866,12 +870,11 @@ export const BITCOIN_BLAKE2B_MAINNET: EvrmoreNetwork = {
   bech32Hrp: 'bc',
   addressFormat: 'p2wpkh',
   messageMagic: 'Bitcoin Signed Message:\n', // message signing stays legacy (Knots)
-  ticker: 'BTCB2',
+  ticker: 'XBT',
   decimals: 8,
   displayName: 'Bitcoin BLAKE2b',
   taprootActive: true,
   sighash: 'unified',
-  recentlyAdded: true,
   young: true,
   homepage: 'https://bitcoin-blake2b.org', // verified 2026-09-07 (the fork's own site)
 };
@@ -956,7 +959,6 @@ export const NEOXA_MAINNET: EvrmoreNetwork = {
   // caution notice about a chain that can stop producing blocks would be a
   // false statement about it. What Neoxa is waiting on is its own server, which
   // is a fact about this wallet and is said where it belongs.
-  recentlyAdded: true,
   // NOT young: mainnet since 2022, tip past 2.2M blocks at ~60 s spacing, a live
   // smartnode network and an active GPU mining pool set. The thing this chain is
   // waiting on is its own server, not network maturity, so the caution marker
@@ -1245,7 +1247,7 @@ export const CHAIN_FEE_POLICIES: Record<ChainId, ChainFeePolicy> = {
     floorSatPerByte: 1n,
     defaultSatPerByte: 2n, // above the measured 1.01
     ceilingSatPerByte: 500n,
-    maxTxFeeSats: 2_000_000n, // 0.02 BTCB2
+    maxTxFeeSats: 2_000_000n, // 0.02 XBT
   },
   // Dogecoin: THE ONLY chain whose server estimates come back BELOW the network's
   // own fee floor, so the floor here comes from the CHAIN PARAMS, never the server.

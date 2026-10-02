@@ -8,6 +8,10 @@ export default defineConfig({
   // EVM modules' own tests import them directly and are unaffected.
   define: {
     __EVM_ENABLED__: JSON.stringify(process.env.EVM_ENABLED === '1'),
+    // Same rule for the Monero flag: OFF unless MONERO_ENABLED=1, so a test
+    // that reaches loadMoneroModules() sees a wallet without the engine. The
+    // monero/ modules' own tests import them directly and are unaffected.
+    __MONERO_ENABLED__: JSON.stringify(process.env.MONERO_ENABLED === '1'),
     // No provider key in tests: the registry's public endpoints are what the
     // fakes answer for; live checks that need a key read it from the env.
     __ALCHEMY_API_KEY__: JSON.stringify(process.env.ALCHEMY_API_KEY ?? ''),

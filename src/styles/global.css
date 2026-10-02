@@ -65,6 +65,7 @@ h1, h2, h3, h4 { font-weight: 650; }
   --text: #ffffff;
   --text-dim: #a0a0a0;
   --text-faint: #888888;
+  --link: #60a5fa;
   --success: #22c55e;
   --success-bg: rgba(34, 197, 94, 0.15);
   --danger: #ef4444;
@@ -90,6 +91,7 @@ h1, h2, h3, h4 { font-weight: 650; }
   --text: #1a1a1a;
   --text-dim: #555555;
   --text-faint: #666666;
+  --link: #1d4ed8;
   --success: #16a34a;
   --success-bg: rgba(40, 167, 69, 0.1);
   --danger: #dc3545;
@@ -558,7 +560,11 @@ body {
    whose form has fewer rows) keeps the CTA right below its last field exactly
    as before, with no dead band pushed in between — the region only starts
    scrolling once the fields genuinely outgrow the leftover height. Any future
-   screen with a primary action under a scrolling form can reuse this pair. */
+   screen with a primary action under a scrolling form can reuse this pair.
+   The REVIEW step of every send screen (UTXO, EVM, Monero, Zcash, Bittensor)
+   reuses it too: warnings + summary scroll, the whole Confirm & Send section
+   (arm tick, password, error, Back + Confirm) is the pinned .send-cta, so the
+   primary button never sits below the fold of the 400x600 popup. */
 .app-content.send-pinned {
   display: flex;
   flex-direction: column;
@@ -2446,4 +2452,17 @@ button.list-row:hover, a.list-row:hover { background: var(--card-hover); border-
   font-size: 11px;
   color: var(--text-dim);
   margin-top: 6px;
+}
+
+/* External links in small print (price credits, chain homepage, footer).
+   Blue in both themes so they read as links against the faint grey text
+   around them (owner, 2026-09-29). */
+.link {
+  color: var(--link);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.link:hover {
+  filter: brightness(1.2);
 }

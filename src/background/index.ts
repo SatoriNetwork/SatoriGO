@@ -300,6 +300,13 @@ async function getWatchTargets(): Promise<{ address: string; name: string; chain
   const seen = new Set<string>();
   const out: { address: string; name: string; chainId: string }[] = [];
   for (const w of store.wallets) {
+    // UTXO ONLY, explicitly. An EVM account is read over JSON-RPC in the
+    // popup, and a Monero wallet cannot be watched from here at all: its
+    // balance needs the private view key, which never enters this worker
+    // (the Monero engine design notes §11). Until now a non-UTXO entry relied
+    // on an Electrum connect to an unknown chain id failing quietly; the skip
+    // is stated instead of relied on.
+    if ((w.family ?? 'utxo') !== 'utxo') continue;
     if (typeof w.address === 'string' && w.address && !seen.has(w.address)) {
       seen.add(w.address);
       out.push({ address: w.address, name: w.name || 'Wallet', chainId: w.network ?? 'mainnet' });

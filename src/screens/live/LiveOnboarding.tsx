@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { Suspense, lazy, useEffect, useMemo, useState } from 'react';
 import { KeyRound, Download, AlertTriangle, Fingerprint, Info, ShieldCheck } from 'lucide-react';
 import { Button } from '../../components/Button';
 import { PasswordField, TextField } from '../../components/TextField';
@@ -21,7 +21,16 @@ import { classifyPrivateKeyOrigin } from '../../services/chain/keys';
 import { isEvmChainTarget } from '../../store/evmChains';
 import { ChainPicker, CHAIN_OPTIONS, type ChainChoice } from './ChainPicker';
 
-type Step = 'choose' | 'create-form' | 'mnemonic' | 'import-form' | 'pk-form';
+type Step = 'choose' | 'create-form' | 'mnemonic' | 'import-form' | 'pk-form' | 'xmr-import-form';
+
+// "Import Monero wallet" (25 words plus a restore height) is lazy and only
+// behind the flag: the screen imports VALUES from src/services/chain/monero/,
+// which a package built without --monero must not contain (vite.config.ts
+// fails such a build). In a flagless build this is the constant null, so the
+// entry below is never offered; see LiveApp.tsx for the same pattern.
+const LiveImportMonero = __MONERO_ENABLED__
+  ? lazy(() => import('./LiveImportMonero').then((m) => ({ default: m.LiveImportMonero })))
+  : null;
 
 const PASSWORDLESS_ACK_WARNING =
   'No password: anyone with access to this computer or your Chrome profile can take these funds.';
@@ -1304,6 +1313,14 @@ export function LiveOnboarding() {
   const pendingMnemonicHasPassphrase = useLiveStore((s) => s.pendingMnemonicHasPassphrase);
   const addingWallet = useLiveStore((s) => s.addingWallet);
   const cancelAddWallet = useLiveStore((s) => s.cancelAddWallet);
+  // The Monero row exists only in a build with the engine, and "Import Monero
+  // wallet" is offered only when ADDING a wallet to an existing install: a
+  // first-run user starts from a recovery phrase, and adds Monero from the
+  // chain switcher (the Monero engine design notes §10). An import of 25
+  // words needs an app password or a wallet password to protect them
+  // (LiveImportMonero asks when no app password is set).
+  const moneroChain = useLiveStore((s) => s.monero?.chain ?? null);
+  const openAddedMoneroWallet = useLiveStore((s) => s.openAddedMoneroWallet);
   const [step, setStep] = useState<Step>('choose');
 
   // If wallet was just created and mnemonic is pending, show it.
@@ -1375,6 +1392,19 @@ export function LiveOnboarding() {
               >
                 Import private key (Satori)
               </Button>
+              {addingWallet && moneroChain && LiveImportMonero && (
+                <Button
+                  block
+                  variant="secondary"
+                  icon={<Download size={15} />}
+                  onClick={() => setStep('xmr-import-form')}
+                  data-testid="live-choose-xmr-import"
+                  className="wow-in"
+                  style={{ animationDelay: '470ms' }}
+                >
+                  Import Monero wallet (25 words)
+                </Button>
+              )}
 
               {addingWallet && (
                 <Button
@@ -1397,6 +1427,16 @@ export function LiveOnboarding() {
         {step === 'create-form' && <CreateForm onBack={() => setStep('choose')} />}
         {step === 'import-form' && <ImportForm onBack={() => setStep('choose')} />}
         {step === 'pk-form' && <PkImportForm onBack={() => setStep('choose')} />}
+        {step === 'xmr-import-form' && LiveImportMonero && (
+          <Suspense fallback={<span className="spinner lg" style={{ color: 'var(--accent)' }} />}>
+            <LiveImportMonero
+              onBack={() => setStep('choose')}
+              // The service has already made the imported wallet active and
+              // unlocked; the store lands on it (phase ready, first scan).
+              onImported={() => void openAddedMoneroWallet()}
+            />
+          </Suspense>
+        )}
       </div>
     </div>
   );

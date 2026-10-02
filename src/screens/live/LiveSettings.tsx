@@ -4,7 +4,7 @@
 // Explorer, Transactions (CSV export), Address Book, About (version, disclaimer,
 // reset). All pre-existing testids keep working inside their sub-screens.
 
-import { useEffect, useState, type ReactNode } from 'react';
+import { Suspense, lazy, useEffect, useRef, useState, type ReactNode } from 'react';
 import {
   AlertTriangle,
   Bell,
@@ -56,6 +56,7 @@ import {
   activeFamily,
   chainDisplayName,
   chainHideBlockedReason,
+  nativeTickerFor,
   walletsOnChain,
 } from '../../store/liveStore';
 import type { SettingsMode } from '../../store/liveStore';
@@ -66,6 +67,9 @@ import {
 } from '../../services/storageStats';
 import { lastCacheWriteError, lastHistoryFetchError } from '../../services/chain/txCache';
 import { networkFor } from '../../services/chain/chainParams';
+import { MONERO_NETWORK, ZCASH_NETWORK, TAO_NETWORK } from '../../services/chain/engine';
+import { ZCASH_CHAIN } from '../../store/zcashChain';
+import { TAO_CHAIN } from '../../store/taoChain';
 import { isGatewayElectrumUrl } from '../../services/chain/network';
 import { CHAIN_OPTIONS } from './ChainPicker';
 import {
@@ -76,16 +80,38 @@ import {
   shortAccountAddress,
   memberLabel,
 } from './walletGroups';
+import { walletKindTag, type TaggableWallet } from './walletKindTag';
 import { TokenIcon } from '../../components/BrandLogo';
 import { MIN_PASSWORD_LENGTH, getAppVersion } from '../../services/constants';
-import type { ThemeMode } from '../../services/settings';
+import type { Currency, ThemeMode } from '../../services/settings';
 import type { LiveTransaction } from '../../services/chain/electrumProvider';
 import { LiveNav } from './LiveNav';
 import { RevealSecretModal, type RevealKind } from './RevealSecretModal';
+import { liveService } from '../../store/liveStore';
+
+// The Monero settings section imports a VALUE from src/services/chain/monero/
+// (the restore-height estimator), so it is lazy and only behind the flag, the
+// same way LiveApp.tsx loads the Monero screens: in a flagless build it is the
+// constant null and never rendered (the Monero row is not offered either).
+// MoneroSeedReveal imports nothing from the engine, but it is Monero wallet UI
+// all the same, and a flagless package should carry as little of that as it
+// can: lazy behind the flag too, and the buttons that open it are gated on
+// the engine being present (a Monero entry that arrived through a backup
+// restore would otherwise show a reveal button that can only answer
+// "Incorrect password", since revealSecret needs the engine).
+const MoneroSettingsSection = __MONERO_ENABLED__
+  ? lazy(() => import('./MoneroSettingsSection').then((m) => ({ default: m.MoneroSettingsSection })))
+  : null;
+const MoneroSeedReveal = __MONERO_ENABLED__
+  ? lazy(() => import('./MoneroSeedReveal').then((m) => ({ default: m.MoneroSeedReveal })))
+  : null;
 
 interface LiveSettingsProps {
   onBack(): void;
   onOpenAddressBook(): void;
+  /** Opens "Import Monero wallet" (25 words plus a restore height). Absent in
+   *  a build without the Monero engine, and the entry is then not shown. */
+  onImportMonero?(): void;
 }
 
 /** The focused sub-screens reachable from the settings root list. */
@@ -101,9 +127,14 @@ type SettingsSection =
   | 'transactions'
   | 'networks'
   | 'diagnostics'
-  | 'about';
+  | 'about'
+  // Monero: restore height and rescan for the active Monero wallet, the
+  // 25-word reveal, and "Import Monero wallet". Offered only when this build
+  // carries the engine (the store's `monero.chain` is non-null).
+  | 'monero';
 
 const SECTION_TITLES: Record<SettingsSection, string> = {
+  monero: 'Monero',
   appearance: 'Appearance',
   wallets: 'Wallets',
   addresses: 'Addresses',
@@ -128,7 +159,7 @@ const SECTION_TITLES: Record<SettingsSection, string> = {
 /** Every row of the root list. 'addressBook' is not a section: it opens a
  *  screen of its own that predates this list, and it is here because a user
  *  looking for saved recipients looks under Wallet, not under "other". */
-type RootRowId = SettingsSection | 'addressBook';
+type RootRowId = SettingsSection | 'addressBook' | 'moneroReveal';
 
 /** One row of the settings root list. */
 interface RootRow {
@@ -145,8 +176,11 @@ interface RootRow {
  *  rows made the user read every one of them to find anything; the groups say
  *  where to start looking. */
 const SECTION_GROUPS: ReadonlyArray<{ title: string; sections: readonly RootRowId[] }> = [
-  { title: 'Wallet', sections: ['wallets', 'addresses', 'addressBook', 'transactions'] },
-  { title: 'Security', sections: ['security', 'recovery'] },
+  { title: 'Wallet', sections: ['wallets', 'monero', 'addresses', 'addressBook', 'transactions'] },
+  // 'moneroReveal' is a direct row (it opens the 25-word reveal, no sub-screen)
+  // and only for an active Monero wallet: the words are the one backup a
+  // Monero user goes looking for, so they are one tap from the root list.
+  { title: 'Security', sections: ['security', 'moneroReveal', 'recovery'] },
   {
     title: 'App',
     sections: ['appearance', 'notifications', 'networks', 'network', 'sites', 'diagnostics', 'about'],
@@ -179,18 +213,29 @@ const AUTO_LOCK_OPTIONS: { value: number; label: string }[] = [
   { value: 0, label: 'Never' },
 ];
 
-/** CSV column order for the transaction export. */
-const CSV_HEADER = [
-  'date',
-  'direction',
-  'asset',
-  'amount',
-  'fee_evr',
-  'status',
-  'block_height',
-  'txid',
-  'counterparty',
-];
+/** CSV column order for the transaction export. The fee column is named after
+ *  the ACTIVE chain's native coin (fee_evr, fee_btc, fee_xmr): the fee is paid
+ *  in that coin, and a column called fee_evr on a Monero export lied. */
+export function csvHeaderFor(nativeTicker: string): string[] {
+  return [
+    'date',
+    'direction',
+    'asset',
+    'amount',
+    `fee_${nativeTicker.toLowerCase()}`,
+    'status',
+    'block_height',
+    'txid',
+    'counterparty',
+  ];
+}
+
+/** "<chain>-transactions.csv", the chain named from its params (never a fixed
+ *  "evrmore" on every chain): "monero-transactions.csv", "bnb-chain-transactions.csv". */
+export function csvFileNameFor(chainName: string): string {
+  const slug = chainName.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  return `${slug || 'wallet'}-transactions.csv`;
+}
 
 /** RFC-4180 field escaping: wrap in quotes and double embedded quotes when the
  *  field contains a comma, quote, or newline. */
@@ -205,7 +250,7 @@ function csvEscape(field: string): string {
 }
 
 /** Build a CSV document (header + one row per tx) from the live transactions. */
-function buildTransactionsCsv(txs: LiveTransaction[]): string {
+export function buildTransactionsCsv(txs: LiveTransaction[], nativeTicker: string): string {
   const rows = txs.map((t) => [
     new Date(t.timestamp).toISOString(),
     t.direction,
@@ -217,20 +262,20 @@ function buildTransactionsCsv(txs: LiveTransaction[]): string {
     t.txid,
     t.counterparty,
   ]);
-  return [CSV_HEADER, ...rows].map((cols) => cols.map(csvEscape).join(',')).join('\r\n');
+  return [csvHeaderFor(nativeTicker), ...rows].map((cols) => cols.map(csvEscape).join(',')).join('\r\n');
 }
 
 /** Trigger a browser download of the transactions as a CSV file. No-op outside a
  *  DOM (jsdom / non-browser) and best-effort if object URLs are unavailable. */
-function downloadTransactionsCsv(txs: LiveTransaction[]): void {
+function downloadTransactionsCsv(txs: LiveTransaction[], chainName: string, nativeTicker: string): void {
   if (typeof document === 'undefined') return; // guard for jsdom / non-DOM env
-  const csv = buildTransactionsCsv(txs);
+  const csv = buildTransactionsCsv(txs, nativeTicker);
   try {
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'evrmore-transactions.csv';
+    a.download = csvFileNameFor(chainName);
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -240,9 +285,10 @@ function downloadTransactionsCsv(txs: LiveTransaction[]): void {
   }
 }
 
-/** Short type label for a wallet-kind badge. */
-function kindLabel(kind: 'seed' | 'pk'): string {
-  return kind === 'pk' ? 'Satori (key)' : 'Seed';
+/** Short type label for a wallet-kind badge (walletKindTag's long form: a
+ *  Monero wallet imported from 25 words is named as such, not "Seed"). */
+function kindLabel(w: TaggableWallet): string {
+  return walletKindTag(w, 'long');
 }
 
 /** Shared screen chrome: back header + scrollable content (local sub-screen
@@ -254,12 +300,21 @@ function Shell({
   children,
   modals,
   showSync = true,
+  scrollKey,
 }: {
   title: string;
   onBack(): void;
   testId?: string;
   children: ReactNode;
   modals?: ReactNode;
+  /** Changes when the screen inside changes (the section id). The root list
+   *  and every sub-screen render through this ONE Shell at the same tree
+   *  position, so React keeps the .app-content node and its scrollTop across
+   *  a section change: a sub-screen opened from a scrolled root came up
+   *  pre-scrolled, its first rows hidden above the header. Each change
+   *  scrolls back to the top (no screen in this wallet restores a previous
+   *  scroll position, so Back lands at the top of the root list too). */
+  scrollKey?: string;
   /** Show the dot-only connection indicator in the sub-header's right-hand
    *  slot. Defaults on for the focused sub-screens (Appearance, Wallets,
    *  Security, ... — KNOWN_LIMITATIONS item 33, they had no connection
@@ -268,6 +323,11 @@ function Shell({
    *  indicator up here would be redundant chrome. */
   showSync?: boolean;
 }) {
+  const contentRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = contentRef.current;
+    if (el) el.scrollTop = 0;
+  }, [scrollKey]);
   return (
     <div className="app-frame screen-enter">
       <div className="sub-header">
@@ -286,7 +346,7 @@ function Shell({
           <span />
         )}
       </div>
-      <div className="app-content" data-testid={testId}>
+      <div className="app-content" data-testid={testId} ref={contentRef}>
         {children}
       </div>
       <LiveNav />
@@ -295,7 +355,7 @@ function Shell({
   );
 }
 
-export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
+export function LiveSettings({ onBack, onOpenAddressBook, onImportMonero }: LiveSettingsProps) {
   const settings = useSettingsStore((s) => s.settings);
   const updateSettings = useSettingsStore((s) => s.update);
 
@@ -702,7 +762,7 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
                   on every account of it says nothing new. */}
               {!nested && (
                 <span className="chip neutral" style={{ fontSize: 9, padding: '1px 5px' }}>
-                  {kindLabel(w.kind)}
+                  {kindLabel(w)}
                 </span>
               )}
               {w.passwordless && (
@@ -760,6 +820,29 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
   // Only "which secret, and does it need a password" is decided here.
   const [revealKind, setRevealKind] = useState<RevealKind | null>(null);
   const openReveal = (kind: RevealKind) => setRevealKind(kind);
+  // The Monero reveal is its own screen (MoneroSeedReveal): 25 words in a grid
+  // plus the restore height, which the shared modal's one text block cannot
+  // draw. Same password gate, same clipboard hygiene.
+  const [moneroRevealOpen, setMoneroRevealOpen] = useState(false);
+  // Null in a build without the Monero engine: no Monero row anywhere here.
+  const moneroChain = useLiveStore((s) => s.monero?.chain ?? null);
+  // The reveal needs the engine (the 25 words are computed from the keys), so
+  // a Monero wallet on a build without it gets no reveal button at all.
+  const isMoneroWallet = activeWallet?.family === 'monero' && moneroChain !== null;
+  // Imported from its 25 words: no phrase, no derivation path (Diagnostics and
+  // the reveal note say so instead of describing the cake-exodus sibling).
+  const moneroWordsImport = activeWallet?.moneroKeySource === 'words';
+  // Zcash and Bittensor wallets (every build carries both engines): no
+  // Electrum servers, no address list, their own diagnostics lines. Their
+  // reveal is the ordinary recovery-phrase reveal (the phrase IS their secret).
+  const isZcashWallet = activeWallet?.family === 'zcash';
+  const isTaoWallet = activeWallet?.family === 'substrate';
+  const isEngineWallet = isMoneroWallet || isZcashWallet || isTaoWallet;
+  const engineChainRow = isZcashWallet
+    ? { target: ZCASH_NETWORK, route: 'zec', displayName: ZCASH_CHAIN.displayName, nodeSet: ZCASH_CHAIN.defaultNodeSet, nodeSets: ZCASH_CHAIN.nodeSets, coinType: 133, path: "m/44'/133'/0'/0/0", note: 'Zcash has no Electrum servers. Balances, history and sends go through the Satori GO gateway to a lightwalletd node set, which cannot be edited here.' }
+    : isTaoWallet
+      ? { target: TAO_NETWORK, route: 'tao', displayName: TAO_CHAIN.displayName, nodeSet: TAO_CHAIN.defaultNodeSet, nodeSets: TAO_CHAIN.nodeSets, coinType: null, path: 'root account (no path)', note: 'Bittensor has no Electrum servers. Balances and sends go through the Satori GO gateway to a subtensor node set, which cannot be edited here.' }
+      : null;
 
   const handleChangePassword = async () => {
     setPwError('');
@@ -830,6 +913,22 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
         />
       )}
 
+      {moneroRevealOpen && MoneroSeedReveal && (
+        <Suspense fallback={null}>
+          <MoneroSeedReveal
+            noPassword={isPasswordless}
+            keySource={moneroWordsImport ? 'words' : 'phrase'}
+            reveal={async (pw) => {
+              const secret = await liveService().revealSecret(pw).catch(() => null);
+              return secret && secret.kind === 'monero-legacy-seed'
+                ? { words: secret.words, restoreHeight: secret.restoreHeight }
+                : null;
+            }}
+            onClose={() => setMoneroRevealOpen(false)}
+          />
+        </Suspense>
+      )}
+
       {revealKind && (
         <RevealSecretModal
           kind={revealKind}
@@ -892,6 +991,24 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
         desc: `${wallets.length} wallet${wallets.length === 1 ? '' : 's'} · rename or remove`,
         onClick: () => setSection('wallets'),
       },
+      monero: {
+        testId: 'live-settings-row-monero',
+        icon: <Wallet size={17} />,
+        title: 'Monero',
+        desc: isMoneroWallet
+          ? 'Restore height, rescan, recovery words'
+          : 'Import a Monero wallet from its 25 words',
+        onClick: () => setSection('monero'),
+      },
+      moneroReveal: {
+        testId: 'live-xmr-reveal-open',
+        icon: <Eye size={17} />,
+        // The flag constant folds this copy out of a build without the engine
+        // (the row is never visible there: isMoneroWallet needs the engine).
+        title: __MONERO_ENABLED__ ? 'Show Monero recovery words' : '',
+        desc: 'The 25 words and the restore height that restore this wallet',
+        onClick: () => setMoneroRevealOpen(true),
+      },
       addresses: {
         testId: 'live-settings-row-addresses',
         icon: <List size={17} />,
@@ -934,7 +1051,7 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
         testId: 'live-settings-row-appearance',
         icon: <Palette size={17} />,
         title: 'Appearance',
-        desc: 'Theme and accent color',
+        desc: 'Theme, accent color and currency',
         onClick: () => setSection('appearance'),
       },
       notifications: {
@@ -987,11 +1104,23 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
 
     /** Basic mode simply does not render the expert rows (one list, not two
      *  divergent ones). The address book is never expert-only. */
-    const visible = (id: RootRowId) =>
-      id === 'addressBook' || settingsMode === 'expert' || !EXPERT_ONLY.has(id as SettingsSection);
+    const visible = (id: RootRowId) => {
+      // Monero rows follow the engine and the active wallet, not the mode.
+      if (id === 'monero') return moneroChain !== null;
+      if (id === 'moneroReveal') return isMoneroWallet;
+      // A Monero wallet's addresses are subaddresses, created and labelled on
+      // the Receive screen; the UTXO controls here (derive #N, gap scan) have
+      // no Monero meaning and only failed with an internal error.
+      if (id === 'addresses' && isMoneroWallet) return false;
+      // A Zcash wallet shows ONE address (its fourteen other watch addresses
+      // are read, never offered, the Zcash engine design notes §6.2) and a
+      // Bittensor wallet is one account: neither has a derive or scan control.
+      if (id === 'addresses' && (isZcashWallet || isTaoWallet)) return false;
+      return id === 'addressBook' || settingsMode === 'expert' || !EXPERT_ONLY.has(id as SettingsSection);
+    };
 
     return (
-      <Shell title="Settings" onBack={onBack} testId="live-settings" modals={modals} showSync={false}>
+      <Shell title="Settings" onBack={onBack} testId="live-settings" modals={modals} showSync={false} scrollKey="root">
         {/* Mode switch first: it explains why the list below is short. */}
         <div className="field" style={{ marginBottom: 12 }}>
           {/* The connection pill rides on this label's row rather than a row of
@@ -1043,7 +1172,55 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
       onBack={() => setSection(null)}
       testId={`live-settings-view-${section}`}
       modals={modals}
+      scrollKey={section}
     >
+      {section === 'monero' && (
+        <>
+          {/* The active Monero wallet's own settings (restore height, rescan,
+              node set), lazy behind the flag; a wallet of another family sees
+              the section's own "add one first" note from MoneroSettingsSection. */}
+          {MoneroSettingsSection && (
+            <Suspense fallback={<span className="spinner" style={{ display: 'block', margin: '12px auto' }} />}>
+              <MoneroSettingsSection />
+            </Suspense>
+          )}
+          {__MONERO_ENABLED__ && isMoneroWallet && (
+            <>
+              <div className="section-label">Recovery words</div>
+              <Button
+                variant="secondary"
+                size="sm"
+                block
+                icon={<Eye size={14} />}
+                onClick={() => setMoneroRevealOpen(true)}
+                data-testid="live-xmr-reveal-open-section"
+              >
+                Show Monero recovery words
+              </Button>
+            </>
+          )}
+          {onImportMonero && (
+            <>
+              <div className="section-label">Another Monero wallet</div>
+              <Button
+                variant="secondary"
+                size="sm"
+                block
+                icon={<Wallet size={14} />}
+                onClick={onImportMonero}
+                data-testid="live-xmr-import-open"
+              >
+                Import Monero wallet (25 words)
+              </Button>
+              <p className="text-faint" style={{ fontSize: 11, margin: '8px 2px 0', lineHeight: 1.5 }}>
+                To add Monero to one of your recovery phrases instead, open the network switcher on the home
+                screen and choose Monero there.
+              </p>
+            </>
+          )}
+        </>
+      )}
+
       {section === 'appearance' && (
         <>
           <div className="section-label" style={{ marginTop: 0 }}>Theme</div>
@@ -1061,6 +1238,21 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
           <div style={{ padding: '2px 4px' }}>
             <AccentSwatches />
           </div>
+          <div className="section-label">Currency</div>
+          <Segmented<Currency>
+            options={[
+              { value: 'USD', label: 'USD $' },
+              { value: 'EUR', label: 'EUR €' },
+              { value: 'PLN', label: 'PLN zł' },
+            ]}
+            value={settings.currency}
+            onChange={(currency) => void updateSettings({ currency })}
+            testIdPrefix="live-currency"
+          />
+          <p className="text-faint" style={{ fontSize: 11, margin: '8px 2px 0', lineHeight: 1.5 }} data-testid="live-currency-note">
+            Balances and prices are shown in this currency. A price that is only published in US dollars, with no
+            exchange rate available, stays in USD and is labelled as USD.
+          </p>
           <div className="section-label">Window</div>
           <div className="list-row" data-testid="live-side-panel-row">
             <span className="row-main">
@@ -1141,7 +1333,22 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
         </>
       )}
 
-      {section === 'addresses' && (
+      {section === 'addresses' && isMoneroWallet && (
+        <p className="text-faint" data-testid="live-addresses-monero" style={{ fontSize: 11, margin: '0 2px 4px', lineHeight: 1.5 }}>
+          A Monero wallet receives on subaddresses. Create and label them on the Receive screen; every one of
+          them pays into this same wallet.
+        </p>
+      )}
+
+      {section === 'addresses' && (isZcashWallet || isTaoWallet) && (
+        <p className="text-faint" data-testid="live-addresses-engine" style={{ fontSize: 11, margin: '0 2px 4px', lineHeight: 1.5 }}>
+          {isZcashWallet
+            ? 'A Zcash wallet shows one transparent address. Payments to it are public, like Bitcoin.'
+            : 'A Bittensor wallet is one account with one address.'}
+        </p>
+      )}
+
+      {section === 'addresses' && !isEngineWallet && (
         <>
           {isPkWallet ? (
             <p className="text-faint" style={{ fontSize: 11, margin: '0 2px 4px', lineHeight: 1.5 }}>
@@ -1249,6 +1456,24 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
               (the app-password design notes §13.7) one screen had two different
               things under that word, and the two recover different things. */}
           <div className="section-label" style={{ marginTop: 0 }}>Recovery phrase and private key</div>
+          {/* A Monero wallet exports its 25 legacy words plus the restore
+              height (its own screen), never a WIF and never the BIP39 phrase a
+              sibling was derived from: that phrase is revealed on the wallet it
+              belongs to (the Monero engine design notes §9). */}
+          {__MONERO_ENABLED__ && isMoneroWallet ? (
+            <div style={{ display: 'flex', gap: 9, marginBottom: 10 }}>
+              <Button
+                variant="secondary"
+                size="sm"
+                block
+                icon={<Eye size={14} />}
+                onClick={() => setMoneroRevealOpen(true)}
+                data-testid="live-xmr-reveal-open-security"
+              >
+                Show Monero recovery words
+              </Button>
+            </div>
+          ) : (
           <div style={{ display: 'flex', gap: 9, marginBottom: 10 }}>
             {!isPkWallet && (
               <Button
@@ -1262,17 +1487,34 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
                 Show recovery phrase
               </Button>
             )}
-            <Button
-              variant="secondary"
-              size="sm"
-              block
-              icon={<KeyRound size={14} />}
-              onClick={() => openReveal('key')}
-              data-testid="live-reveal-key"
-            >
-              Show private key
-            </Button>
+            {/* A Zcash or Bittensor sibling has no single private key to show
+                (fifteen transparent keys; an sr25519 mini secret): the service
+                answers null for these families, which the modal would read as
+                "Incorrect password" against a RIGHT password. The phrase is
+                their secret, so only that button stays. */}
+            {!(isZcashWallet || isTaoWallet) && (
+              <Button
+                variant="secondary"
+                size="sm"
+                block
+                icon={<KeyRound size={14} />}
+                onClick={() => openReveal('key')}
+                data-testid="live-reveal-key"
+              >
+                Show private key
+              </Button>
+            )}
           </div>
+          )}
+          {(isZcashWallet || isTaoWallet) && (
+            <p
+              className="text-faint"
+              style={{ fontSize: 11, margin: '0 2px 10px', lineHeight: 1.5 }}
+              data-testid="live-reveal-engine-note"
+            >
+              This wallet is restored from its recovery phrase; there is no separate private key to export.
+            </p>
+          )}
           {/* One seed carries every account of this wallet, so the phrase behind
               "Show recovery phrase" is not the phrase of THIS account only. Say
               so where the button is, not only after the words are on screen. */}
@@ -1942,7 +2184,120 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
         </>
       )}
 
-      {section === 'network' && !activeEvmChain && (
+      {section === 'network' && isMoneroWallet && moneroChain && (
+        <>
+          {/* Monero has no Electrum pool and no user-editable server: every
+              read and every relay goes to the gateway's node set (the Monero
+              engine design notes §7), shown here the way the EVM branch shows
+              its gateway endpoints. The UTXO branch below used to catch a
+              Monero wallet and listed the idle chain's Electrum servers. */}
+          <p
+            className="text-faint"
+            data-testid="live-network-chain-caption"
+            style={{ fontSize: 11, margin: '0 2px 10px', lineHeight: 1.5 }}
+          >
+            Servers for: {moneroChain.displayName}
+          </p>
+          <TextField
+            label="Block explorer URL"
+            placeholder="https://example.com/tx/{txid}"
+            value={explorerUrlTemplate}
+            onChange={(e) => setExplorerUrlTemplate(e.target.value)}
+            testId="live-explorer-input"
+            hint="Use {txid} where the transaction id should go."
+          />
+          <div className="card solid" style={{ marginTop: 8 }} data-testid="live-network-monero">
+            <div className="summary-table">
+              <div className="sum-row">
+                <span className="sum-key">Node set</span>
+                <span className="sum-val" data-testid="live-network-monero-node-set">
+                  {activeWallet?.moneroNodeSet ?? moneroChain.defaultNodeSet}
+                </span>
+              </div>
+              <div className="sum-row">
+                <span className="sum-key">Gateway route</span>
+                <span className="sum-val mono" style={{ fontSize: 11, wordBreak: 'break-all' }} data-testid="live-network-monero-route">
+                  {evmGateway
+                    ? `${evmGateway}/xmr/${activeWallet?.moneroNodeSet ?? moneroChain.defaultNodeSet}`
+                    : 'Development build: no gateway'}
+                </span>
+              </div>
+              <div className="sum-row">
+                <span className="sum-key">Node</span>
+                <span className="sum-val mono" style={{ fontSize: 11 }}>
+                  {network?.serverVersion ?? 'n/a'}
+                </span>
+              </div>
+              <div className="sum-row">
+                <span className="sum-key">Block height</span>
+                <span className="sum-val">
+                  {network ? network.blockHeight.toLocaleString('en-US') : 'n/a'}
+                </span>
+              </div>
+            </div>
+          </div>
+          <p className="text-faint" style={{ fontSize: 11, margin: '10px 2px 4px', lineHeight: 1.5 }}>
+            Monero has no Electrum servers. Blocks, balances and sends go through the Satori GO gateway's node
+            set, which cannot be edited here.
+            {moneroChain.nodeSets.length > 1 ? ` Node sets this build knows: ${moneroChain.nodeSets.join(', ')}.` : ''}
+          </p>
+        </>
+      )}
+
+      {section === 'network' && engineChainRow && (
+        <>
+          {/* Zcash and Bittensor: like Monero, every read and relay goes to
+              the gateway's node set (their design notes §7); no Electrum
+              pool, no user-editable server. */}
+          <p
+            className="text-faint"
+            data-testid="live-network-chain-caption"
+            style={{ fontSize: 11, margin: '0 2px 10px', lineHeight: 1.5 }}
+          >
+            Servers for: {engineChainRow.displayName}
+          </p>
+          <TextField
+            label="Block explorer URL"
+            placeholder="https://example.com/tx/{txid}"
+            value={explorerUrlTemplate}
+            onChange={(e) => setExplorerUrlTemplate(e.target.value)}
+            testId="live-explorer-input"
+            hint="Use {txid} where the transaction id should go."
+          />
+          <div className="card solid" style={{ marginTop: 8 }} data-testid={`live-network-${engineChainRow.route}`}>
+            <div className="summary-table">
+              <div className="sum-row">
+                <span className="sum-key">Node set</span>
+                <span className="sum-val" data-testid={`live-network-${engineChainRow.route}-node-set`}>
+                  {engineChainRow.nodeSet}
+                </span>
+              </div>
+              <div className="sum-row">
+                <span className="sum-key">Gateway route</span>
+                <span className="sum-val mono" style={{ fontSize: 11, wordBreak: 'break-all' }} data-testid={`live-network-${engineChainRow.route}-route`}>
+                  {evmGateway ? `${evmGateway}/${engineChainRow.route}/${engineChainRow.nodeSet}` : 'Development build: no gateway'}
+                </span>
+              </div>
+              <div className="sum-row">
+                <span className="sum-key">Node</span>
+                <span className="sum-val mono" style={{ fontSize: 11 }}>
+                  {network?.serverVersion ?? 'n/a'}
+                </span>
+              </div>
+              <div className="sum-row">
+                <span className="sum-key">Block height</span>
+                <span className="sum-val">{network ? network.blockHeight.toLocaleString('en-US') : 'n/a'}</span>
+              </div>
+            </div>
+          </div>
+          <p className="text-faint" style={{ fontSize: 11, margin: '10px 2px 4px', lineHeight: 1.5 }}>
+            {engineChainRow.note}
+            {engineChainRow.nodeSets.length > 1 ? ` Node sets this build knows: ${engineChainRow.nodeSets.join(', ')}.` : ''}
+          </p>
+        </>
+      )}
+
+      {section === 'network' && !activeEvmChain && !isEngineWallet && (
         <>
           <p
             className="text-faint"
@@ -2236,7 +2591,7 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
             size="sm"
             block
             icon={<Download size={14} />}
-            onClick={() => downloadTransactionsCsv(txs)}
+            onClick={() => downloadTransactionsCsv(txs, chainDisplayName(), nativeTickerFor())}
             data-testid="live-export-csv"
           >
             Export transactions (CSV)
@@ -2283,6 +2638,73 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
                   disabled={blocked !== null}
                   testId={`live-settings-chain-${net.chainId}`}
                   label={`Show ${net.displayName}`}
+                />
+              </div>
+            );
+          })}
+          {/* Monero (a --monero build): one row, hideable like the others
+              except when it is the one in use (docs/design/monero-engine.md
+              §12.1). Hiding it deletes nothing: the Monero wallet and its scan
+              cache stay, and the row in the switcher comes back when shown. */}
+          {moneroChain !== null &&
+            (() => {
+              const target = MONERO_NETWORK;
+              const blocked = chainHideBlockedReason(target, activeChainTarget());
+              const hidden = hiddenChains.includes(target);
+              const moneroWalletCount = wallets.filter((w) => w.family === 'monero').length;
+              return (
+                <div className="list-row" key={target}>
+                  <span className="row-icon">
+                    <TokenIcon assetId={moneroChain.nativeTicker} size={17} />
+                  </span>
+                  <span className="row-main">
+                    <span className="row-title">{moneroChain.displayName}</span>
+                    <span className="row-desc">
+                      {blocked
+                        ? blocked
+                        : moneroWalletCount > 0
+                          ? `${moneroWalletCount} wallet${moneroWalletCount === 1 ? '' : 's'} on this network`
+                          : 'No wallet on this network'}
+                    </span>
+                  </span>
+                  <Toggle
+                    checked={!hidden}
+                    onChange={(on) => setChainHidden(target, !on)}
+                    disabled={blocked !== null}
+                    testId={`live-settings-chain-${target}`}
+                    label={`Show ${moneroChain.displayName}`}
+                  />
+                </div>
+              );
+            })()}
+          {/* Zcash and Bittensor (every build): one row each, hideable like the
+              others except when in use. Hiding deletes nothing. */}
+          {(
+            [
+              { target: ZCASH_NETWORK, family: 'zcash', displayName: ZCASH_CHAIN.displayName, ticker: ZCASH_CHAIN.nativeTicker },
+              { target: TAO_NETWORK, family: 'substrate', displayName: TAO_CHAIN.displayName, ticker: TAO_CHAIN.nativeTicker },
+            ] as const
+          ).map((row) => {
+            const blocked = chainHideBlockedReason(row.target, activeChainTarget());
+            const hidden = hiddenChains.includes(row.target);
+            const count = wallets.filter((w) => w.family === row.family).length;
+            return (
+              <div className="list-row" key={row.target}>
+                <span className="row-icon">
+                  <TokenIcon assetId={row.ticker} size={17} />
+                </span>
+                <span className="row-main">
+                  <span className="row-title">{row.displayName}</span>
+                  <span className="row-desc">
+                    {blocked ? blocked : count > 0 ? `${count} wallet${count === 1 ? '' : 's'} on this network` : 'No wallet on this network'}
+                  </span>
+                </span>
+                <Toggle
+                  checked={!hidden}
+                  onChange={(on) => setChainHidden(row.target, !on)}
+                  disabled={blocked !== null}
+                  testId={`live-settings-chain-${row.target}`}
+                  label={`Show ${row.displayName}`}
                 />
               </div>
             );
@@ -2483,22 +2905,67 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
           <div className="section-label" style={{ margin: '14px 0 6px' }}>
             Wallet
           </div>
+          {/* The ACTIVE wallet's chain, by family: activeNet is the UTXO side
+              only and named Evrmore's values on a Monero (or EVM) wallet. */}
           <div className="list-row">
             <span className="row-main">
               <span className="row-title">Chain</span>
-              <span className="row-desc">{activeNet.chainId}</span>
+              <span className="row-desc" data-testid="live-diag-chain-id">
+                {isMoneroWallet
+                  ? MONERO_NETWORK
+                  : engineChainRow
+                    ? engineChainRow.target
+                    : activeEvmChain
+                      ? `evm:${activeEvmChain.key}`
+                      : activeNet.chainId}
+              </span>
             </span>
             <span className="text-dim" style={{ fontSize: 11 }}>
               {chainDisplayName()}
             </span>
           </div>
+          {/* A Monero wallet imported from its 25 words was never derived:
+              the words are the spend key. Printing the cake-exodus path for
+              it (the 1.4.3 audit, N-diag-vector-xmr-imported) claimed a
+              phrase it does not have; the missing value reads n/a. */}
           <div className="list-row">
             <span className="row-main">
               <span className="row-title">Derivation</span>
-              <span className="row-desc">SLIP-44 coin type {activeNet.coinType}</span>
+              <span className="row-desc" data-testid="live-diag-coin-type">
+                {isMoneroWallet && moneroWordsImport ? (
+                  'Imported from 25 Monero words. The words are the spend key; nothing is derived from a phrase.'
+                ) : isTaoWallet ? (
+                  // The Bittensor account is the phrase's root: sr25519 from
+                  // the phrase's entropy, no SLIP-44 path, as btcli derives it.
+                  'sr25519 root account from the recovery phrase, the way btcli and polkadot.js derive a coldkey. No derivation path.'
+                ) : (
+                  <>
+                    SLIP-44 coin type{' '}
+                    {isMoneroWallet && moneroChain
+                      ? moneroChain.coinType
+                      : isZcashWallet
+                        ? 133
+                        : activeEvmChain
+                          ? 60
+                          : activeNet.coinType}
+                    {isMoneroWallet && moneroChain ? `, ${moneroChain.scheme} scheme (Cake Wallet compatible)` : ''}
+                    {isZcashWallet ? ', transparent (t1) addresses only' : ''}
+                  </>
+                )}
+              </span>
             </span>
-            <span className="text-dim mono" style={{ fontSize: 11 }}>
-              {activeNet.addressFormat === 'p2wpkh' ? "m/84'" : "m/44'"}
+            <span className="text-dim mono" style={{ fontSize: 11 }} data-testid="live-diag-derivation-path">
+              {isMoneroWallet && moneroWordsImport
+                ? 'n/a'
+                : isMoneroWallet && moneroChain
+                  ? `m/44'/${moneroChain.coinType}'/0'/0/0`
+                  : engineChainRow
+                    ? engineChainRow.path
+                    : activeEvmChain
+                      ? `m/44'/60'/0'/0/${activeWallet?.hdIndex ?? 0}`
+                      : activeNet.addressFormat === 'p2wpkh'
+                        ? "m/84'"
+                        : "m/44'"}
             </span>
           </div>
           <div className="list-row">
@@ -2595,11 +3062,21 @@ export function LiveSettings({ onBack, onOpenAddressBook }: LiveSettingsProps) {
               target="_blank"
               rel="noopener noreferrer"
               data-testid="live-about-prices-coingecko"
-              style={{ color: 'inherit' }}
+              className="link"
             >
               CoinGecko
             </a>{' '}
-            and SafeTrade (via the Satori GO gateway).
+            and{' '}
+            <a
+              href="https://safetrade.com/exchange/SAT-USDT"
+              target="_blank"
+              rel="noopener noreferrer"
+              data-testid="live-about-prices-safetrade"
+              className="link"
+            >
+              SafeTrade
+            </a>{' '}
+            (via the Satori GO gateway).
           </p>
 
           {/* Website + author credit. lucide-react has no X-brand mark, so the

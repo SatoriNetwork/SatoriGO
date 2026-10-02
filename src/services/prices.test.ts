@@ -136,6 +136,14 @@ describe('gateway prices (the release shape: one host, every build)', () => {
     expect((p as unknown as Record<string, number>).BTGS).toBeCloseTo(1.75, 10);
   });
 
+  it('prices XBT from the old BTCB2 key until the gateway publishes XBT, and prefers XBT once it does', () => {
+    const old = parseGatewayPrices({ prices: { BTCB2: { usd: 373.5, change24h: 5.5, source: 'custom' } } }, 1);
+    expect(old.quotes.XBT).toEqual({ usd: 373.5, change24h: 5.5, source: 'custom' });
+    expect(old.quotes.BTCB2.usd).toBe(373.5);
+    const both = parseGatewayPrices({ prices: { BTCB2: { usd: 1 }, XBT: { usd: 2 } } }, 1);
+    expect(both.quotes.XBT.usd).toBe(2);
+  });
+
   it('omits a MISSING ticker rather than inventing one (the store then keeps its previous value)', () => {
     const p = parseGatewayPrices({ prices: { EVR: { usd: 0.0142 } } }, 1);
     expect(p.EVR).toBeCloseTo(0.0142, 10);

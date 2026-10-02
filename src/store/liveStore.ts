@@ -35,8 +35,52 @@ import {
   networkFor,
   supportsAssets,
 } from '../services/chain/chainParams';
-import { EVM_NETWORK, loadEvmModules, walletFamily, type WalletFamily } from '../services/chain/engine';
+import {
+  EVM_NETWORK,
+  MONERO_NETWORK,
+  ZCASH_NETWORK,
+  TAO_NETWORK,
+  loadEvmModules,
+  loadMoneroModules,
+  walletFamily,
+  type WalletFamily,
+} from '../services/chain/engine';
+// The Zcash and Bittensor read and send paths (their design notes §8/§15).
+// Neither engine has a build flag (§13): these are ordinary static imports,
+// and the two rows are plain constants rather than flag-loaded mirrors.
+import { refreshZcashWallet } from './zcashBalances';
+import { refreshZcashHistory, expiredZcashSends } from './zcashHistory';
+import { broadcastZcashPlan, dropLocalZcashSends, ZcashSendError, type ZcashLocalSend, type ZcashSendPlan } from './zcashSend';
+import { ZCASH_CHAIN, isZcashChainTarget, type ZcashChainInfo } from './zcashChain';
+import { isValidZcashRecipient } from '../services/chain/zcash/address';
+import type { ZcashSnapshot } from '../services/chain/zcash/reader';
+import type { ZcashKeys } from '../services/chain/zcash/keys';
+import { refreshTaoWallet, taoRpcClient } from './taoBalances';
+import { refreshTaoHistory } from './taoHistory';
+import {
+  buildTaoSendPlan,
+  broadcastTaoPlan,
+  resumeTaoInclusionPolls,
+  abortTaoInclusionPolls,
+  TaoSendError,
+  type TaoSendInput,
+  type TaoSendPlan,
+} from './taoSend';
+import { TAO_CHAIN, isTaoChainTarget, type TaoChainInfo } from './taoChain';
+import { isValidTaoAddress } from '../services/chain/substrate/ss58';
+import { zeroSubstrateAccount } from '../services/chain/substrate/keys';
+import type { TaoAccountState } from '../services/chain/substrate/reader';
+import type { ProfileVerdict } from '../services/chain/substrate/profile';
+import type { TaoInclusion } from '../services/chain/substrate/sender';
 import { evmProviderFor, readEvmDiscoveredBalances, refreshEvmWallet } from './evmBalances';
+// The Monero read path. moneroBalances.ts and moneroChains.ts import only
+// TYPES from src/services/chain/monero/ (plus the flag-guarded loader), so a
+// static import here keeps a flagless build clean; moneroHistory.ts imports a
+// VALUE (formatXmr) and is reached through a guarded dynamic import below.
+import { refreshMoneroWallet } from './moneroBalances';
+import { isMoneroChainTarget, loadMoneroChainInfo, MONERO_EXPLORER_TX_URL, type MoneroChainInfo } from './moneroChains';
+import type { MoneroBalance, MoneroSyncProgress, MoneroWalletHost } from '../services/chain/monero/scanner';
+import { GATEWAY_CLIENT_TOKEN, gatewayUrl } from '../services/gateway';
 import { clearBalanceCaches, loadBalanceCache, mergeBalanceRows, saveBalanceCache } from './balanceCache';
 import { setTokenLogos } from './tokenLogoRegistry';
 import { loadOlderEvmHistory, refreshEvmHistory } from './evmHistory';
@@ -139,16 +183,28 @@ export function activeFamily(): WalletFamily {
 /** The chain id the UI should treat as active: the UTXO LiveNetworkId, or the
  *  `evm:<key>` target of the chain the active EVM account is showing. */
 export function activeChainTarget(): string {
+  const family = activeFamily();
+  // A Monero wallet's target is its one fixed id (the entry's `network` and the
+  // switcher id are the same string); activeChainId() would name the idle
+  // UTXO chain, exactly as it does for an EVM account.
+  if (family === 'monero') return MONERO_NETWORK;
+  // Same for the Zcash and Bittensor targets: one fixed id each.
+  if (family === 'zcash') return ZCASH_NETWORK;
+  if (family === 'substrate') return TAO_NETWORK;
   const key = svc.evmChainKey();
-  return activeFamily() === 'evm' && key ? evmChainTarget(key) : activeChainId();
+  return family === 'evm' && key ? evmChainTarget(key) : activeChainId();
 }
 
 /** Display facts for ANY chain id the switcher/picker can name: a UTXO
- *  LiveNetworkId/ChainId, or an `evm:<key>` target (resolved against the EVM
- *  chains this build knows). Null for an EVM target this build does not carry. */
+ *  LiveNetworkId/ChainId, an `evm:<key>` target (resolved against the EVM
+ *  chains this build knows), or the Monero target (resolved against the one
+ *  Monero row, `moneroChain`, which defaults to the mirror init() filled and
+ *  is null in a build without --monero). Null for a target this build does
+ *  not carry. */
 export function describeChain(
   id: string,
   evmChains: readonly EvmChainInfo[],
+  moneroChain: MoneroChainInfo | null = moneroChainInfo,
 ): {
   id: string;
   family: WalletFamily;
@@ -160,9 +216,49 @@ export function describeChain(
   homepage: string;
   /** A thin network: Home shows its caution notice. */
   young: boolean;
-  /** Marked "New" beside the name in the chain list (young, or new here). */
+  /** Marked "New" beside the name in the chain list (added in the current release). */
   isNew: boolean;
 } | null {
+  if (id === MONERO_NETWORK) {
+    return moneroChain
+      ? {
+          id,
+          family: 'monero',
+          displayName: moneroChain.displayName,
+          ticker: moneroChain.nativeTicker,
+          decimals: moneroChain.nativeDecimals,
+          homepage: moneroChain.homepage,
+          young: moneroChain.young,
+          isNew: moneroChain.recentlyAdded,
+        }
+      : null;
+  }
+  // Zcash and Bittensor: one fixed row each, in every build (no flag, §13 of
+  // their design notes), marked New in the chain list.
+  if (id === ZCASH_NETWORK) {
+    return {
+      id,
+      family: 'zcash',
+      displayName: ZCASH_CHAIN.displayName,
+      ticker: ZCASH_CHAIN.nativeTicker,
+      decimals: ZCASH_CHAIN.nativeDecimals,
+      homepage: ZCASH_CHAIN.homepage,
+      young: ZCASH_CHAIN.young,
+      isNew: ZCASH_CHAIN.recentlyAdded,
+    };
+  }
+  if (id === TAO_NETWORK) {
+    return {
+      id,
+      family: 'substrate',
+      displayName: TAO_CHAIN.displayName,
+      ticker: TAO_CHAIN.nativeTicker,
+      decimals: TAO_CHAIN.nativeDecimals,
+      homepage: TAO_CHAIN.homepage,
+      young: TAO_CHAIN.young,
+      isNew: TAO_CHAIN.recentlyAdded,
+    };
+  }
   const key = evmChainKeyOf(id);
   if (key !== null) {
     const c = evmChains.find((x) => x.key === key);
@@ -175,7 +271,7 @@ export function describeChain(
           decimals: c.nativeDecimals,
           homepage: c.homepage,
           young: c.young,
-          isNew: c.young || c.recentlyAdded,
+          isNew: c.recentlyAdded,
         }
       : null;
   }
@@ -201,6 +297,9 @@ export function describeChain(
  * "EVRmore network". A ternary cannot grow with the chain list; a lookup can.
  */
 export function chainDisplayName(chainId: string = activeChainTarget()): string {
+  if (chainId === MONERO_NETWORK) return moneroChainInfo?.displayName ?? 'Monero';
+  if (chainId === ZCASH_NETWORK) return ZCASH_CHAIN.displayName;
+  if (chainId === TAO_NETWORK) return TAO_CHAIN.displayName;
   const evm = evmChainInfoFor(chainId);
   if (evm) return evm.displayName;
   return networkFor(chainId as Parameters<typeof networkFor>[0]).displayName;
@@ -210,6 +309,15 @@ export function chainDisplayName(chainId: string = activeChainTarget()): string 
  *  chain helpers above the store can answer for `evm:<key>` ids without a
  *  store read. Filled by init() from loadEvmChainInfos(); empty without --evm. */
 let evmChainInfos: readonly EvmChainInfo[] = [];
+
+/** The one Monero row, mirrored the same way (filled by init() from
+ *  loadMoneroChainInfo(); null without --monero). The ticker and decimals are
+ *  fixed facts, so the helpers below answer them even before init() has run
+ *  or in a build without the engine: a stored Monero wallet must still be
+ *  NAMED correctly in a wallet list, whether or not it can be opened. */
+let moneroChainInfo: MoneroChainInfo | null = null;
+const MONERO_TICKER = 'XMR';
+const MONERO_DECIMALS = 12;
 
 /** The EVM chain an id names: an `evm:<key>` target, or the stored 'evm'
  *  sentinel of an EVM summary (which means "the chain the active account is
@@ -228,9 +336,23 @@ function evmChainInfoFor(chainId: string): EvmChainInfo | null {
  *  the active chain, EVM-aware). Exported for chain-aware UI labels (fee
  *  notes, error text, unit suffixes). */
 export function nativeTickerFor(chainId: string = activeChainTarget()): string {
+  if (chainId === MONERO_NETWORK) return MONERO_TICKER;
+  if (chainId === ZCASH_NETWORK) return ZCASH_CHAIN.nativeTicker;
+  if (chainId === TAO_NETWORK) return TAO_CHAIN.nativeTicker;
   const evm = evmChainInfoFor(chainId);
   if (evm) return evm.nativeTicker;
   return networkFor(chainId as LiveNetworkId).ticker;
+}
+
+/** Native coin decimals of a chain (12 on Monero, 8 on Zcash, 9 on Bittensor,
+ *  the registry's on EVM, the params' on UTXO). */
+export function nativeDecimalsFor(chainId: string = activeChainTarget()): number {
+  if (chainId === MONERO_NETWORK) return MONERO_DECIMALS;
+  if (chainId === ZCASH_NETWORK) return ZCASH_CHAIN.nativeDecimals;
+  if (chainId === TAO_NETWORK) return TAO_CHAIN.nativeDecimals;
+  const evm = evmChainInfoFor(chainId);
+  if (evm) return evm.nativeDecimals;
+  return networkFor(chainId as LiveNetworkId).decimals;
 }
 
 /** The identifier the notification targeting matches THIS wallet's active chain
@@ -270,6 +392,11 @@ export function walletsOnChain<T extends { network: string; family?: WalletFamil
   // "on" every `evm:<key>` target: the recipient picker for a Base send may
   // offer the user's other EVM accounts, never a UTXO one.
   if (isEvmChainTarget(chainId)) return wallets.filter((w) => walletFamily(w) === 'evm');
+  // Monero has one target and its wallets are exactly the 'monero' family.
+  if (chainId === MONERO_NETWORK) return wallets.filter((w) => walletFamily(w) === 'monero');
+  // Zcash and Bittensor likewise: one target, one family each.
+  if (chainId === ZCASH_NETWORK) return wallets.filter((w) => walletFamily(w) === 'zcash');
+  if (chainId === TAO_NETWORK) return wallets.filter((w) => walletFamily(w) === 'substrate');
   const chain = networkFor(chainId as LiveNetworkId).chainId;
   // Family first: an EVM account has no UTXO `network`, so it must never reach
   // networkFor(). Absent family = utxo, so every existing wallet is unaffected.
@@ -317,6 +444,18 @@ export function chainsWithWallets(wallets: WalletSummary[], evmChainKeys: readon
       for (const key of evmChainKeys) out.add(evmChainTarget(key));
       continue;
     }
+    if (walletFamily(w) === 'monero') {
+      out.add(MONERO_NETWORK);
+      continue;
+    }
+    if (walletFamily(w) === 'zcash') {
+      out.add(ZCASH_NETWORK);
+      continue;
+    }
+    if (walletFamily(w) === 'substrate') {
+      out.add(TAO_NETWORK);
+      continue;
+    }
     for (const alias of chainIdAliases(w.network)) out.add(alias);
   }
   return out;
@@ -330,8 +469,19 @@ export function chainsWithWallets(wallets: WalletSummary[], evmChainKeys: readon
 function baseWalletName(w: { name: string; network: string; family?: WalletFamily }): string {
   const name = w.name.trim();
   // An EVM account is tagged with the family, not a chain (enableChain names
-  // it "<base> (EVM)"), and has no UTXO params to consult.
-  const tags = walletFamily(w) === 'evm' ? ['EVM'] : [networkFor(w.network as LiveNetworkId).displayName, networkFor(w.network as LiveNetworkId).ticker];
+  // it "<base> (EVM)"), and has no UTXO params to consult. A Monero sibling is
+  // "<base> (Monero)" and has none either.
+  const family = walletFamily(w);
+  const tags =
+    family === 'evm'
+      ? ['EVM']
+      : family === 'monero'
+        ? ['Monero', MONERO_TICKER]
+        : family === 'zcash'
+          ? [ZCASH_CHAIN.displayName, ZCASH_CHAIN.nativeTicker]
+          : family === 'substrate'
+            ? [TAO_CHAIN.displayName, TAO_CHAIN.nativeTicker]
+            : [networkFor(w.network as LiveNetworkId).displayName, networkFor(w.network as LiveNetworkId).ticker];
   for (const tag of tags) {
     const suffix = ` (${tag})`;
     if (name.length > suffix.length && name.toLowerCase().endsWith(suffix.toLowerCase())) {
@@ -341,34 +491,159 @@ function baseWalletName(w: { name: string; network: string; family?: WalletFamil
   return name;
 }
 
+/** The wallet name the HEADER's wallet picker shows: the name with the chain
+ *  tag enableChain appended to a derived sibling (" (EVM)", " (Bittensor)",
+ *  " (Monero)", " (Ravencoin)"...) taken off, because the network button beside
+ *  it already names the active chain. Only the wallet's OWN chain/family label
+ *  (or its ticker) is stripped, the same rule siblingBaseName groups by, so a
+ *  user's own name that merely ends in parentheses ("Savings (old)") is shown
+ *  untouched. The wallet list and Settings keep the full name. */
+export function headerWalletName(w: { name: string; network: string; family?: WalletFamily }): string {
+  return baseWalletName(w) || w.name;
+}
+
+/** The base name a NEW sibling of `active` is named after: the SEED GROUP's,
+ *  not the active wallet's own. The group is the set of wallets sharing
+ *  `active.seedGroup` (a Monero sibling and its source, the accounts of one
+ *  EVM seed); its earliest-created member is the wallet the user named first,
+ *  so a Monero sibling renamed to "My XMR" no longer hands "My XMR (Bitcoin)"
+ *  to the next chain added from it. Pure and exported for tests; a wallet with
+ *  no group (a plain UTXO seed) keeps the old rule, its own tag-stripped name.
+ *  Never renames anything that exists. */
+export function siblingBaseName(
+  wallets: ReadonlyArray<{ name: string; network: string; family?: WalletFamily; seedGroup?: string; createdAt: number }>,
+  active: { name: string; network: string; family?: WalletFamily; seedGroup?: string; createdAt: number },
+): string {
+  const group = active.seedGroup;
+  if (!group) return baseWalletName(active);
+  const members = wallets.filter((w) => w.seedGroup === group);
+  if (members.length === 0) return baseWalletName(active);
+  const root = members.reduce((best, w) => (w.createdAt < best.createdAt ? w : best), members[0]);
+  return baseWalletName(root);
+}
+
+/** The Monero mainnet address check, captured from the engine when init()
+ *  loads it (null without --monero, when no Monero wallet can be active
+ *  either). Synchronous so addContact can stay synchronous. */
+let moneroAddressValidator: ((address: string) => boolean) | null = null;
+
+/** '0x' plus 40 hex characters, any case: what every EVM chain accepts. Same
+ *  check LiveSendEvm applies, kept local because the store must not import a
+ *  VALUE from the EVM engine outside its flag-guarded loader. */
+const EVM_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
+
+/** Whether `address` can receive on `chainId`, scoped by FAMILY (the owner's
+ *  chain-scoping rule): a Monero wallet accepts only a mainnet Monero address,
+ *  an EVM chain a 0x address, a UTXO chain an address that decodes under ITS
+ *  params (a bc1q address is not an Evrmore contact, whatever it decodes to
+ *  elsewhere). Pure; `moneroValid` is injectable for tests. */
+export function isValidContactAddress(
+  address: string,
+  chainId: string = activeChainTarget(),
+  moneroValid: ((address: string) => boolean) | null = moneroAddressValidator,
+): boolean {
+  if (chainId === MONERO_NETWORK) return moneroValid ? moneroValid(address) : false;
+  // A Zcash contact is a transparent recipient (t1, t3, tex1; shielded and
+  // unified addresses are refused, the Zcash engine design notes §3); a
+  // Bittensor contact is an SS58 address under prefix 42 only.
+  if (chainId === ZCASH_NETWORK) return isValidZcashRecipient(address);
+  if (chainId === TAO_NETWORK) return isValidTaoAddress(address);
+  if (isEvmChainTarget(chainId) || chainId === EVM_NETWORK) return EVM_ADDRESS_RE.test(address);
+  return isValidAddress(address, networkFor(chainId as LiveNetworkId));
+}
+
+/** The contacts that can receive on `chainId` (default = the active chain):
+ *  the address book LIST scoped by the same predicate that scopes SAVING
+ *  (isValidContactAddress), so an Evrmore wallet never lists a Monero or a
+ *  Bitcoin contact it could not send to. A filter, never a delete: every
+ *  other chain's contacts stay in the book for when that chain is active.
+ *  Pure; `moneroValid` is injectable for tests. */
+export function contactsForChain<T extends { address: string }>(
+  addressBook: readonly T[],
+  chainId: string = activeChainTarget(),
+  moneroValid: ((address: string) => boolean) | null = moneroAddressValidator,
+): T[] {
+  return addressBook.filter((c) => isValidContactAddress(c.address, chainId, moneroValid));
+}
+
+/** Whether a wallet is a member of a SEED GROUP: one recovery phrase whose
+ *  chains are siblings of each other ("Wallet 1", "Wallet 1 (Ravencoin)",
+ *  "Wallet 1 (EVM)", "Wallet 1 (Monero)"). The chain switcher acts on that
+ *  group (the owner's chain-scoping rule): it never jumps from one phrase's
+ *  wallet to another phrase's. A single imported key and a Monero wallet
+ *  imported from its 25 words derive no siblings and belong to no group. */
+export function belongsToSeedGroup(w: Pick<WalletSummary, 'kind'> & { moneroKeySource?: string }): boolean {
+  return w.kind === 'seed' && w.moneroKeySource !== 'words';
+}
+
+/** Whether `a` and `b` are wallets of the SAME recovery phrase: they share a
+ *  `seedGroup` when both carry one (a Monero sibling and its source, the
+ *  accounts of one EVM seed), or the same seed-group base name (enableChain
+ *  names a sibling `<base> (<chain>)`, and siblingBaseName roots a renamed
+ *  member at its group's first wallet). A UTXO source and its EVM account
+ *  carry DIFFERENT group ids (each is keyed by its own index-0 address), so
+ *  the name rule is what joins the families. */
+function sameSeed(wallets: WalletSummary[], a: WalletSummary, b: WalletSummary): boolean {
+  // Seed groups live in TWO namespaces: a group keyed by a UTXO address (a
+  // UTXO seed wallet and the engine siblings added FROM it) and a group keyed
+  // by the EVM account-0 address (the EVM accounts of one seed, and the
+  // engine siblings added from one of THEM: a vault-copy sibling always
+  // carries its source's group, which is what lets changePassword move the
+  // whole group in one write). Inside ONE namespace a group is the proof,
+  // and the name must never override it: two DIFFERENT phrases the user
+  // happened to name alike ('Main' and 'Main') were joined by the name rule
+  // below, which sent the switcher to the other phrase's wallet (verified in
+  // the extension, 2026-09-28). Across namespaces the groups are ALWAYS
+  // different for the same phrase (a UTXO wallet next to its EVM account; a
+  // Zcash sibling added from the EVM account next to a Bittensor sibling
+  // added from the Evrmore wallet), so only the name can pair them. The
+  // namespace is read off the id itself, never off the entry's family: an
+  // engine sibling of an EVM account is a non-EVM entry carrying an
+  // EVM-namespace id.
+  if (a.seedGroup && b.seedGroup && seedGroupNamespace(a) === seedGroupNamespace(b)) {
+    return a.seedGroup === b.seedGroup;
+  }
+  // A wallet stored without a seed group (an older entry), or a pair across
+  // the two namespaces, falls back to the chain-tag-stripped name.
+  const base = siblingBaseName(wallets, a).toLowerCase();
+  return !!base && siblingBaseName(wallets, b).toLowerCase() === base;
+}
+
+/** Which namespace a wallet's seed-group id belongs to: an EVM account's is
+ *  always the EVM one (its account-0 address); any other entry's is told by
+ *  the id itself, since a vault-copy sibling of an EVM account carries that
+ *  0x address while no UTXO address ever starts with "0x". */
+function seedGroupNamespace(w: Pick<WalletSummary, 'seedGroup' | 'family' | 'kind'>): 'evm' | 'utxo' {
+  if (walletFamily(w) === 'evm') return 'evm';
+  return /^0x/i.test(w.seedGroup ?? '') ? 'evm' : 'utxo';
+}
+
 /** The wallet the chain switcher should switch to for `chainId`, or null when
- *  that chain has no wallet yet (the UI then offers enableChain).
+ *  the ACTIVE wallet's seed group has no wallet there yet (the UI then offers
+ *  enableChain, even if another phrase already has that chain).
  *
- *  Selection is DETERMINISTIC and input-order stable: among the wallets on that
- *  chain, prefer the SIBLING of the currently active wallet — the one whose
- *  chain-tag-stripped name matches the active wallet's (that is the entry
- *  enableChain derived from the same secret) — otherwise the FIRST one. */
+ *  Selection is DETERMINISTIC and input-order stable: among the wallets on
+ *  that chain, the SIBLING of the currently active wallet (sameSeed: shared
+ *  seed group, or the chain-tag-stripped name enableChain gave it). A seed
+ *  wallet with no sibling there gets null: the owner's chain-scoping rule
+ *  says the switcher acts on the active wallet's own phrase, so picking
+ *  another phrase's Monero or Bitcoin wallet was the X01/X02 bug. A wallet
+ *  outside any seed group (an imported key, a Monero wallet from 25 words)
+ *  keeps the old rule and falls back to the FIRST wallet on the chain. */
 export function walletOnChain(wallets: WalletSummary[], chainId: string): WalletSummary | null {
   const candidates = walletsOnChain(wallets, chainId);
   if (candidates.length === 0) return null;
   // `active` is carried on the summaries themselves, so this stays a pure
   // function of its arguments (no service/store read) and is safe in tests.
   const active = wallets.find((w) => w.active);
+  if (!active) return candidates[0];
   // Switching to an EVM chain while an EVM account is active stays on THAT
   // account (the address is the same on every EVM chain); otherwise the
   // sibling rule below picks the EVM account derived from the active seed.
-  if (isEvmChainTarget(chainId) && active && walletFamily(active) === 'evm') return active;
-  // The sibling rule (chain-tagged names come from enableChain: "Name (Base)"
-  // or "Name (Ravencoin)"); an active EVM account has no UTXO chain to strip,
-  // so a UTXO target falls through to FIRST.
-  if (active && (walletFamily(active) === 'utxo' || isEvmChainTarget(chainId))) {
-    const base = baseWalletName(active).toLowerCase();
-    if (base) {
-      const sibling = candidates.find((c) => baseWalletName(c).toLowerCase() === base);
-      if (sibling) return sibling;
-    }
-  }
-  return candidates[0];
+  if (isEvmChainTarget(chainId) && walletFamily(active) === 'evm') return active;
+  const sibling = candidates.find((c) => c.id === active.id) ?? candidates.find((c) => sameSeed(wallets, active, c));
+  if (sibling) return sibling;
+  return belongsToSeedGroup(active) ? null : candidates[0];
 }
 
 /** Whether Satori pool staking applies on this chain. SATORIEVR is an Evrmore
@@ -398,6 +673,9 @@ export function evmStakingSupported(chainId: string = activeChainTarget()): bool
  *  chain name or ticker (`=== 'BTGS'`) — that is what lets a future plain
  *  chain drop in with no UI edits. */
 export function assetsSupported(chainId: string = activeChainTarget()): boolean {
+  // Monero has no asset protocol at all (the Monero engine design notes §11).
+  // Neither has transparent Zcash nor Bittensor in this wallet (their §11).
+  if (chainId === MONERO_NETWORK || chainId === ZCASH_NETWORK || chainId === TAO_NETWORK) return false;
   // Every EVM chain has a token layer (ERC-20).
   if (evmChainInfoFor(chainId)) return true;
   return supportsAssets(networkFor(chainId as LiveNetworkId));
@@ -551,6 +829,31 @@ export function retireStaleTrust(token: EvmTrackedToken): EvmTrackedToken {
  *  wallet is being swapped (full-frame loading screen). Never persisted. */
 export type LiveSyncing = 'idle' | 'initial' | 'switching';
 
+/** Lifecycle of this page's Monero wallet (the `monero` slice):
+ *    closed   no wallet open (locked, or another family is active);
+ *    opening  the worker is being spawned and the wallet created or reopened
+ *             from its cache;
+ *    syncing  a scan is running (`sync` carries the heights);
+ *    synced   the last scan reached the tip (`balance` is current);
+ *    error    the open or the scan failed (`error` says why);
+ *    busy     another Satori GO window holds this wallet's lock (§6.3). */
+export type MoneroStatus = 'closed' | 'opening' | 'syncing' | 'synced' | 'error' | 'busy';
+
+const EMPTY_MONERO = { host: null, balance: null, sync: null, error: null, status: 'closed' as const };
+
+/** Lifecycle of this page's Zcash read (the `zcash` slice): 'idle' before the
+ *  first refresh, 'refreshing' while one runs, 'ready' with a snapshot,
+ *  'error' when the gateway read failed (`error` says why). The Home body
+ *  reports it on data-state of live-zec-home. */
+export type ZcashStatus = 'idle' | 'refreshing' | 'ready' | 'error';
+const EMPTY_ZCASH = { snapshot: null, expiredSends: [] as ZcashLocalSend[], error: null, status: 'idle' as const };
+
+/** Same for the Bittensor read (the `tao` slice); `pending` is the inclusion
+ *  state of the last send this page submitted (the Bittensor engine design
+ *  notes §4.5 step 8), null when none is being watched. */
+export type TaoStatus = 'idle' | 'refreshing' | 'ready' | 'error';
+const EMPTY_TAO = { account: null, runtime: null, pending: null, error: null, status: 'idle' as const };
+
 /** Legacy GLOBAL pin/hide lists (pre-2.2). Kept only for one-time migration into
  *  the active wallet — they were shared across wallets, which is the bug we fix. */
 const PINNED_ASSETS_KEY = 'pinnedAssets';
@@ -582,6 +885,17 @@ const assetOrderKey = (walletId: string, chainId: string) => `assetOrder:${walle
 /** Per-wallet record of what the user has already SEEN in Activity. Anything not
  *  covered by it counts as "new" for the Activity badge. */
 const seenTxKey = (walletId: string) => `activitySeen:${walletId}`;
+/** The seen-record key for the ACTIVE chain. An EVM account is one wallet on
+ *  every EVM chain, and the record's water mark is a BLOCK HEIGHT: one shared
+ *  record compared Avalanche heights (~96M) against a mark set on BNB Chain
+ *  (~125M), so every new Avalanche row read as already seen and the Activity
+ *  badge never lit (owner, 2026-10-02). Each EVM chain now keeps its own;
+ *  UTXO, Monero, Zcash and Bittensor wallets are one chain each and keep the
+ *  original key. */
+function activeSeenKey(walletId: string): string {
+  const evmKey = activeFamily() === 'evm' ? svc.evmChainKey() : null;
+  return evmKey ? `${seenTxKey(walletId)}:evm-${evmKey}` : seenTxKey(walletId);
+}
 
 /**
  * How much of Activity the user has already seen.
@@ -641,7 +955,7 @@ function emptyOlderHistory(): LiveState['olderHistory'] {
  *  state survives the upgrade and the first mark-as-seen sets the water mark. */
 async function readActivitySeen(walletId: string): Promise<ActivitySeen> {
   try {
-    const raw = await getStorage().get<unknown>(seenTxKey(walletId));
+    const raw = await getStorage().get<unknown>(activeSeenKey(walletId));
     if (Array.isArray(raw)) {
       return { height: 0, txids: raw.filter((x): x is string => typeof x === 'string') };
     }
@@ -780,6 +1094,13 @@ export function chainHideBlockedReason(chainId: string, activeChain: string): st
   if (isEvmChainTarget(chainId)) {
     return chainId === activeChain ? 'This is the network you are using. Switch to another one first.' : null;
   }
+  // Monero (`xmr:mainnet`): the same rule as an EVM chain. It MUST be answered
+  // before the networkFor() read below: that switch has no Monero case and
+  // resolves an unknown id to Evrmore, which would call Monero "the home
+  // network" and refuse to hide it.
+  if (isMoneroChainTarget(chainId) || isZcashChainTarget(chainId) || isTaoChainTarget(chainId)) {
+    return chainId === activeChain ? 'This is the network you are using. Switch to another one first.' : null;
+  }
   if (networkFor(chainId as LiveNetworkId).ticker === 'EVR') {
     return 'The home network is always available.';
   }
@@ -787,6 +1108,35 @@ export function chainHideBlockedReason(chainId: string, activeChain: string): st
     return 'This is the network you are using. Switch to another one first.';
   }
   return null;
+}
+
+/** The id a hidden chain is stored under: an `evm:<key>` target and the
+ *  Monero, Zcash and Bittensor targets verbatim, a UTXO id in its canonical
+ *  form. The engine and EVM targets must not reach networkFor(): with no
+ *  case for them there, each would canonicalise to Evrmore, and hiding one
+ *  would hide the home chain instead (or, on read, be filtered away). */
+export function canonicalHiddenChainId(chainId: string): string {
+  return isEvmChainTarget(chainId) || isMoneroChainTarget(chainId) || isZcashChainTarget(chainId) || isTaoChainTarget(chainId)
+    ? chainId
+    : networkFor(chainId as LiveNetworkId).chainId;
+}
+
+/** The persisted hidden-chain list as init() reads it back: every id through
+ *  the SAME canonicaliser setChainHidden stores it with (so a hidden Zcash,
+ *  Bittensor, Monero or EVM row survives a reload instead of collapsing to
+ *  'evrmore-mainnet' and being dropped), the never-hideable home chain
+ *  filtered out, duplicates removed. */
+export function normalizeStoredHiddenChains(stored: readonly unknown[]): string[] {
+  const out: string[] = [];
+  for (const raw of stored) {
+    if (typeof raw !== 'string' || !raw) continue;
+    const id = canonicalHiddenChainId(raw);
+    if (!isEvmChainTarget(id) && !isMoneroChainTarget(id) && !isZcashChainTarget(id) && !isTaoChainTarget(id)) {
+      if (networkFor(id as LiveNetworkId).ticker === 'EVR') continue;
+    }
+    if (!out.includes(id)) out.push(id);
+  }
+  return out;
 }
 
 /** Settings visibility: 'basic' hides the expert-only sections. */
@@ -987,6 +1337,9 @@ export const DEFAULT_EXPLORER_URL_BTCB2 = 'https://mempool.guide/tx/{txid}';
  *  This is the SINGLE place that knows which chains have an explorer; the
  *  absence of an entry IS the answer, so nothing else needs a chain check. */
 function defaultExplorerFor(chainId: string = activeChainTarget()): string {
+  if (chainId === MONERO_NETWORK) return moneroChainInfo?.explorerTxUrl ?? MONERO_EXPLORER_TX_URL;
+  if (chainId === ZCASH_NETWORK) return ZCASH_CHAIN.explorerTxUrl;
+  if (chainId === TAO_NETWORK) return TAO_CHAIN.explorerTxUrl;
   const evm = evmChainInfoFor(chainId);
   if (evm) return evm.explorerTxUrl;
   const ticker = nativeTickerFor(chainId);
@@ -997,7 +1350,7 @@ function defaultExplorerFor(chainId: string = activeChainTarget()): string {
   if (ticker === 'DOGE') return DEFAULT_EXPLORER_URL_DOGE;
   if (ticker === 'WJK') return DEFAULT_EXPLORER_URL_WJK;
   if (ticker === 'NEOX') return DEFAULT_EXPLORER_URL_NEOX;
-  if (ticker === 'BTCB2') return DEFAULT_EXPLORER_URL_BTCB2;
+  if (ticker === 'XBT') return DEFAULT_EXPLORER_URL_BTCB2;
   if (ticker === 'EVR') return DEFAULT_EXPLORER_URL;
   // A chain with no known explorer fails closed rather than borrowing another
   // chain's, which would resolve a foreign txid on the wrong chain and read to
@@ -1019,6 +1372,14 @@ export function hasDefaultExplorer(chainId: string = activeChainTarget()): boole
  *  own explorer URL still gets a chain-isolated slot, even though there is no
  *  built-in default). */
 function explorerKeyForChain(chainId: string = activeChainTarget()): string {
+  if (chainId === MONERO_NETWORK) return `${EXPLORER_URL_KEY}:xmr-mainnet`;
+  if (chainId === ZCASH_NETWORK) return `${EXPLORER_URL_KEY}:zec-mainnet`;
+  if (chainId === TAO_NETWORK) return `${EXPLORER_URL_KEY}:tao-mainnet`;
+  // Every EVM chain gets its own slot. Without this an EVM target fell through
+  // to Evrmore's legacy key, so a custom explorer saved on Base overwrote
+  // Evrmore's (found 2026-09-29).
+  const evmKey = evmChainKeyOf(chainId);
+  if (evmKey !== null) return `${EXPLORER_URL_KEY}:evm-${evmKey}`;
   const ticker = nativeTickerFor(chainId);
   if (ticker === 'RVN') return `${EXPLORER_URL_KEY}:ravencoin-mainnet`;
   if (ticker === 'BTGS') return `${EXPLORER_URL_KEY}:bitcoingold-mainnet`;
@@ -1027,6 +1388,8 @@ function explorerKeyForChain(chainId: string = activeChainTarget()): string {
   if (ticker === 'BTC') return `${EXPLORER_URL_KEY}:bitcoin-mainnet`;
   if (ticker === 'DOGE') return `${EXPLORER_URL_KEY}:dogecoin-mainnet`;
   if (ticker === 'NEOX') return `${EXPLORER_URL_KEY}:neoxa-mainnet`;
+  // Bitcoin BLAKE2b (XBT) had no case either and shared Evrmore's slot the same way.
+  if (ticker === 'XBT') return `${EXPLORER_URL_KEY}:bitcoinblake2b-mainnet`;
   return EXPLORER_URL_KEY;
 }
 
@@ -1581,6 +1944,60 @@ interface LiveState {
    *  waiting for the arming gate, exactly as `evmSend` is for a send. */
   evmStaking: { snapshot: EvmStakingSnapshot | null; loading: boolean; plan: EvmStakePlan | null; planning: boolean };
 
+  // --- Monero (family 'monero', the Monero engine design notes §8/§15) ---------
+  /** The open Monero wallet of THIS PAGE and what it last reported.
+   *  `chain` is the one Monero row (null in a build without --monero, and
+   *  every Monero affordance keys off that). `host` is the worker-backed
+   *  wallet, opened on unlock and closed (worker terminated) on lock, wallet
+   *  switch and window close; the view key exists only inside it. `balance`
+   *  and `sync` are what the last sync answered; `status` is the lifecycle the
+   *  Home screen reports (data-state on live-xmr-sync), `error` its message
+   *  when 'error' or 'busy' (another window holds this wallet). */
+  monero: {
+    chain: MoneroChainInfo | null;
+    host: MoneroWalletHost | null;
+    balance: MoneroBalance | null;
+    sync: MoneroSyncProgress | null;
+    error: string | null;
+    status: MoneroStatus;
+  };
+
+  // --- Zcash (family 'zcash', the Zcash engine design notes §8/§15) ------------
+  /** What the last Zcash refresh of THIS PAGE answered. `chain` is the one
+   *  Zcash row (always present: no build flag). `snapshot` is the reader's
+   *  view (confirmed balance, spendable UTXOs, mempool, history); null before
+   *  the first refresh and after a wallet switch. */
+  zcash: {
+    chain: ZcashChainInfo;
+    snapshot: ZcashSnapshot | null;
+    /** This wallet's own sends the chain let EXPIRE (the tip passed their
+     *  expiry height unconfirmed, Zcash design §4.5/§6.5): the funds never
+     *  left, and the home screen says so with "Send again" until the user
+     *  dismisses them (dismissExpiredZcashSends). Activity's rows cannot
+     *  carry a failed state, so this list is where they live. */
+    expiredSends: ZcashLocalSend[];
+    error: string | null;
+    status: ZcashStatus;
+  };
+
+  // --- Bittensor (family 'substrate', the Bittensor engine design notes §8/§15)
+  /** The last Bittensor read of THIS PAGE: the account (free, reserved,
+   *  nonce, spendable), the runtime guard's verdict (Send is blocked on
+   *  'layout-changed'), and the inclusion state of a send this page is
+   *  watching. */
+  tao: {
+    chain: TaoChainInfo;
+    account: TaoAccountState | null;
+    runtime: ProfileVerdict | null;
+    pending: TaoInclusion | null;
+    error: string | null;
+    status: TaoStatus;
+  };
+  /** The Bittensor send being reviewed (built by buildTaoSend, sent by
+   *  confirmTaoSend), the `evmSend` shape. */
+  taoSend: TaoSendPlan | null;
+  loadingTaoSend: boolean;
+
   // --- multi-wallet ---------------------------------------------------------
   /** All wallets (metadata only — never a secret). */
   wallets: WalletSummary[];
@@ -1878,13 +2295,55 @@ interface LiveState {
    *  so the user never retypes their recovery phrase. `password` is the ACTIVE
    *  wallet's password ('' for a passwordless wallet). Returns {ok:false,error}
    *  on a wrong password, an already-enabled chain, or any failure — and creates
-   *  nothing in those cases. */
-  enableChain(chainId: string, password: string): Promise<{ ok: boolean; error?: string }>;
+   *  nothing in those cases. For the Monero target `opts.moneroUsedBefore`
+   *  is the user's answer to "used with Monero before?" (the switcher's
+   *  checkbox): true scans from the release floor, false from today's tip,
+   *  absent lets the service decide from the phrase's origin (§6.6).
+   *  `opts.moneroRestoreHeight` (from the switcher's optional "First used
+   *  around" date) overrides both: the scan starts there. */
+  enableChain(chainId: string, password: string, opts?: { moneroUsedBefore?: boolean; moneroRestoreHeight?: number }): Promise<{ ok: boolean; error?: string }>;
 
   addWalletStart(): void;
   cancelAddWallet(): void;
   renameWallet(id: string, name: string): Promise<void>;
   removeWallet(id: string): Promise<void>;
+  /** Open the ACTIVE Monero wallet in this page's worker (no-op when it is
+   *  already open, when the active wallet is another family, or when this
+   *  build has no Monero engine). Every Monero refresh starts here. */
+  openMoneroHost(): Promise<void>;
+  /** Close the open Monero wallet: save, close, terminate the worker (lock,
+   *  wallet switch, window close). Safe to call when nothing is open. */
+  closeMoneroHost(): Promise<void>;
+  /** Land on the Monero wallet the SERVICE just made active and unlocked
+   *  (addMoneroAccount from the chain switcher, importMoneroWallet from the
+   *  import screen): the same on-screen reset importWallet does, then the
+   *  wallet list and the first refresh, which opens the wallet and scans. */
+  openAddedMoneroWallet(): Promise<void>;
+
+  // --- Zcash and Bittensor ----------------------------------------------------
+  /** A COPY of the active Zcash wallet's keys for the transaction builder
+   *  (zcashSend.ts zeroes it right after the build). Throws when locked or
+   *  when the active wallet is not a Zcash wallet. A thin pass-through to the
+   *  service, exposed here because Zcash has no open-host object the way
+   *  Monero does to carry keys through this store privately. */
+  zcashKeysOfActive(): ZcashKeys;
+  /** Relay a reviewed Zcash plan behind the SAME arming gate every other
+   *  family's broadcast honours (arm(true) first, exactly as confirmTaoSend
+   *  and broadcastEvmPlan require): the plan is already signed at review
+   *  time, so this gate, not a disabled button, is what stands between the
+   *  review screen and the network. Throws ZcashSendError('broadcast-failed',
+   *  'Confirm the send first.') when not armed; always closes the gate after. */
+  confirmZcashSend(plan: ZcashSendPlan, opts?: { to?: string }): Promise<{ txid: string }>;
+  /** Forget the expired sends the user has seen (their local records too). */
+  dismissExpiredZcashSends(): Promise<void>;
+  /** Build a Bittensor send for review (runtime guard, nonce, fee from the
+   *  node, signed). Throws Set B's TaoSendError / TaoRuntimeChangedError for
+   *  the screen to show inline; the plan lands in `taoSend`. */
+  buildTaoSend(input: TaoSendInput): Promise<TaoSendPlan>;
+  /** Pre-flight and submit the reviewed plan behind the arming gate, record
+   *  the local send, and start watching for inclusion (`tao.pending`). */
+  confirmTaoSend(): Promise<{ hash: string }>;
+  clearTaoSend(): void;
 
   // --- reveal secrets (password-gated) --------------------------------------
   revealMnemonic(password: string): Promise<string | null>;
@@ -2052,6 +2511,10 @@ function emptyAddressScan(): AddressScanState {
 // Auto-refresh lives at module scope (not in state) so it never triggers a
 // re-render and survives store selector churn. Guarded so it can't stack.
 let autoRefreshTimer: ReturnType<typeof setInterval> | null = null;
+
+/** The Monero open in flight, if any (openMoneroHost): a second caller waits
+ *  for it instead of spawning a second worker for the same wallet. */
+let moneroOpening: Promise<void> | null = null;
 let silentRefreshInFlight = false;
 
 // The FULL background tx classification currently running (identified by the
@@ -2121,6 +2584,11 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   evmSend: null,
   loadingEvmSend: false,
   evmStaking: { snapshot: null, loading: false, plan: null, planning: false },
+  monero: { chain: null, ...EMPTY_MONERO },
+  zcash: { chain: ZCASH_CHAIN, ...EMPTY_ZCASH },
+  tao: { chain: TAO_CHAIN, ...EMPTY_TAO },
+  taoSend: null,
+  loadingTaoSend: false,
   wallets: [],
   activeWalletId: null,
   addingWallet: false,
@@ -2180,6 +2648,19 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       evmChainInfos = chains;
       set((s) => ({ evm: { ...s.evm, chains } }));
     });
+    // The Monero row (null without --monero), same discipline: loaded once so
+    // the switcher, the picker and Settings key their Monero affordances off
+    // state and never import the engine directly.
+    void loadMoneroChainInfo().then((chain) => {
+      moneroChainInfo = chain;
+      set((s) => ({ monero: { ...s.monero, chain } }));
+    });
+    // The address book's Monero check rides on the same flag-guarded loader:
+    // a plain build never sees the engine, and can never have a Monero wallet
+    // active to add a Monero contact to.
+    void loadMoneroModules().then((monero) => {
+      moneroAddressValidator = monero ? (address: string) => monero.isValidMoneroAddress(address, 'mainnet') : null;
+    });
     // Load the persisted pin/hide lists + live settings up-front so the first
     // refresh already reflects the user's curated set and preferences.
     const [
@@ -2218,12 +2699,11 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       // that quietly drops rows on first run would be lying about what it holds.
       hideZeroBalances: storedHideZeroBalances === true,
       hideBalances: storedHideBalances === true,
-      // Normalised through networkFor so a stale or renamed id cannot hide a
-      // chain by accident, and the two never-hideable rules are re-applied on
-      // read rather than trusted from disk.
-      hiddenChains: storedHiddenChains
-        .map((id) => networkFor(id as LiveNetworkId).chainId)
-        .filter((id) => networkFor(id as LiveNetworkId).ticker !== 'EVR'),
+      // Normalised the same way setChainHidden stores them (a UTXO id through
+      // networkFor, an engine or EVM target verbatim) so a stale or renamed id
+      // cannot hide a chain by accident, and the home-chain rule is re-applied
+      // on read rather than trusted from disk.
+      hiddenChains: normalizeStoredHiddenChains(storedHiddenChains),
       // Default TRUE — notify on incoming funds unless the user turned it off.
       notifyDeposits: typeof storedNotify === 'boolean' ? storedNotify : true,
       explorerUrlTemplate:
@@ -2324,6 +2804,13 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   ) {
     set({ error: null });
     try {
+      // The wallet being left may be a Monero wallet with its worker open (an
+      // "Add wallet" from a Monero sibling): close it BEFORE the service
+      // changes the active secret, so its keys never outlive the wallet that
+      // owned them and another window can open it. Every path that makes a
+      // different wallet active in this page does this (switchWallet,
+      // importWallet, importPrivateKeyWallet, openAddedMoneroWallet, lock).
+      await get().closeMoneroHost();
       const evmKey = evmChainKeyOf(network);
       const { mnemonic } = await svc.create(password, {
         network: evmKey !== null ? 'mainnet' : (network as LiveNetworkId),
@@ -2378,6 +2865,12 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   ) {
     set({ error: null });
     try {
+      // enableChain lands here too (a UTXO or EVM sibling derived from the
+      // active phrase): a Monero wallet that was active a moment ago keeps
+      // its worker, and with it the view and spend keys, unless it is closed
+      // here. svc.import zeroes the page copy of the keys but knows nothing
+      // about the worker. See createWallet.
+      await get().closeMoneroHost();
       const evmKey = evmChainKeyOf(network);
       await svc.import(
         mnemonic,
@@ -2442,6 +2935,8 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   ) {
     set({ error: null });
     try {
+      // See createWallet: the Monero worker of the wallet being left goes first.
+      await get().closeMoneroHost();
       // A single WIF/hex key becomes a one-address 'pk' wallet (how Satori-network
       // wallets are generated). An empty password makes it passwordless. A raw
       // hex key on an `evm:<key>` target becomes a single-address EVM account.
@@ -2481,7 +2976,10 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     const trimmedLabel = label.trim();
     const trimmedAddr = address.trim();
     if (!trimmedLabel) return { ok: false, error: 'Enter a name for this contact.' } as const;
-    if (!isValidAddress(trimmedAddr)) {
+    // Scoped to the ACTIVE chain (isValidContactAddress): the book used to
+    // accept anything base58check/bech32-shaped, so a bc1q address was saved
+    // as an "Evrmore" contact and a Monero address was refused outright.
+    if (!isValidContactAddress(trimmedAddr)) {
       // Name the chain from its params, never from a ticker ladder: a hardcoded
       // list silently goes stale on the next chain (and on a rename), leaving the
       // user an error that points at the wrong network.
@@ -2696,6 +3194,11 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     // which deliberately keeps the master key so a migrated wallet opens without
     // asking again.
     svc.lockApp();
+    // The Monero worker holds the view and spend keys in its WASM heap: lock
+    // closes the wallet and terminates it (the Monero engine design notes
+    // §6.5). Detached: lock() is synchronous and the save inside close() is
+    // best effort (the scan checkpoints anyway); the slot is cleared at once.
+    void get().closeMoneroHost();
     set({
       appUnlocked: false,
       phase: get().appPasswordSet ? 'app-locked' : 'locked',
@@ -2794,6 +3297,10 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       }
       get().stopAutoRefresh();
       txSyncRun = null;
+      // The wallet being left may be a Monero wallet with its worker open:
+      // close it (save, terminate) BEFORE the reset, so its keys never outlive
+      // the switch and the next wallet's open cannot race a closing one.
+      await get().closeMoneroHost();
       // TWO ACCOUNTS OF ONE SEED (the EVM accounts design notes): the service kept
       // the words in memory because the target account decrypts with the very
       // password this session already used. So there is nothing to unlock, and
@@ -2909,6 +3416,27 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       }
       return;
     }
+    // Monero: one target, one family. Switching there is switching to the
+    // Monero wallet derived from the active seed (or the first one); creating
+    // one is enableChain's job. Guarded BEFORE sameChain, which would feed the
+    // Monero id to networkFor().
+    if (chainId === MONERO_NETWORK) {
+      if (activeFamily() === 'monero') return;
+      if (get().wallets.length === 0) await get().loadWallets();
+      const target = walletOnChain(get().wallets, chainId);
+      if (!target || target.id === get().activeWalletId) return;
+      await get().switchWallet(target.id);
+      return;
+    }
+    // Zcash and Bittensor: the same one-target, one-family rule as Monero.
+    if (chainId === ZCASH_NETWORK || chainId === TAO_NETWORK) {
+      if (activeChainTarget() === chainId) return;
+      if (get().wallets.length === 0) await get().loadWallets();
+      const target = walletOnChain(get().wallets, chainId);
+      if (!target || target.id === get().activeWalletId) return;
+      await get().switchWallet(target.id);
+      return;
+    }
     // Already on this chain: nothing to do. Canonical compare, so the legacy
     // 'mainnet' alias and 'evrmore-mainnet' are correctly seen as one chain.
     // Family first: for an active EVM account activeChainId() names an idle
@@ -2958,6 +3486,10 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     await get().loadWallets();
     await get().loadAssetOrder();
     await get().loadEvmTokens();
+    // This chain's own seen-record (see activeSeenKey), before the refresh
+    // counts its rows against it.
+    const seenId = svc.activeWalletId();
+    if (seenId) set({ activitySeen: await readActivitySeen(seenId) });
     await get().refresh();
   },
 
@@ -2970,12 +3502,18 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   //     store state, and never persisted anywhere except the NEW wallet's own
   //     AES-GCM vault (which svc.import/importPrivateKey writes),
   //   * the reference is dropped in `finally` the moment the import returns.
-  async enableChain(chainId: string, password: string) {
+  async enableChain(chainId: string, password: string, opts?: { moneroUsedBefore?: boolean; moneroRestoreHeight?: number }) {
     if (get().wallets.length === 0) await get().loadWallets();
     const wallets = get().wallets;
     const activeId = get().activeWalletId;
     const active = wallets.find((w) => w.id === activeId) ?? wallets.find((w) => w.active);
     if (!active) return { ok: false, error: 'No wallet to derive from.' };
+    // A Monero wallet imported from its 25 words holds a spend key, not a
+    // phrase: there is nothing to derive another chain from. Said plainly here,
+    // where the reveal path below would otherwise answer "Incorrect password".
+    if (active.moneroKeySource === 'words') {
+      return { ok: false, error: 'This wallet was imported from 25 Monero words, which cannot derive other chains.' };
+    }
 
     const targetInfo = describeChain(chainId, get().evm.chains);
     if (!targetInfo) return { ok: false, error: 'This build does not carry that chain.' };
@@ -2999,7 +3537,111 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     // property of the source wallet, not of whatever the caller passed in.
     const pw = active.passwordless ? '' : password;
     // An EVM account is tagged with the family, not a chain: it spans them all.
-    const name = `${baseWalletName(active)} (${targetInfo.family === 'evm' ? 'EVM' : targetInfo.displayName})`;
+    // The base comes from the SEED GROUP (siblingBaseName), so a renamed Monero
+    // sibling does not lend its name to the next chain added from it.
+    const name = `${siblingBaseName(wallets, active)} (${targetInfo.family === 'evm' ? 'EVM' : targetInfo.displayName})`;
+
+    // "ADD MONERO" (the Monero engine design notes §9, §10): a vault-copy
+    // sibling of the ACTIVE seed wallet, keys re-derived from its phrase, no
+    // secret retyped and none re-encrypted. The service derives from the seed
+    // already in memory, so no plaintext passes through here at all; the
+    // password is still checked first, because enabling a chain is the same
+    // deliberate act on every row of the switcher. The new wallet lands active
+    // and unlocked, exactly as an import does, and the first refresh opens it.
+    if (targetInfo.family === 'monero') {
+      if (!get().monero.chain) return { ok: false, error: 'This build does not carry Monero.' };
+      if (active.kind !== 'seed') {
+        return { ok: false, error: 'Monero can only be added to a wallet made from a recovery phrase.' };
+      }
+      if (activeFamily() === 'monero') return { ok: false, error: 'You already have a Monero wallet.' };
+      // A Zcash or Bittensor sibling unlocked to its own keys and holds no
+      // BIP39 seed for addMoneroAccount to derive from; said plainly here
+      // rather than as a misleading "unlock this wallet".
+      if (activeFamily() === 'zcash' || activeFamily() === 'substrate') {
+        return { ok: false, error: `Switch to this phrase's main wallet first, then add ${targetInfo.displayName}.` };
+      }
+      if (!active.passwordless && !(await svc.verifyPassword(pw))) return { ok: false, error: 'Incorrect password.' };
+      try {
+        await svc.addMoneroAccount(active.id, name, {
+          usedBefore: opts?.moneroUsedBefore,
+          restoreHeight: opts?.moneroRestoreHeight,
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        const error =
+          msg === 'locked'
+            ? 'Unlock this wallet before adding Monero.'
+            : msg === 'not-a-seed-wallet'
+              ? 'Monero can only be added to a wallet made from a recovery phrase.'
+              : msg === 'already-added'
+                ? 'You already have a Monero wallet for this recovery phrase.'
+                : msg;
+        return { ok: false, error };
+      }
+      await get().openAddedMoneroWallet();
+      return { ok: true };
+    }
+
+    // "ADD ZCASH" (the Zcash engine design notes §9, §10): a vault-copy
+    // sibling, keys re-derived from the seed already in memory (or, when the
+    // active wallet is itself a Monero or Bittensor sibling that kept no seed,
+    // from the vault with the password checked just below). Same landing as
+    // Monero: active, unlocked, first refresh reads the balance.
+    if (targetInfo.family === 'zcash') {
+      if (active.kind !== 'seed') {
+        return { ok: false, error: 'Zcash can only be added to a wallet made from a recovery phrase.' };
+      }
+      if (activeFamily() === 'zcash') return { ok: false, error: 'You already have a Zcash wallet.' };
+      if (!active.passwordless && !(await svc.verifyPassword(pw))) return { ok: false, error: 'Incorrect password.' };
+      try {
+        await svc.addZcashAccount(active.id, name, { password: pw });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        const error =
+          msg === 'locked'
+            ? 'Unlock this wallet before adding Zcash.'
+            : msg === 'not-a-seed-wallet'
+              ? 'Zcash can only be added to a wallet made from a recovery phrase.'
+              : msg === 'already-added'
+                ? 'You already have a Zcash wallet for this recovery phrase.'
+                : msg === 'wrong-password'
+                  ? 'Incorrect password.'
+                  : msg;
+        return { ok: false, error };
+      }
+      await get().openAddedMoneroWallet();
+      return { ok: true };
+    }
+
+    // "ADD BITTENSOR" (the Bittensor engine design notes §9, §10): the same
+    // vault-copy sibling, but the account needs the WORDS (entropy route), so
+    // the service decrypts the source vault with the password the switcher
+    // collected and drops the words at once.
+    if (targetInfo.family === 'substrate') {
+      if (active.kind !== 'seed') {
+        return { ok: false, error: 'Bittensor can only be added to a wallet made from a recovery phrase.' };
+      }
+      if (activeFamily() === 'substrate') return { ok: false, error: 'You already have a Bittensor wallet.' };
+      if (!active.passwordless && !(await svc.verifyPassword(pw))) return { ok: false, error: 'Incorrect password.' };
+      try {
+        await svc.addSubstrateAccount(active.id, pw, name);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        const error =
+          msg === 'locked'
+            ? 'Unlock this wallet before adding Bittensor.'
+            : msg === 'not-a-seed-wallet'
+              ? 'Bittensor can only be added to a wallet made from a recovery phrase.'
+              : msg === 'already-added'
+                ? 'You already have a Bittensor wallet for this recovery phrase.'
+                : msg === 'wrong-password'
+                  ? 'Incorrect password.'
+                  : msg;
+        return { ok: false, error };
+      }
+      await get().openAddedMoneroWallet();
+      return { ok: true };
+    }
 
     // The ONLY variable that ever holds the plaintext. Typed nullable so it can
     // be released in `finally` (JS strings are immutable, so dropping the last
@@ -3291,6 +3933,9 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     const doomedAddresses = new Set<string>();
     if (doomed?.address) doomedAddresses.add(doomed.address);
     if (wasActive) for (const a of get().addresses) doomedAddresses.add(a.address);
+    // A Monero wallet open in this page is closed (worker terminated) BEFORE
+    // its record and its cache go; the service deletes the cache itself.
+    if (get().monero.host?.walletId === id) await get().closeMoneroHost();
 
     try {
       await svc.removeWallet(id);
@@ -3404,6 +4049,151 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     set({ wallets, activeWalletId: svc.activeWalletId() });
   },
 
+  // --- Monero host lifecycle (the Monero engine design notes §6.3, §6.5) ------
+  async openMoneroHost() {
+    if (activeFamily() !== 'monero') return;
+    const walletId = svc.activeWalletId();
+    if (!walletId) return;
+    if (get().monero.host?.walletId === walletId) return;
+    // One open at a time: a refresh fired while the first open is still
+    // spawning the worker must wait for it, not spawn a second.
+    if (moneroOpening) {
+      await moneroOpening;
+      return;
+    }
+    moneroOpening = (async () => {
+      const monero = await loadMoneroModules();
+      if (!monero) {
+        set((s) => ({
+          monero: { ...s.monero, ...EMPTY_MONERO, status: 'error', error: 'This build of Satori GO has no Monero engine.' },
+        }));
+        return;
+      }
+      let keys: ReturnType<typeof svc.moneroKeysOfActive>;
+      try {
+        keys = svc.moneroKeysOfActive();
+      } catch {
+        return; // locked meanwhile: nothing to open
+      }
+      // The entry's restore height and node set, read from the SERVICE: the
+      // `wallets` summaries in state load asynchronously (unlock() fires
+      // loadWallets off and refreshes right after), and a refresh that ran
+      // ahead of them would fall back to the release height and rescan
+      // 28,000 blocks it never needed to.
+      const entry = (await svc.listWallets().catch(() => [] as WalletSummary[])).find((w) => w.id === walletId);
+      set((s) => ({ monero: { ...s.monero, ...EMPTY_MONERO, status: 'opening' } }));
+      try {
+        const host = await monero.openMoneroWallet({
+          walletId,
+          keys,
+          restoreHeight: entry?.restoreHeight ?? monero.MONERO_RELEASE_HEIGHT,
+          gatewayUrl: gatewayUrl(),
+          clientToken: GATEWAY_CLIENT_TOKEN,
+          nodeSet: entry?.moneroNodeSet ?? 'main',
+          // Owner decision 2026-09-28: the gateway node set is trusted (0.1 MB
+          // per open instead of 18 MB; the node only ever sees the gateway).
+          trustedDaemon: true,
+          // Before every cache write the host asks whether the wallet still
+          // exists, from the SERVICE (the shared store, not this page's
+          // state): a wallet removed in another window must not have its
+          // history written back by this window's next checkpoint.
+          walletExists: async () => (await svc.listWallets()).some((w) => w.id === walletId),
+        });
+        // Locked or switched while the worker was spawning: the wallet this
+        // host holds is no longer the one on screen. Close it, keep nothing.
+        if (svc.activeWalletId() !== walletId || activeFamily() !== 'monero' || !svc.isUnlocked()) {
+          await host.close().catch(() => {});
+          return;
+        }
+        set((s) => ({ monero: { ...s.monero, host, status: 'opening', error: null } }));
+      } catch (err) {
+        const code = (err as { code?: string } | null)?.code;
+        const message = err instanceof Error ? err.message : String(err);
+        set((s) => ({
+          monero: {
+            ...s.monero,
+            ...EMPTY_MONERO,
+            status: code === 'busy' ? 'busy' : 'error',
+            error:
+              code === 'busy'
+                ? 'This Monero wallet is open in another Satori GO window. Close it there to sync here.'
+                : message,
+          },
+        }));
+      } finally {
+        // The host copied what it needs at open; this copy is done.
+        monero.zeroMoneroKeys(keys);
+      }
+    })().finally(() => {
+      moneroOpening = null;
+    });
+    await moneroOpening;
+  },
+
+  async closeMoneroHost() {
+    const host = get().monero.host;
+    // Leaving the wallet stops its inclusion polls too (each writes its
+    // resume point back and exits 'pending'; the next refresh of that wallet
+    // resumes them).
+    abortTaoInclusionPolls();
+    // This is the "leaving the wallet" hook every caller already runs (lock,
+    // switch, remove, backup replace, window close): the Zcash and Bittensor
+    // slices belong to the wallet being left just as the Monero host does, so
+    // they are reset here too, in one place.
+    set((s) => ({
+      monero: { ...s.monero, ...EMPTY_MONERO },
+      zcash: { ...s.zcash, ...EMPTY_ZCASH },
+      tao: { ...s.tao, ...EMPTY_TAO },
+      taoSend: null,
+      loadingTaoSend: false,
+    }));
+    if (!host) return;
+    try {
+      await host.close();
+    } catch {
+      // A close that failed still terminated the worker (close() does that on
+      // every path); there is nothing more to do with it.
+    }
+  },
+
+  async openAddedMoneroWallet() {
+    txSyncRun = null;
+    await get().closeMoneroHost();
+    const address = svc.getAddress(0);
+    set({
+      phase: 'ready',
+      appUnlocked: svc.appUnlocked(),
+      address,
+      addresses: [{ index: 0, address }],
+      assets: [],
+      txs: [],
+      activitySeen: emptyActivitySeen(),
+      unreadActivity: 0,
+      historyIssue: null,
+      historyLoading: false,
+      olderHistory: emptyOlderHistory(),
+      stakingEvents: [],
+      network: null,
+      sendPlan: null,
+      evmSend: null,
+      evmStaking: { snapshot: null, loading: false, plan: null, planning: false },
+      evmTokens: { tracked: [], discovered: [] },
+      assetOrder: [],
+      pendingMnemonic: null,
+      pendingMnemonicHasPassphrase: false,
+      addingWallet: false,
+      error: null,
+      syncing: 'idle',
+      syncProgress: null,
+      lastSyncAt: null,
+      staking: emptyStaking(),
+      addressScan: emptyAddressScan(),
+    });
+    await get().loadWallets();
+    await get().loadWalletAssets();
+    void get().refresh();
+  },
+
   // --- reveal secrets (password-gated; never logged or persisted) -----------
   async revealMnemonic(password: string) {
     try {
@@ -3466,6 +4256,200 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     // Asked of the SERVICE, not of `wallets` in state: the summaries load
     // asynchronously and a refresh fired right after create/import/unlock must
     // not race them into the UTXO path.
+    //
+    // MONERO FIRST, for the same reason. A Monero wallet is read by wallet2 in
+    // this page's worker (src/store/moneroBalances.ts): no address list, no
+    // Electrum, no indexer. The refresh opens the wallet if this page has not
+    // yet, runs one scan (a second caller shares a running one, see
+    // MoneroWalletHost.sync), then reads the history from the same scan.
+    if (activeFamily() === 'monero') {
+      const walletId = svc.activeWalletId();
+      if (!walletId) return;
+      await get().openMoneroHost();
+      const host = get().monero.host;
+      // Opened by another page, refused by this build, or failed: the slice
+      // already says which; Home shows it. Offline is the honest network state.
+      if (!host || host.walletId !== walletId) {
+        set({ loadingRefresh: false, offline: true });
+        return;
+      }
+      const stillCurrent = () => svc.activeWalletId() === walletId && get().monero.host === host;
+      set((s) => ({
+        monero: { ...s.monero, status: 'syncing', error: null },
+        historyLoading: s.txs.length === 0,
+      }));
+      const result = await refreshMoneroWallet(walletId, (p) => {
+        if (stillCurrent()) set((s) => ({ monero: { ...s.monero, sync: p } }));
+      });
+      if (!stillCurrent()) return;
+      const ok = result.error === null;
+      set((s) => ({
+        loadingRefresh: false,
+        offline: !ok,
+        assets: result.assets,
+        network: {
+          networkId: 'mainnet',
+          state: ok ? 'connected' : 'offline',
+          latencyMs: 0,
+          blockHeight: result.balance.daemonHeight,
+          serverVersion: 'monerod',
+          updatedAt: Date.now(),
+          tipTime: null,
+        },
+        monero: {
+          ...s.monero,
+          balance: result.balance,
+          sync: null,
+          status: ok ? 'synced' : 'error',
+          error: result.error,
+        },
+        ...(ok ? { lastSyncAt: Date.now() } : {}),
+      }));
+      // History straight from the scan (design §10). The module imports a
+      // VALUE from the engine, so it is reached only behind the flag.
+      if (__MONERO_ENABLED__) {
+        try {
+          const { refreshMoneroHistory } = await import('./moneroHistory');
+          const txs = await refreshMoneroHistory(walletId);
+          if (!stillCurrent()) return;
+          set({ txs, historyLoading: false, unreadActivity: countUnread(txs, get().activitySeen) });
+        } catch {
+          if (stillCurrent()) set({ historyLoading: false });
+        }
+      } else {
+        set({ historyLoading: false });
+      }
+      return;
+    }
+    // ZCASH (the Zcash engine design notes §6): one refresh is /info, /balance,
+    // /utxos, /mempool and the incremental /txs scan through the gateway, from
+    // the public watch set on the entry; no key is touched. The reader hands
+    // back the balance, the spendable set and the history in one snapshot.
+    if (activeFamily() === 'zcash') {
+      const walletId = svc.activeWalletId();
+      if (!walletId) return;
+      const stillCurrent = () => svc.activeWalletId() === walletId && get().address === address;
+      set((s) => ({
+        zcash: { ...s.zcash, status: 'refreshing', error: null },
+        historyLoading: s.txs.length === 0,
+      }));
+      try {
+        const result = await refreshZcashWallet(walletId);
+        if (!stillCurrent()) return;
+        set((s) => ({
+          loadingRefresh: false,
+          offline: false,
+          assets: result.assets,
+          network: {
+            networkId: 'mainnet',
+            state: 'connected',
+            latencyMs: 0,
+            blockHeight: result.snapshot.info.height,
+            serverVersion: 'lightwalletd',
+            updatedAt: Date.now(),
+            tipTime: null,
+          },
+          zcash: { ...s.zcash, snapshot: result.snapshot, status: 'ready', error: null },
+          lastSyncAt: Date.now(),
+        }));
+        void saveBalanceCache(balanceCacheChain, address, result.assets);
+      } catch (err) {
+        if (!stillCurrent()) return;
+        const message = err instanceof Error && err.message ? err.message : 'Could not reach Zcash through the gateway.';
+        // The last snapshot stays: a failed read is not an empty wallet.
+        set((s) => ({
+          loadingRefresh: false,
+          offline: true,
+          network: s.network ? { ...s.network, state: 'offline', updatedAt: Date.now() } : null,
+          zcash: { ...s.zcash, status: 'error', error: message },
+        }));
+      }
+      try {
+        const txs = await refreshZcashHistory(walletId);
+        if (!stillCurrent()) return;
+        set({ txs, historyLoading: false, unreadActivity: countUnread(txs, get().activitySeen) });
+        // A send of ours the tip let expire is not a row (no failed state
+        // there); it is the "not sent, send again" notice on Home.
+        const expiredSends = await expiredZcashSends(walletId);
+        if (!stillCurrent()) return;
+        set((s) => ({ zcash: { ...s.zcash, expiredSends } }));
+      } catch {
+        if (stillCurrent()) set({ historyLoading: false });
+      }
+      return;
+    }
+    // BITTENSOR (the Bittensor engine design notes §5): the account's
+    // System.Account at the finalized head plus the runtime guard, through the
+    // gateway. History is the local send list (the owner's no-Taostats rule).
+    if (activeFamily() === 'substrate') {
+      const walletId = svc.activeWalletId();
+      if (!walletId) return;
+      const stillCurrent = () => svc.activeWalletId() === walletId && get().address === address;
+      set((s) => ({
+        tao: { ...s.tao, status: 'refreshing', error: null },
+        historyLoading: s.txs.length === 0,
+      }));
+      const result = await refreshTaoWallet(walletId);
+      if (!stillCurrent()) return;
+      const ok = result.error === null;
+      set((s) => ({
+        loadingRefresh: false,
+        offline: !ok,
+        // A failed read keeps the last known account and rows (refreshTaoWallet
+        // answers the offline shape with `error` set, never throws).
+        ...(ok ? { assets: result.assets } : {}),
+        network: ok
+          ? {
+              networkId: 'mainnet',
+              state: 'connected',
+              latencyMs: 0,
+              blockHeight: result.account.finalizedNumber,
+              serverVersion: 'subtensor',
+              updatedAt: Date.now(),
+              tipTime: null,
+            }
+          : s.network
+            ? { ...s.network, state: 'offline', updatedAt: Date.now() }
+            : null,
+        tao: {
+          ...s.tao,
+          account: ok ? result.account : s.tao.account,
+          runtime: ok ? result.runtime : s.tao.runtime,
+          status: ok ? 'ready' : 'error',
+          error: result.error,
+        },
+        ...(ok ? { lastSyncAt: Date.now() } : {}),
+      }));
+      if (ok) void saveBalanceCache(balanceCacheChain, address, result.assets);
+      try {
+        const txs = await refreshTaoHistory(walletId);
+        if (!stillCurrent()) return;
+        set({ txs, historyLoading: false, unreadActivity: countUnread(txs, get().activitySeen) });
+      } catch {
+        if (stillCurrent()) set({ historyLoading: false });
+      }
+      // A send still 'pending' in the local list is polled to its final state
+      // from THIS page: the poll broadcastTaoPlan started died with the popup
+      // that sent it (any click outside closes one), and without a resume the
+      // row stayed pending forever and an expired era was never reported as
+      // "not included, send again" (design §4.5 step 8). Polls already
+      // running here are left alone; nothing is started when nothing is
+      // pending.
+      if (ok) {
+        void resumeTaoInclusionPolls({ rpc: taoRpcClient(), walletId, address }, (_hash, inclusion) => {
+          if (svc.activeWalletId() !== walletId) return;
+          set((s) => ({ tao: { ...s.tao, pending: inclusion } }));
+          if (inclusion.state === 'pending') return;
+          // The row's state changed on disk: re-read the list so Activity
+          // shows it without waiting for the next tick.
+          void refreshTaoHistory(walletId).then((txs) => {
+            if (svc.activeWalletId() !== walletId) return;
+            set({ txs, unreadActivity: countUnread(txs, get().activitySeen) });
+          });
+        });
+      }
+      return;
+    }
     if (activeFamily() === 'evm') {
       const chainKey = svc.evmChainKey() ?? undefined;
       const { tracked, discovered } = get().evmTokens;
@@ -4408,7 +5392,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     // whole (unbounded) list, so on a big wallet it re-armed 20 seconds later,
     // every time, forever. See ActivitySeen / markSeen.
     const next = markSeen(get().txs, get().activitySeen);
-    if (id) persistValue(seenTxKey(id), next);
+    if (id) persistValue(activeSeenKey(id), next);
     set({ activitySeen: next, unreadActivity: countUnread(get().txs, next) });
   },
 
@@ -4830,6 +5814,91 @@ export const useLiveStore = create<LiveState>((set, get) => ({
 
   clearEvmSend() {
     set({ evmSend: null, error: null });
+    svc.allowBroadcast = false;
+  },
+
+  // --- Zcash keys and the Bittensor send path ---------------------------------
+  zcashKeysOfActive() {
+    return svc.zcashKeysOfActive();
+  },
+
+  async confirmZcashSend(plan: ZcashSendPlan, opts?: { to?: string }) {
+    if (activeFamily() !== 'zcash') throw new ZcashSendError('no-wallet', 'The active wallet is not a Zcash wallet.');
+    if (!svc.allowBroadcast) throw new ZcashSendError('broadcast-failed', 'Confirm the send first.');
+    try {
+      return await broadcastZcashPlan(plan, opts);
+    } finally {
+      // One send per arming, whatever the outcome: a plan that answered
+      // 'unknown' must not be re-posted by the same click.
+      svc.allowBroadcast = false;
+    }
+  },
+
+  async dismissExpiredZcashSends() {
+    const walletId = svc.activeWalletId();
+    const expired = get().zcash.expiredSends;
+    if (!walletId || expired.length === 0) return;
+    await dropLocalZcashSends(walletId, expired.map((s) => s.txid));
+    if (svc.activeWalletId() !== walletId) return;
+    set((s) => ({ zcash: { ...s.zcash, expiredSends: [] } }));
+  },
+
+  // The Bittensor send follows the EVM sign-injection shape: taoSend.ts takes
+  // its dependencies (gateway client, signing account, wallet id) as an
+  // argument, and THIS is the one place that can produce the account, because
+  // only the store holds the service. The account copy carries the mini
+  // secret and is zeroed the moment the call returns, success or failure.
+  async buildTaoSend(input: TaoSendInput) {
+    set({ loadingTaoSend: true, error: null, taoSend: null });
+    svc.allowBroadcast = false;
+    const walletId = svc.activeWalletId();
+    if (activeFamily() !== 'substrate' || !walletId) {
+      set({ loadingTaoSend: false });
+      throw new TaoSendError('bad-call', 'The active wallet is not a Bittensor wallet.');
+    }
+    const account = svc.substrateAccountOfActive();
+    try {
+      const plan = await buildTaoSendPlan({ rpc: taoRpcClient(), account, walletId }, input);
+      set({ loadingTaoSend: false, taoSend: plan });
+      return plan;
+    } catch (err) {
+      set({ loadingTaoSend: false });
+      throw err;
+    } finally {
+      zeroSubstrateAccount(account);
+    }
+  },
+
+  async confirmTaoSend() {
+    const plan = get().taoSend;
+    const walletId = svc.activeWalletId();
+    if (!plan || activeFamily() !== 'substrate' || !walletId) throw new TaoSendError('rejected', 'Nothing to send.');
+    // The arming gate, the same one every other family's broadcast honours.
+    if (!svc.allowBroadcast) throw new TaoSendError('rejected', 'Confirm the send first.');
+    const account = svc.substrateAccountOfActive();
+    let hash: string;
+    try {
+      const result = await broadcastTaoPlan({ rpc: taoRpcClient(), account, walletId }, plan, (inclusion) => {
+        // The poll outlives this call; only THIS wallet's page reports it.
+        if (svc.activeWalletId() === walletId) set((s) => ({ tao: { ...s.tao, pending: inclusion } }));
+      });
+      hash = result.hash;
+    } finally {
+      zeroSubstrateAccount(account);
+    }
+    // One send at a time: the plan is consumed, the gate closes, the local
+    // send row shows at once and the balance refreshes.
+    set((s) => ({ taoSend: null, tao: { ...s.tao, pending: { state: 'pending' } } }));
+    svc.allowBroadcast = false;
+    void get().refresh({ silent: true });
+    if (typeof setTimeout !== 'undefined') {
+      setTimeout(() => void get().refresh({ silent: true }), 15000);
+    }
+    return { hash };
+  },
+
+  clearTaoSend() {
+    set({ taoSend: null, error: null });
     svc.allowBroadcast = false;
   },
 
@@ -5386,6 +6455,12 @@ export const useLiveStore = create<LiveState>((set, get) => ({
 
   async applyRestore(mode: 'replace' | 'merge') {
     try {
+      // A replace ends the session and may drop the very wallet whose worker
+      // is open here: close it FIRST, so its keys go with the session and its
+      // final save lands before the service deletes the dropped caches (a
+      // save after that delete would write the history back under an id
+      // nothing could ever delete again).
+      if (mode === 'replace') await get().closeMoneroHost();
       const result = await svc.applyRestore(mode);
       if (!result.ok) {
         return {
@@ -5460,14 +6535,17 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   },
 
   setExplorerUrlTemplate(url: string) {
-    // Persist under the ACTIVE chain's key (Evrmore uses the legacy bare key).
-    persistValue(explorerKeyForChain(activeChainId()), url);
+    // Persist under the ACTIVE TARGET's key (Evrmore uses the legacy bare
+    // key). The target, not activeChainId(): for an EVM, Monero, Zcash or
+    // Bittensor wallet activeChainId() still names the idle UTXO chain, and
+    // a Zcash explorer typed there landed under Evrmore's key, so every
+    // Evrmore link opened the Zcash explorer with an Evrmore txid.
+    persistValue(explorerKeyForChain(activeChainTarget()), url);
     set({ explorerUrlTemplate: url });
   },
 
   setChainHidden(chainId: string, hidden: boolean) {
-    // An `evm:<key>` target is stored as-is; a UTXO id in its canonical form.
-    const canonical = isEvmChainTarget(chainId) ? chainId : networkFor(chainId as LiveNetworkId).chainId;
+    const canonical = canonicalHiddenChainId(chainId);
     // Re-check the rule here, not only in the UI: a stale render or a future
     // caller must not be able to hide the home chain or the one in use.
     if (hidden && chainHideBlockedReason(canonical, activeChainTarget()) !== null) return;
@@ -5591,6 +6669,12 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     get().stopAutoRefresh();
     txSyncRun = null;
     localPendingTxs = [];
+    // The open Monero wallet (worker, keys, its navigator.locks lock) goes
+    // with everything else, BEFORE the service wipes the records and the
+    // whole Monero cache database: a worker left running would keep the
+    // spend key until the page closed, and its next save would recreate a
+    // cache row for a wallet id that no longer exists.
+    await get().closeMoneroHost();
     try {
       await svc.reset();
     } catch {
@@ -5631,3 +6715,16 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     });
   },
 }));
+
+// WINDOW CLOSE closes the Monero wallet too (the Monero engine design notes
+// §6.3): the worker dies with the page anyway, but close() first asks wallet2
+// to save, so a scan interrupted by the popup closing loses at most one
+// checkpoint rather than everything since the last one. Best effort: a page
+// being torn down may not finish the save, which the checkpoints cover.
+// `pagehide` rather than `beforeunload`: it fires for the popup, the side
+// panel and a tab alike, and it is the one the bfcache respects.
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+  window.addEventListener('pagehide', () => {
+    void useLiveStore.getState().closeMoneroHost();
+  });
+}

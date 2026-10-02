@@ -106,16 +106,18 @@ describe('EVM RPC hosts vs. manifest permissions', () => {
     }
   });
 
-  it('4. the permitted hosts are exactly the per-chain public RPC fallbacks (Base + BNB named 2026-08-18, Ethereum added 2026-08-19, Epix 2026-08-20), the Base and Epix history indexers, the Epix staking LCD (2026-08-24), the Alchemy wildcard for the dev key, and the two keyless token-metadata hosts (marks, search lists)', () => {
+  it('4. the permitted hosts are exactly the per-chain public RPC fallbacks (Base + BNB named 2026-08-18, Ethereum added 2026-08-19, Epix 2026-08-20, Avalanche 2026-09-29, Robinhood Chain 2026-10-02), the Base and Epix history indexers, the Epix staking LCD (2026-08-24), the Alchemy wildcard for the dev key, and the two keyless token-metadata hosts (marks, search lists)', () => {
     expect([...permitted].sort()).toEqual(
       [
         'https://*.g.alchemy.com/*',
+        'https://api.avax.network/*',
         'https://api.epix.zone/*',
         'https://base.blockscout.com/*',
         'https://bsc-dataseed.bnbchain.org/*',
         'https://ethereum-rpc.publicnode.com/*',
         'https://evmrpc.epix.zone/*',
         'https://mainnet.base.org/*',
+        'https://rpc.mainnet.chain.robinhood.com/*',
         'https://raw.githubusercontent.com/*',
         'https://scan.epix.zone/*',
         'https://tokens.coingecko.com/*',

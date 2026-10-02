@@ -4,6 +4,7 @@ import { AlertTriangle, ArrowDownLeft, ArrowUpRight, Check, ChevronDown, Copy, E
 import { AccountAvatar } from '../../components/AccountAvatar';
 import { ActivityPager } from '../../components/ActivityPager';
 import { SyncStatusPill } from '../../components/SyncStatusPill';
+import { taoExplorerAccountUrl } from '../../store/taoChain';
 import { formatAmount, formatListAmount, amountToNumber } from '../../services/chain/amounts';
 import { deriveSyncStatus, formatSyncBannerText, pillStateFor } from './syncStatus';
 import { TokenIcon, BrandLogo } from '../../components/BrandLogo';
@@ -29,6 +30,7 @@ import {
   memberLabel,
   filterAccountsForChain,
 } from './walletGroups';
+import { walletKindTag } from './walletKindTag';
 import { orderAssetsForDisplay, applyManualOrder, moveInOrder, orderableNames } from './assetOrder';
 import {
   toggleAssetSelection,
@@ -53,9 +55,14 @@ import {
   chainDisplayName,
   walletsOnChain,
   isRemovableAsset,
+  isNativeAssetId,
+  nativeDecimalsFor,
+  headerWalletName,
 } from '../../store/liveStore';
 import { selectNotifications } from '../../services/notifications';
-import type { PriceMap } from '../../services/prices';
+import type { PriceMap, PriceQuote } from '../../services/prices';
+import { formatFiatValue, quoteInCurrency, sumFiat, type FiatValue } from '../../services/fiat';
+import { useFiat } from './useFiat';
 import { networkFor, isYoungChain } from '../../services/chain/chainParams';
 import { copyText } from '../../services/clipboard';
 import { useSettingsStore } from '../../store/settingsStore';
@@ -75,6 +82,8 @@ import {
 import { groupActivityByDay } from './activityDays';
 import { stakingRowLabel } from './stakingRowLabel';
 import { useShortViewport } from './shortViewport';
+import { MoneroSyncProgress } from './MoneroSyncProgress';
+import { moneroUnlockHint } from './moneroUnlock';
 
 /**
  * How many token rows make the list the thing worth the screen's height, at
@@ -168,10 +177,17 @@ function HeaderAddress({ address }: { address: string }) {
  *  sees them. Carrying them as bigint from here on would look rigorous while
  *  recovering nothing. Balances are different: they arrive as integer base
  *  units, so those ARE exact and use fmtBase below. */
-function fmtAmount(amount: number): string {
+function fmtAmount(amount: number, maxDecimals = 8): string {
   if (amount === 0) return '0';
   if (amount >= 1000) return amount.toLocaleString('en-US', { maximumFractionDigits: 2 });
-  return amount.toLocaleString('en-US', { maximumFractionDigits: 8 });
+  return amount.toLocaleString('en-US', { maximumFractionDigits: Math.min(20, Math.max(0, maxDecimals)) });
+}
+
+/** The precision an activity row shows a NATIVE amount at: the chain's own
+ *  (12 on Monero, 18 on an EVM chain, 8 on a UTXO chain), never a fixed 8
+ *  that would round a 12-decimal XMR amount away. An issued asset keeps 8. */
+function txAmountDecimals(asset: string): number {
+  return isNativeAssetId(asset) ? nativeDecimalsFor() : 8;
 }
 
 /** Balance row / hero text, straight from base units: the list-row shape (six
@@ -184,14 +200,6 @@ function fmtBase(base: bigint, scale: number): string {
 /** The complete balance, for a tooltip: every digit the chain holds. */
 function fmtFull(base: bigint, scale: number): string {
   return formatAmount(base, scale, { grouping: true });
-}
-
-/** Format a USD (≈ USDT) value. An exact 0 shows $0.00; a tiny positive value
- *  keeps more precision so a sub-cent amount never collapses to $0.00. */
-function fmtUsd(value: number): string {
-  if (!Number.isFinite(value)) return '$0.00';
-  if (value > 0 && value < 0.01) return `$${value.toFixed(6)}`;
-  return `$${value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 /** Format a 24h move as a signed percent: 2.4 -> "+2.4%", -0.83 -> "-0.8%".
@@ -224,6 +232,18 @@ function priceForAsset(asset: Pick<LiveAssetBalance, 'name' | 'isNative'>, price
   const ticker = asset.name.trim().toUpperCase();
   if (!asset.isNative && ticker !== 'SATORIEVR') return undefined;
   return prices[ticker];
+}
+
+/** The full quote (every currency the source published) for one displayed row,
+ *  under exactly the same rule as priceForAsset: the chain's own coin and
+ *  SATORIEVR, never a name collision. */
+function quoteForAsset(
+  asset: Pick<LiveAssetBalance, 'name' | 'isNative'>,
+  quoteFor: (ticker: string) => PriceQuote | undefined,
+): PriceQuote | undefined {
+  const ticker = asset.name.trim().toUpperCase();
+  if (!asset.isNative && ticker !== 'SATORIEVR') return undefined;
+  return quoteFor(ticker);
 }
 
 /** Compact activity timestamp with the exact time, e.g. "12 Jul, 14:30:05". */
@@ -347,7 +367,7 @@ function TxRow({
               : masked
                 ? MASKED
                 : staking.amountText
-            : `${isIn ? '+' : '-'}${masked ? MASKED : fmtAmount(tx.amount)} ${shownAsset}`}
+            : `${isIn ? '+' : '-'}${masked ? MASKED : fmtAmount(tx.amount, txAmountDecimals(tx.asset))} ${shownAsset}`}
         </div>
         <div className="text-dim" style={{ fontSize: 10.5, whiteSpace: 'nowrap' }}>
           {fmtTxTime(tx.timestamp)}
@@ -443,7 +463,7 @@ interface RowEditProps {
 
 function BalanceRow({
   asset,
-  price,
+  fiatPrice,
   change24h,
   masked,
   onSelect,
@@ -453,7 +473,9 @@ function BalanceRow({
   edit,
 }: {
   asset: LiveAssetBalance;
-  price?: number;
+  /** Unit price in the display currency (or in USD, labelled so, when the
+   *  chosen currency cannot be reached); absent when the asset is unpriced. */
+  fiatPrice?: FiatValue;
   /** 24h move in percent for this asset (2.4 = +2.4%), when the feed knows one. */
   change24h?: number;
   /** Privacy mode: amounts read as dots. */
@@ -473,8 +495,10 @@ function BalanceRow({
    *  at 34px and the list at a 39px pitch (it was 42 and 48). */
   compact?: boolean;
 }) {
-  // Secondary USD value for this row — only when a price exists for the asset.
-  const usd = usdValue(amountToNumber(asset.amountBase, asset.scale), price);
+  // Secondary fiat value for this row, only when a price exists for the asset.
+  const fiat: FiatValue | null = fiatPrice
+    ? { value: amountToNumber(asset.amountBase, asset.scale) * fiatPrice.value, currency: fiatPrice.currency }
+    : null;
   // The name as it is DRAWN. On an EVM chain `asset.name` IS the ERC-20's own
   // symbol() answer, so every visible use of it goes through the sanitiser
   // (services/displaySymbol.ts). `asset.name` stays raw everywhere it is an
@@ -608,13 +632,13 @@ function BalanceRow({
         >
           {masked ? MASKED : fmtBase(asset.amountBase, asset.scale)}
         </span>
-        {showSecondary && usd != null && (
+        {showSecondary && fiat != null && (
           <span
             className="text-dim token-meta"
             data-testid={`live-asset-usd-${asset.name}`}
             style={{ minWidth: 0 }}
           >
-            ≈ {masked ? MASKED : fmtUsd(usd)}
+            ≈ {masked ? MASKED : formatFiatValue(fiat)}
           </span>
         )}
         {/* 24h move, only for an asset whose feed publishes one. Never a "0.0%"
@@ -689,6 +713,7 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
   const txs = useLiveStore((s) => s.txs);
   const stakingEvents = useLiveStore((s) => s.stakingEvents);
   const prices = useLiveStore((s) => s.prices);
+  const fiatCtx = useFiat();
   const priceChanges24h = useLiveStore((s) => s.priceChanges24h);
   const network = useLiveStore((s) => s.network);
   const loadingRefresh = useLiveStore((s) => s.loadingRefresh);
@@ -997,12 +1022,33 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
   // for it (see activeChainId's own doc comment) — so both are skipped outright
   // rather than computed from the wrong chain.
   const isEvmActive = activeFamily() === 'evm';
+  // A Monero wallet is the third family (the Monero engine design notes §8):
+  // like an EVM account it has no UTXO chain params, so every networkFor()
+  // read below is skipped for it too, and its own facts come from the slice.
+  const isMoneroActive = activeFamily() === 'monero';
+  const moneroSlice = useLiveStore((s) => s.monero);
+  // Zcash and Bittensor are the fourth and fifth families (their design notes
+  // §8): no UTXO params either, their facts come from their own slices.
+  const isZcashActive = activeFamily() === 'zcash';
+  const zcashSlice = useLiveStore((s) => s.zcash);
+  const isTaoActive = activeFamily() === 'substrate';
+  const taoSlice = useLiveStore((s) => s.tao);
+  const dismissExpiredZcashSends = useLiveStore((s) => s.dismissExpiredZcashSends);
+  const isEngineActive = isMoneroActive || isZcashActive || isTaoActive;
   // Human name of the chain in use (banners, wallet-name fallback). EVM-aware:
   // comes from the store's chain helper so a new chain (UTXO or EVM) names
   // itself with no edit here.
   const activeChainName = chainDisplayName();
   // Bare host (no scheme) reads better in a 400px popup than a full URL.
-  const activeChainHomepage = isEvmActive ? null : networkFor(activeChainId()).homepage;
+  const activeChainHomepage = isEvmActive
+    ? null
+    : isMoneroActive
+      ? (moneroSlice.chain?.homepage ?? null)
+      : isZcashActive
+        ? zcashSlice.chain.homepage
+        : isTaoActive
+          ? taoSlice.chain.homepage
+          : networkFor(activeChainId()).homepage;
   const activeChainHomepageHost = activeChainHomepage
     ? activeChainHomepage.replace(/^https?:\/\//i, '').replace(/\/$/, '')
     : '';
@@ -1025,12 +1071,20 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
   // which is true of a thin chain however it reaches consensus.
   const activeChainIsYoung = isEvmActive
     ? (activeEvmChain({ evm })?.young ?? false)
-    : isYoungChain(networkFor(activeChainId()));
+    : isEngineActive
+      ? false // Monero, Zcash and Bittensor are not young networks; their rows are "New" here only (§10)
+      : isYoungChain(networkFor(activeChainId()));
   const [youngNoticeDismissed, setYoungNoticeDismissed] = useState(false);
   useEffect(() => {
     setYoungNoticeDismissed(false);
   }, [activeChainName]);
   const activeWalletName = activeWallet?.name ?? `Real ${activeChainName} mainnet`;
+  // The header's own label: the chain tag enableChain appended (" (EVM)",
+  // " (Bittensor)", ...) is dropped, because the network button beside it
+  // already names the chain and the tag is what truncated the name. Everywhere
+  // else (the wallet list, Settings, this button's accessible name) keeps the
+  // full name.
+  const headerName = activeWallet ? headerWalletName(activeWallet) : activeWalletName;
   const activeIsPk = activeWallet?.kind === 'pk';
   const deleteTarget = wallets.find((w) => w.id === deleteWalletId) ?? null;
   // Accounts of the SAME seed as the wallet about to be deleted. Non-empty means
@@ -1513,11 +1567,14 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
   // assets (the chain's own coin, plus SATORIEVR on Evrmore). `hasPrice` gates
   // whether we show it at all — with no prices loaded yet we render nothing
   // rather than a bogus $0.00.
-  const hasPrice = displayAssets.some((a) => priceForAsset(a, prices) != null);
-  const totalUsd = displayAssets.reduce((sum, a) => {
-    const v = usdValue(amountToNumber(a.amountBase, a.scale), priceForAsset(a, prices));
-    return v != null ? sum + v : sum;
-  }, 0);
+  // In the display currency (Settings, Appearance); sumFiat drops to USD, and
+  // labels it USD, only when some priced row cannot be expressed in it.
+  const totalFiat = sumFiat(
+    displayAssets.map((a) => ({ amount: amountToNumber(a.amountBase, a.scale), quote: quoteForAsset(a, fiatCtx.quoteFor) })),
+    fiatCtx.currency,
+    fiatCtx.fx,
+  );
+  const hasPrice = totalFiat !== null;
 
   // ONE status surface: the block pill's dot + the sync-status text beside it,
   // both driven by deriveSyncStatus. The separate brand-row LED was removed
@@ -1553,9 +1610,16 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
       className="text-faint"
       style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3, padding: '18px 0 8px' }}
     >
-      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 10.5, fontWeight: 600 }}>
-        <BrandLogo slot="satori" size={13} alt="Satori Network" /> Satori Network
-      </span>
+      <a
+        href="https://satorinet.io"
+        target="_blank"
+        rel="noopener noreferrer"
+        className="link"
+        data-testid="live-footer-satori"
+        style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 10.5, fontWeight: 600 }}
+      >
+        <BrandLogo slot="satori" size={13} alt="" /> Satori Network
+      </a>
       <span style={{ fontSize: 10 }}>Satori GO v{getAppVersion()}</span>
     </div>
   );
@@ -1609,7 +1673,9 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
               matches on before it reads the name. */}
           <AccountAvatar address={address} seed={activeWalletId ?? undefined} size={20} />
           {activeIsPk && <BrandLogo slot="satori" size={12} alt="Satori" />}
-          <span className="wallet-switcher-text">{activeWalletName}</span>
+          <span className="wallet-switcher-text" title={activeWalletName} data-testid="live-wallet-switcher-name">
+            {headerName}
+          </span>
           <ChevronDown size={12} style={{ flexShrink: 0 }} />
         </button>
         <div className="header-actions">
@@ -1747,7 +1813,7 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
                       {w.name}
                     </span>
                     <span className="chip neutral" style={{ fontSize: 8.5, padding: '1px 4px', flexShrink: 0 }}>
-                      {w.kind === 'pk' ? 'Satori' : 'Seed'}
+                      {walletKindTag(w)}
                     </span>
                     {isOtherChain && (
                       <span
@@ -2217,12 +2283,12 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
                 {activeChainHomepage && (
                   <button
                     type="button"
-                    className="text-faint"
+                    className="link"
                     onClick={openChainHomepage}
                     title={`Open ${activeChainHomepageHost} in a new tab`}
                     data-testid="live-chain-homepage"
                     style={{
-                      fontSize: 9.5,
+                      fontSize: 11,
                       display: 'inline-flex',
                       alignItems: 'center',
                       gap: 3,
@@ -2234,7 +2300,7 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
                     }}
                   >
                     {activeChainHomepageHost}
-                    <ExternalLink size={9} />
+                    <ExternalLink size={10} />
                   </button>
                 )}
               </div>
@@ -2300,7 +2366,17 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
                   data-testid="live-balance-hero"
                   title={hideBalances || !nativeRow ? undefined : `${fmtFull(nativeRow.amountBase, nativeRow.scale)} ${nativeTicker}`}
                 >
-                  {hideBalances ? MASKED : nativeRow ? fmtBase(nativeRow.amountBase, nativeRow.scale) : '0'}
+                  {/* Monero's hero is the UNLOCKED balance, what can be spent
+                      now; the locked remainder is named under it (the Monero
+                      engine design notes §10). Every other chain shows its
+                      one balance row. */}
+                  {hideBalances
+                    ? MASKED
+                    : isMoneroActive && moneroSlice.balance
+                      ? fmtBase(moneroSlice.balance.unlocked, 12)
+                      : nativeRow
+                        ? fmtBase(nativeRow.amountBase, nativeRow.scale)
+                        : '0'}
                   {/* Ticker scales with the roomy hero so it stays proportional. */}
                   <span
                     style={{
@@ -2361,7 +2437,7 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
                     data-testid="total-balance"
                     style={{ fontSize: tightList ? 13.5 : 15, fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}
                   >
-                    {hideBalances ? MASKED : fmtUsd(totalUsd)}
+                    {hideBalances || !totalFiat ? MASKED : formatFiatValue(totalFiat)}
                   </span>
                 </div>
               )}
@@ -2400,6 +2476,172 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
                 </button>
               )}
             </div>
+
+            {/* THE MONERO BODY (the Monero engine design notes §10): the locked
+                remainder under the unlocked hero, and the scan itself, which
+                no other chain has (an Electrum wallet asks a server; wallet2
+                reads the chain in this page's worker, and only while a wallet
+                window is open, §6.3). The data-* attributes are what the
+                smoke (scripts/monero-extension-smoke.mjs) reads. */}
+            {isMoneroActive && (
+              <div data-testid="live-xmr-home" style={{ textAlign: 'center', marginBottom: tightList ? 4 : 8 }}>
+                <div
+                  data-testid="live-xmr-balance"
+                  data-total-pico={moneroSlice.balance ? moneroSlice.balance.total.toString() : '0'}
+                  data-unlocked-pico={moneroSlice.balance ? moneroSlice.balance.unlocked.toString() : '0'}
+                  className="text-dim"
+                  style={{ fontSize: 11.5, fontVariantNumeric: 'tabular-nums' }}
+                >
+                  {moneroSlice.balance && moneroSlice.balance.total > moneroSlice.balance.unlocked && !hideBalances
+                    ? `${fmtBase(moneroSlice.balance.total - moneroSlice.balance.unlocked, 12)} XMR unlocking, ${moneroUnlockHint(
+                        txs.filter((t) => t.status === 'confirmed').map((t) => t.blockHeight ?? 0),
+                        moneroSlice.balance.daemonHeight,
+                      )}`
+                    : null}
+                </div>
+                <div
+                  data-testid="live-xmr-sync"
+                  data-state={moneroSlice.status}
+                  data-height={moneroSlice.sync?.height ?? moneroSlice.balance?.height ?? 0}
+                  data-daemon-height={moneroSlice.sync?.endHeight ?? moneroSlice.balance?.daemonHeight ?? 0}
+                  data-percent={moneroSlice.sync ? Math.round(moneroSlice.sync.percent) : moneroSlice.status === 'synced' ? 100 : 0}
+                  className={moneroSlice.status === 'error' || moneroSlice.status === 'busy' ? 'banner warning' : 'text-faint'}
+                  role={moneroSlice.status === 'error' || moneroSlice.status === 'busy' ? 'alert' : undefined}
+                  style={{ fontSize: 11, marginTop: 4, lineHeight: 1.4, fontVariantNumeric: 'tabular-nums' }}
+                >
+                  {moneroSlice.status === 'opening'
+                    ? 'Opening the Monero wallet…'
+                    : moneroSlice.status === 'syncing'
+                      ? moneroSlice.sync
+                        ? <MoneroSyncProgress sync={moneroSlice.sync} />
+                        : 'Syncing with the Monero network. Keep this window open.'
+                      : moneroSlice.status === 'synced'
+                        ? `Synced to block ${(moneroSlice.balance?.height ?? 0).toLocaleString()}.`
+                        : moneroSlice.status === 'busy' || moneroSlice.status === 'error'
+                          ? (moneroSlice.error ?? 'Could not open the Monero wallet.')
+                          : 'Monero wallet closed.'}
+                </div>
+                {/* An EMPTY synced wallet says where its scan began: a wallet
+                    restored with the wrong answer to "used before" (or one
+                    whose old restore height is gone) syncs to a clean "0 XMR"
+                    with its funds sitting below the scanned range, and nothing
+                    else on this screen would say so. The fix is one tap away
+                    (Settings > Monero > Rescan from height), and this names it. */}
+                {moneroSlice.status === 'synced' &&
+                  moneroSlice.balance &&
+                  moneroSlice.balance.total === 0n &&
+                  activeWallet?.restoreHeight !== undefined && (
+                    <div className="text-faint" style={{ fontSize: 11, marginTop: 4 }} data-testid="live-xmr-scan-start">
+                      Scanned from block {activeWallet.restoreHeight.toLocaleString()}. Expecting older funds? Settings, Monero,
+                      Rescan from height.
+                    </div>
+                  )}
+              </div>
+            )}
+
+            {/* THE ZCASH BODY (the Zcash engine design notes §10): the hero is
+                the confirmed balance minus what our pending sends take out
+                (the native row); a pending send ("sending") and real
+                unconfirmed incoming are named under it, and a coinbase output in the watch set is
+                named as not spendable here. data-state and data-confirmed-zat
+                are what scripts/zcash-extension-smoke.mjs reads. */}
+            {isZcashActive && (
+              <div
+                data-testid="live-zec-home"
+                data-state={zcashSlice.status === 'idle' ? 'refreshing' : zcashSlice.status}
+                style={{ textAlign: 'center', marginBottom: tightList ? 4 : 8 }}
+              >
+                <div
+                  data-testid="live-zec-balance"
+                  data-confirmed-zat={zcashSlice.snapshot ? zcashSlice.snapshot.confirmed.toString() : ''}
+                  data-pending-in-zat={zcashSlice.snapshot ? zcashSlice.snapshot.pendingIn.toString() : ''}
+                  data-pending-out-zat={zcashSlice.snapshot ? zcashSlice.snapshot.pendingOut.toString() : ''}
+                  className="text-dim"
+                  style={{ fontSize: 11.5, fontVariantNumeric: 'tabular-nums' }}
+                >
+                  {/* The hero is confirmed minus what our pending sends take
+                      out (zcashBalances.ts zcashDisplayBalance); what is on its
+                      way out and what is really coming in are named here. */}
+                  {zcashSlice.snapshot && zcashSlice.snapshot.pendingOut > 0n && !hideBalances ? (
+                    <div data-testid="live-zec-pending-out">{`${fmtBase(zcashSlice.snapshot.pendingOut, 8)} ZEC sending`}</div>
+                  ) : null}
+                  {zcashSlice.snapshot && zcashSlice.snapshot.pendingIn > 0n && !hideBalances ? (
+                    <div data-testid="live-zec-pending-in">{`${fmtBase(zcashSlice.snapshot.pendingIn, 8)} ZEC unconfirmed`}</div>
+                  ) : null}
+                </div>
+                {/* Always one line of text (the Monero body's rule): a body with
+                    no content has no height, and the smoke waits for it to be
+                    VISIBLE. */}
+                <div
+                  data-testid="live-zec-status"
+                  className="text-faint"
+                  style={{ fontSize: 11, marginTop: 4, lineHeight: 1.4, fontVariantNumeric: 'tabular-nums' }}
+                >
+                  {zcashSlice.status === 'ready' && zcashSlice.snapshot
+                    ? `Transparent balance at block ${zcashSlice.snapshot.info.height.toLocaleString()}.`
+                    : zcashSlice.status === 'error'
+                      ? 'Could not refresh Zcash.'
+                      : 'Refreshing from the Zcash network.'}
+                </div>
+                {zcashSlice.snapshot && zcashSlice.snapshot.unspendable.length > 0 && (
+                  <div className="text-faint" style={{ fontSize: 11, marginTop: 4 }} data-testid="live-zec-coinbase-note">
+                    Includes a mining reward, not spendable in this wallet.
+                  </div>
+                )}
+                {zcashSlice.status === 'error' && (
+                  <div className="banner warning" role="alert" style={{ fontSize: 11, marginTop: 4 }} data-testid="live-zec-error">
+                    {zcashSlice.error ?? 'Could not reach Zcash through the gateway.'}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* THE BITTENSOR BODY (the Bittensor engine design notes §10):
+                `free` is the hero (the native row); the reserved part and a
+                pending send are named under it. data-free-rao and
+                data-reserved-rao are what scripts/tao-extension-smoke.mjs
+                reads. */}
+            {isTaoActive && (
+              <div
+                data-testid="live-tao-home"
+                data-state={taoSlice.status === 'idle' ? 'refreshing' : taoSlice.status}
+                style={{ textAlign: 'center', marginBottom: tightList ? 4 : 8 }}
+              >
+                <div
+                  data-testid="live-tao-balance"
+                  data-free-rao={taoSlice.account ? (taoSlice.account.info?.free ?? 0n).toString() : ''}
+                  data-reserved-rao={taoSlice.account ? (taoSlice.account.info?.reserved ?? 0n).toString() : ''}
+                  className="text-dim"
+                  style={{ fontSize: 11.5, fontVariantNumeric: 'tabular-nums' }}
+                >
+                  {taoSlice.account && taoSlice.account.info && taoSlice.account.info.reserved > 0n && !hideBalances
+                    ? `${fmtBase(taoSlice.account.info.reserved, 9)} TAO reserved`
+                    : null}
+                </div>
+                {/* Always one line of text, as above. */}
+                <div
+                  data-testid="live-tao-status"
+                  className="text-faint"
+                  style={{ fontSize: 11, marginTop: 4, lineHeight: 1.4, fontVariantNumeric: 'tabular-nums' }}
+                >
+                  {taoSlice.status === 'ready' && taoSlice.account
+                    ? `Balance at finalized block ${taoSlice.account.finalizedNumber.toLocaleString()}.`
+                    : taoSlice.status === 'error'
+                      ? 'Could not refresh Bittensor.'
+                      : 'Refreshing from the Bittensor network.'}
+                </div>
+                {taoSlice.pending && taoSlice.pending.state === 'pending' && (
+                  <div className="text-faint" style={{ fontSize: 11, marginTop: 4 }} data-testid="live-tao-pending-send">
+                    A send is waiting for inclusion in a block.
+                  </div>
+                )}
+                {taoSlice.status === 'error' && (
+                  <div className="banner warning" role="alert" style={{ fontSize: 11, marginTop: 4 }} data-testid="live-tao-error">
+                    {taoSlice.error ?? 'Could not reach Bittensor through the gateway.'}
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Actions */}
             <div className="actions-row">
@@ -2530,7 +2772,7 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
                       masked={hideBalances}
                       key={asset.name}
                       asset={asset}
-                      price={priceForAsset(asset, prices)}
+                      fiatPrice={quoteInCurrency(quoteForAsset(asset, fiatCtx.quoteFor), fiatCtx.currency, fiatCtx.fx)}
                       change24h={priceChanges24h[asset.name]}
                       onSelect={onSelectAsset}
                       nativeTicker={nativeTicker}
@@ -2659,6 +2901,56 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
               </div>
               <SyncStatusPill />
             </div>
+            {/* Bittensor Activity is the sends made from this wallet only (the
+                owner's no-Taostats rule for v1): say so, always, or a received
+                transfer reads as missing from history. */}
+            {isTaoActive && address && (
+              <div className="banner info" style={{ marginTop: 6, marginBottom: 8, fontSize: 11 }} data-testid="live-tao-activity-note">
+                <span>
+                  Only sends made from this wallet are listed here. Received transfers and the full history are on{' '}
+                  <a href={taoExplorerAccountUrl(address)} target="_blank" rel="noreferrer" data-testid="live-tao-activity-taostats-link">
+                    taostats.io
+                  </a>
+                  .
+                </span>
+              </div>
+            )}
+            {/* A Zcash send the tip let expire (Zcash design §4.5/§6.5): it can
+                never confirm and nothing left the wallet, and Activity's rows
+                have no failed state, so this is where the user learns it. */}
+            {isZcashActive && zcashSlice.expiredSends.length > 0 && (
+              <div className="banner warning" style={{ marginTop: 6, marginBottom: 8, alignItems: 'flex-start' }} data-testid="live-zec-expired-sends">
+                <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 2 }} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div>
+                    {zcashSlice.expiredSends.length === 1
+                      ? `A send of ${zcashSlice.expiredSends[0].amountZec ?? '?'} ZEC expired before it confirmed and was not sent. Nothing left your wallet.`
+                      : `${zcashSlice.expiredSends.length} sends expired before they confirmed and were not sent. Nothing left your wallet.`}
+                  </div>
+                  <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      data-testid="live-zec-expired-send-again"
+                      onClick={() => {
+                        void dismissExpiredZcashSends();
+                        onSend();
+                      }}
+                    >
+                      Send again
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-secondary"
+                      data-testid="live-zec-expired-dismiss"
+                      onClick={() => void dismissExpiredZcashSends()}
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
             {(loadingRefresh || historyLoading) && mergedActivity.length === 0 ? (
               <div style={{ padding: '12px 0' }} data-testid="live-activity-loading">
                 <Skeleton height={44} style={{ marginBottom: 4 }} />

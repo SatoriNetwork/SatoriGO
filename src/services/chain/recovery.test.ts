@@ -18,7 +18,7 @@
 //
 // Real scrypt (N=2^17) runs throughout. Do NOT lower it to speed this up.
 
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { LiveWalletService, type WalletEntry } from './liveWallet';
 import { MemoryStorageAdapter, setStorageForTests, getStorage } from '../storage';
 import {
@@ -42,6 +42,13 @@ import { isVaultRecordV2 } from './vault';
 import { deriveAddress, mnemonicToSeed } from './keys';
 import { EVRMORE_MAINNET } from './chainParams';
 import type { ElectrumClient } from './electrumTypes';
+
+// These tests run the real scrypt key derivation many times. On their own they
+// take about a minute; beside the rest of the suite on a loaded machine one of
+// them crossed the global 30 s timeout three times (2026-09-28) while passing
+// every time alone. The work is the point of the test, so the budget grows,
+// for this file only.
+vi.setConfig({ testTimeout: 120_000 });
 
 const VECTOR_MNEMONIC =
   'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';

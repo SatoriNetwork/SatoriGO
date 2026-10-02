@@ -48,7 +48,10 @@ have, with its own servers, block explorer and fee rules.
 | BitcoinGold | BTGS | native segwit | no | **confirmed** | [bitcoingold.site](https://bitcoingold.site) |
 | WojakCoin | WJK | legacy | no | **confirmed** | [wojakcoin.cash](https://wojakcoin.cash) |
 | Neoxa | NEOX | legacy | yes | **confirmed** | [neoxa.net](https://neoxa.net) |
-| Bitcoin BLAKE2b | BTCB2 | native segwit | no | **confirmed** | [bitcoin-blake2b.org](https://bitcoin-blake2b.org) |
+| Bitcoin BLAKE2b | XBT | native segwit | no | **confirmed** | [bitcoin-blake2b.org](https://bitcoin-blake2b.org) |
+| Monero | XMR | standard + subaddresses | no | **confirmed** | [getmonero.org](https://www.getmonero.org) |
+| Zcash | ZEC | transparent (t1) | no | **confirmed** | [z.cash](https://z.cash) |
+| Bittensor | TAO | SS58 | no | **confirmed** | [bittensor.com](https://bittensor.com) |
 
 **EVM networks.** One account across all of them: the same seed gives the same
 address everywhere, so switching network changes what you are looking at and
@@ -61,6 +64,8 @@ name, or imported from what the account already holds.
 | Base | ETH | 8453 | L1 data fee on top of gas | **confirmed** | [base.org](https://base.org) |
 | BNB Chain | BNB | 56 | | **confirmed** | [bnbchain.org](https://www.bnbchain.org) |
 | Epix | EPIX | 1916 | native staking (cosmos/evm) | **confirmed** | [epix.zone](https://epix.zone) |
+| Avalanche | AVAX | 43114 | | **confirmed** | [avax.network](https://www.avax.network) |
+| Robinhood Chain | ETH | 4663 | Arbitrum Orbit L2 | **confirmed** | [robinhood.com/chain](https://robinhood.com/chain) |
 
 BitcoinGold is a new Bitcoin Core fork and is **not** the 2017 Bitcoin Gold
 (BTG). It, WojakCoin, Epix and Bitcoin BLAKE2b are young or thin networks: such
@@ -107,7 +112,7 @@ offline while it is unreachable. You can add your own server for either in
 Settings > Network. `KNOWN_LIMITATIONS.md` records which networks are currently
 reaching the chain some other way and what that costs.
 
-Version **1.4.2**. (The canonical version lives in each target's manifest under
+Version **1.5.0**. (The canonical version lives in each target's manifest under
 `platforms/<target>/manifest.json`; this line is informational and can lag —
 check the manifest if in doubt.)
 

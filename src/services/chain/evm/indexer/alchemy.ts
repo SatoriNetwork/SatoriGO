@@ -137,6 +137,17 @@ function parseQuantity(value: unknown): bigint | null {
 
 /** `metadata.blockTimestamp` (ISO 8601) -> unix ms, or null when missing or
  *  unparseable (Date.parse returns NaN). */
+/** Timestamp placeholder for a row whose `metadata` came back null. Alchemy's
+ *  Avalanche index does that even with withMetadata: true (seen 2026-10-02 on a
+ *  plain AVAX receive: `"metadata": null`), and dropping such a row hid real
+ *  payments from Activity while the balance showed them. fillTimestamps()
+ *  reads the block time from the node instead; a row it cannot date is
+ *  dropped then, never shown with a made-up time. */
+const NO_TIMESTAMP = -1;
+
+/** Distinct blocks dated per batch when Alchemy omits the time. */
+const BLOCK_TIME_BATCH = 50;
+
 function parseTimestamp(metadata: unknown): number | null {
   if (!isRecord(metadata)) return null;
   const raw = metadata.blockTimestamp;
@@ -178,8 +189,7 @@ function parseIndexedTx(raw: unknown): IndexedTx | null {
   if (hash === null) return null;
   const blockNumber = parseQuantity(raw.blockNum);
   if (blockNumber === null) return null;
-  const timestamp = parseTimestamp(raw.metadata);
-  if (timestamp === null) return null;
+  const timestamp = parseTimestamp(raw.metadata) ?? NO_TIMESTAMP;
 
   const from = parseFromField(raw.from);
   const to = parseToField(raw.to);
@@ -218,8 +228,7 @@ function parseIndexedTokenTransfer(raw: unknown): IndexedTokenTransfer | null {
   if (hash === null) return null;
   const blockNumber = parseQuantity(raw.blockNum);
   if (blockNumber === null) return null;
-  const timestamp = parseTimestamp(raw.metadata);
-  if (timestamp === null) return null;
+  const timestamp = parseTimestamp(raw.metadata) ?? NO_TIMESTAMP;
 
   const rawContract = getRawContract(raw);
   const contractAddress =
@@ -359,7 +368,7 @@ class AlchemyIndexer implements EtherscanIndexer {
       }
     }
 
-    const list = [...byHash.values()];
+    const list = await this.fillTimestamps([...byHash.values()]);
     list.sort(sortNewestFirst);
     await this.fillFees(list, normalized);
     return list;
@@ -393,7 +402,7 @@ class AlchemyIndexer implements EtherscanIndexer {
       }
     }
 
-    const list = [...byUniqueId.values()];
+    const list = await this.fillTimestamps([...byUniqueId.values()]);
     list.sort(sortNewestFirst);
     return list;
   }
@@ -486,17 +495,19 @@ class AlchemyIndexer implements EtherscanIndexer {
         }
       }
     });
-    txs.sort(sortNewestFirst);
-    tokenTransfers.sort(sortNewestFirst);
+    const datedTxs = await this.fillTimestamps(txs);
+    const datedTransfers = await this.fillTimestamps(tokenTransfers);
+    datedTxs.sort(sortNewestFirst);
+    datedTransfers.sort(sortNewestFirst);
     // Fees for the address's own sends on this page, best-effort exactly as on
     // the newest page (and served from the receipt cache for anything already
     // seen), so an older row shows the fee it really paid.
-    await this.fillFees(txs, normalized);
+    await this.fillFees(datedTxs, normalized);
     const cursor =
       nextKeys.from === null && nextKeys.to === null
         ? null
         : JSON.stringify({ from: nextKeys.from, to: nextKeys.to, toBlock });
-    return { txs, tokenTransfers, cursor };
+    return { txs: datedTxs, tokenTransfers: datedTransfers, cursor };
   }
 
   /** runBatch, keeping each answer's `pageKey` (absent = that direction has no
@@ -594,6 +605,48 @@ class AlchemyIndexer implements EtherscanIndexer {
   /** Receipts are immutable once mined: remembered per hash for the life of
    *  the indexer, so the history poll (once a minute) re-reads only receipts
    *  it has not seen. Without this, every poll re-spent `receiptLimit` calls. */
+  /** Block number -> block time (ms), for rows Alchemy sent without one. */
+  private readonly blockTimeCache = new Map<bigint, number>();
+
+  /**
+   * Dates the rows that arrived with NO_TIMESTAMP from the block itself
+   * (`eth_getBlockByNumber`, batched, one call per distinct block, cached), and
+   * drops any row that still has no time. Rows that came dated are untouched,
+   * so on chains where Alchemy sends metadata this costs nothing.
+   */
+  private async fillTimestamps<T extends { blockNumber: bigint; timestamp: number }>(rows: T[]): Promise<T[]> {
+    const wanted = [
+      ...new Set(rows.filter((r) => r.timestamp === NO_TIMESTAMP && !this.blockTimeCache.has(r.blockNumber)).map((r) => r.blockNumber)),
+    ];
+    for (let i = 0; i < wanted.length; i += BLOCK_TIME_BATCH) {
+      const chunk = wanted.slice(i, i + BLOCK_TIME_BATCH);
+      let results: EvmRpcBatchResult[];
+      try {
+        results = await this.rpc.batch(chunk.map((n) => ({ method: 'eth_getBlockByNumber', params: [toQuantity(n), false] })));
+      } catch {
+        break;
+      }
+      results.forEach((item, j) => {
+        if (!item.ok || !isRecord(item.result)) return;
+        const seconds = parseQuantity(item.result.timestamp);
+        if (seconds !== null && seconds > 0n) this.blockTimeCache.set(chunk[j], Number(seconds) * 1000);
+      });
+    }
+    const out: T[] = [];
+    for (const row of rows) {
+      if (row.timestamp !== NO_TIMESTAMP) {
+        out.push(row);
+        continue;
+      }
+      const ms = this.blockTimeCache.get(row.blockNumber);
+      if (ms !== undefined) {
+        row.timestamp = ms;
+        out.push(row);
+      }
+    }
+    return out;
+  }
+
   private readonly receiptCache = new Map<string, { gasUsed: bigint; gasPrice: bigint; isError: boolean; l1Fee?: bigint }>();
 
   private async fillFees(list: IndexedTx[], address: string): Promise<void> {

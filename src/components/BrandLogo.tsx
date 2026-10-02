@@ -64,6 +64,34 @@ import epixLogoUrl from '../assets/epix-logo.png';
 // Bitcoin BLAKE2b (BTCB2) mark, drawn in-repo (assets/btcb2-logo.svg): the fork
 // publishes no logo of its own. A coin with the Bitcoin B and a "2b" tag.
 import btcb2LogoUrl from '../assets/btcb2-logo.svg';
+// Official Monero (XMR) symbol. Source: the Monero Project's own press kit,
+// https://www.getmonero.org/press-kit/symbols/monero-symbol-1280.png,
+// downscaled 1280x1280 -> 256x256 (transparent corners kept) to match the
+// other marks.
+import moneroLogoUrl from '../assets/monero-logo.png';
+// Zcash (ZEC) mark. Source: KomodoPlatform/coins, icons/zec.png, resized from
+// 128x128 to 256x256 (RGBA, transparent corners) to match the other marks:
+// the same repository the Bitcoin, Litecoin and Dogecoin marks came from.
+import zcashLogoUrl from '../assets/zcash-logo.png';
+// Bittensor (TAO) mark: the tau glyph, the project's own. Source: the
+// opentensor organisation's official avatar on GitHub
+// (https://avatars.githubusercontent.com/u/61063461, the same glyph as
+// opentensor/developer-docs static/img/logo.svg), downscaled 298x298 ->
+// 256x256 with its transparent corners kept.
+import bittensorLogoUrl from '../assets/bittensor-logo.png';
+// Avalanche (AVAX) mark, network and coin alike. Source: KomodoPlatform/coins,
+// icons/avax.png, resized 128x128 -> 256x256 like the other marks from that
+// repository.
+import avalancheLogoUrl from '../assets/avalanche-logo.png';
+// Robinhood Chain network mark: the Robinhood feather on Robin Neon, the
+// composition the chain's own docs site uses as its icon
+// (https://cdn.robinhood.com/assets/generated_assets/hoodchain_docsite/rh_favicon_152.png).
+// Built as a 256x256 SVG from the docs site's official vector feather,
+// https://cdn.robinhood.com/assets/generated_assets/hoodchain_docsite/feather-dark.svg
+// (path taken unchanged), on a full-bleed #ccff00 square like the Base mark,
+// so it reads on the dark theme and on the light one alike. A network mark
+// only: the chain's coin is ETH, which keeps the ETH mark.
+import robinhoodLogoUrl from '../assets/robinhood-logo.svg';
 
 export function officialLogoUrl(slot: LogoSlot): string {
   if (slot === 'satori') return satoriLogoUrl;
@@ -75,6 +103,10 @@ export function officialLogoUrl(slot: LogoSlot): string {
   if (slot === 'doge') return dogeLogoUrl;
   if (slot === 'neox') return neoxLogoUrl;
   if (slot === 'btcb2') return btcb2LogoUrl;
+  if (slot === 'xmr') return moneroLogoUrl;
+  if (slot === 'zec') return zcashLogoUrl;
+  if (slot === 'tao') return bittensorLogoUrl;
+  if (slot === 'avax') return avalancheLogoUrl;
   return evrLogoUrl;
 }
 
@@ -175,6 +207,11 @@ const STATIC_MARKS: Readonly<Record<string, { src: string; alt: string }>> = Obj
   // Epix, same story: one mark for the network and for EPIX.
   'EVM:EPIX': { src: epixLogoUrl, alt: 'Epix' },
   EPIX: { src: epixLogoUrl, alt: 'EPIX' },
+  // Avalanche's network mark is its coin's mark (the same red triangle).
+  'EVM:AVALANCHE': { src: avalancheLogoUrl, alt: 'Avalanche' },
+  // Robinhood Chain pays gas in ETH, so like Base it has a network mark of
+  // its own and no branding slot (the coin is ETH).
+  'EVM:ROBINHOOD': { src: robinhoodLogoUrl, alt: 'Robinhood Chain' },
 });
 
 /** Same frame as BrandLogo (style + size follow the branding settings), for a
@@ -209,7 +246,12 @@ export function TokenIcon({ assetId, size = 38 }: TokenIconProps) {
   if (name === 'BTC') return <BrandLogo slot="btc" size={size} alt="BTC" />;
   if (name === 'DOGE') return <BrandLogo slot="doge" size={size} alt="DOGE" />;
   if (name === 'NEOX') return <BrandLogo slot="neox" size={size} alt="NEOX" />;
-  if (name === 'BTCB2') return <BrandLogo slot="btcb2" size={size} alt="BTCB2" />;
+  // XBT since 1.5.0; BTCB2 kept so a name stored by an older build still gets the mark.
+  if (name === 'XBT' || name === 'BTCB2') return <BrandLogo slot="btcb2" size={size} alt="XBT" />;
+  if (name === 'XMR') return <BrandLogo slot="xmr" size={size} alt="XMR" />;
+  if (name === 'ZEC') return <BrandLogo slot="zec" size={size} alt="ZEC" />;
+  if (name === 'TAO') return <BrandLogo slot="tao" size={size} alt="TAO" />;
+  if (name === 'AVAX') return <BrandLogo slot="avax" size={size} alt="AVAX" />;
   if (name.includes('SATORI')) return <BrandLogo slot="satori" size={size} alt={label} />;
   return <GenericTokenBadge name={name} size={size} />;
 }

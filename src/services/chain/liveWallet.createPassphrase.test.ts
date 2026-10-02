@@ -69,9 +69,11 @@ describe('create with a BIP39 passphrase', () => {
     expect(payload).toBe(mnemonic); // the mnemonic exactly, not an envelope
     expect(payload.startsWith('{')).toBe(false);
 
-    // And no new field crept into the persisted entry alongside it.
+    // And no passphrase-related field crept into the persisted entry alongside
+    // it (`origin` records that create() generated the phrase: "Add Monero"
+    // reads it, and it is the same with or without a passphrase).
     expect(Object.keys(await storedActiveEntry()).sort()).toEqual(
-      ['address', 'createdAt', 'id', 'kind', 'name', 'network', 'passwordless', 'vault'].sort(),
+      ['address', 'createdAt', 'id', 'kind', 'name', 'network', 'origin', 'passwordless', 'vault'].sort(),
     );
 
     const seed = await mnemonicToSeed(mnemonic);

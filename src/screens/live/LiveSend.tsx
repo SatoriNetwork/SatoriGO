@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronLeft, AlertTriangle, CheckCircle, BookUser, Check, Wallet, ShieldCheck } from 'lucide-react';
+import { ChevronLeft, AlertTriangle, CheckCircle, ShieldCheck } from 'lucide-react';
 import { Button } from '../../components/Button';
 import { RecipientRiskBanners } from '../../components/RecipientRiskBanners';
 import { SyncStatusPill } from '../../components/SyncStatusPill';
@@ -23,6 +23,7 @@ import type { FeeEstimate, LiveSendPlan, LiveNetworkId } from '../../services/ch
 import { estimateTxBytes } from '../../services/chain/txBuilder';
 import { ELECTRUM_CLOSED, ELECTRUM_NOT_CONNECTED } from '../../services/chain/electrumClient';
 import { LiveNav } from './LiveNav';
+import { ContactsPicker, MyWalletsPicker, SaveContactPanel } from './RecipientPickers';
 import type { NativeTicker } from '../../services/chain/chainParams';
 
 interface LiveSendProps {
@@ -32,9 +33,6 @@ interface LiveSendProps {
   /** Asset being sent — the native coin when absent or 'EVR'. */
   asset?: string;
 }
-
-/** Up to this many own wallets are offered as chips; more become a dropdown. */
-const MY_WALLETS_CHIPS_MAX = 4;
 
 /** How long the success screen lingers before auto-returning home. */
 const SUCCESS_AUTO_RETURN_MS = 4_000;
@@ -247,12 +245,6 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
   // Rate the last Max estimate was computed at (null = server-probed rate).
   const lastMaxRateRef = useRef<bigint | null>(null);
 
-  // Save-to-address-book affordance for a freshly-entered recipient.
-  const [savingContact, setSavingContact] = useState(false);
-  const [contactLabel, setContactLabel] = useState('');
-  const [contactError, setContactError] = useState('');
-  const [contactSaved, setContactSaved] = useState(false);
-
   // --- recipient risk -------------------------------------------------------
   // Two warnings, both answered offline from what the wallet already knows
   // (services/recipientRisk.ts): a recipient never paid before, and one that
@@ -420,8 +412,6 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
 
   const fillRecipient = (addr: string) => {
     setTo(addr);
-    setContactSaved(false);
-    setSavingContact(false);
   };
 
   // Quick-pick one of your own wallets: fills the recipient. The picked wallet is
@@ -430,18 +420,6 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
   const pickMyWallet = (addr: string) => {
     fillRecipient(addr);
     setFieldError('');
-  };
-
-  const handleSaveContact = () => {
-    setContactError('');
-    const res = addContact(contactLabel, trimmedTo);
-    if (!res.ok) {
-      setContactError(res.error);
-      return;
-    }
-    setSavingContact(false);
-    setContactLabel('');
-    setContactSaved(true);
   };
 
   // Quick-amount chips (MetaMask-style). Setting `amount` runs the normal
@@ -672,148 +650,155 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
           <h2>Review send</h2>
           <span />
         </div>
-        <div className="app-content" data-testid="live-send-review">
-          {/* The same recipient warnings the form showed, repeated here: this
-              is the last screen before the transaction is real. */}
-          {planRisk && (
-            <RecipientRiskBanners
-              firstTime={planRisk.firstTime}
-              lookalikeOf={planRisk.lookalikeOf ? fmtShortAddress(planRisk.lookalikeOf) : null}
-            />
-          )}
-          <div className="banner warning" style={{ marginBottom: 14 }}>
-            <AlertTriangle size={14} />
-            This broadcasts a real {amountUnit} transaction to the {chainNetworkName}. Sends cannot be undone.
-          </div>
-          {activeNet.sighash === 'unified' && (
-            // A shared-history fork: say what protects the user and what does not.
-            // The signature is the fork's own (SIGHASH_UNIFIED), so Bitcoin rejects
-            // it; the other direction is out of this wallet's hands.
-            <div className="banner info" style={{ marginBottom: 14, alignItems: 'flex-start' }} data-testid="live-review-replay-note">
-              <ShieldCheck size={14} style={{ flexShrink: 0, marginTop: 2 }} />
-              <span>
-                Signed with this chain's replay protection: the transaction is valid on {chainNetworkName} only
-                and cannot be replayed on Bitcoin. Coins you also hold on Bitcoin stay linked until you send
-                them to yourself here once.
-              </span>
-            </div>
-          )}
-
-          <div className="card solid" style={{ marginBottom: 14 }}>
-            <div className="summary-table">
-              <div className="sum-row">
-                <span className="sum-key">To</span>
-                <span className="sum-val mono" style={{ fontSize: 11 }}>{plan.toAddress}</span>
-              </div>
-              <div className="sum-row">
-                <span className="sum-key">Amount</span>
-                <span className="sum-val">{fmtSats(plan.amountSats, activeNet.decimals)} {amountUnit}</span>
-              </div>
-              <div className="sum-row" data-testid="live-review-fee">
-                <span className="sum-key">Network fee</span>
-                <span className="sum-val">{fmtSats(plan.feeSats, activeNet.decimals)} {nativeTicker}</span>
-              </div>
-              <div className="sum-row">
-                <span className="sum-key">Virtual size</span>
-                <span className="sum-val">{plan.built.virtualSize} vbytes</span>
-              </div>
-              <div className="sum-row" data-testid="live-review-txid">
-                <span className="sum-key">Tx ID (preview)</span>
-                <span className="sum-val mono" style={{ fontSize: 11 }}>{fmtShort(plan.built.txid)}</span>
-              </div>
-            </div>
-          </div>
-
-          <div className="section-label">Confirm &amp; Send</div>
-          <div
-            className="card"
-            style={{ marginBottom: 14 }}
-          >
-            {/* Custom check tile (same design as the onboarding ack tiles) in
-                the arm's danger accent. role="checkbox" + aria-checked kept so
-                Playwright .check()/.uncheck() still drive it. */}
-            <div
-              role="checkbox"
-              aria-checked={armed}
-              tabIndex={0}
-              data-testid="live-arm-checkbox"
-              onClick={() => handleArmToggle(!armed)}
-              onKeyDown={(e) => {
-                if (e.key === ' ' || e.key === 'Enter') {
-                  e.preventDefault();
-                  handleArmToggle(!armed);
-                }
-              }}
-              style={{ display: 'flex', gap: 10, alignItems: 'flex-start', cursor: 'pointer' }}
-            >
-              <div
-                style={{
-                  width: 18,
-                  height: 18,
-                  borderRadius: 5,
-                  border: `2px solid ${armed ? 'var(--danger)' : 'var(--border-strong)'}`,
-                  background: armed ? 'var(--danger-bg)' : 'transparent',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  flexShrink: 0,
-                  marginTop: 1,
-                  transition: 'all 0.15s',
-                }}
-              >
-                {armed && <span style={{ color: 'var(--danger)', fontSize: 11, fontWeight: 700 }}>✓</span>}
-              </div>
-              <span style={{ fontSize: 12, lineHeight: 1.5 }}>
-                I understand this sends real {amountUnit} and cannot be undone.
-              </span>
-            </div>
-          </div>
-
-          {requirePassword && (
-            <div style={{ marginBottom: 14 }}>
-              <PasswordField
-                label="Wallet password"
-                showLabel="Show password"
-                hideLabel="Hide password"
-                value={password}
-                onChange={(e) => {
-                  setPassword(e.target.value);
-                  setPasswordError('');
-                }}
-                placeholder="Enter your password to confirm"
-                testId="live-send-password"
+        {/* Review split (same send-pinned pair as the form): the summary
+            scrolls in .send-scroll while the whole Confirm & Send section
+            (arm tick, password, error, Back + Confirm) stays pinned below it,
+            so the primary button is visible without scrolling on 400x600. */}
+        <div className="app-content send-pinned" data-testid="live-send-review">
+          <div className="send-scroll">
+            {/* The same recipient warnings the form showed, repeated here: this
+                is the last screen before the transaction is real. */}
+            {planRisk && (
+              <RecipientRiskBanners
+                firstTime={planRisk.firstTime}
+                lookalikeOf={planRisk.lookalikeOf ? fmtShortAddress(planRisk.lookalikeOf) : null}
               />
-              {passwordError && (
-                <span
-                  role="alert"
-                  data-testid="live-send-password-error"
-                  style={{ fontSize: 11.5, color: 'var(--danger)', display: 'block', marginTop: 4 }}
-                >
-                  {passwordError}
+            )}
+            <div className="banner warning" style={{ marginBottom: 14 }}>
+              <AlertTriangle size={14} />
+              This broadcasts a real {amountUnit} transaction to the {chainNetworkName}. Sends cannot be undone.
+            </div>
+            {activeNet.sighash === 'unified' && (
+              // A shared-history fork: say what protects the user and what does not.
+              // The signature is the fork's own (SIGHASH_UNIFIED), so Bitcoin rejects
+              // it; the other direction is out of this wallet's hands.
+              <div className="banner info" style={{ marginBottom: 14, alignItems: 'flex-start' }} data-testid="live-review-replay-note">
+                <ShieldCheck size={14} style={{ flexShrink: 0, marginTop: 2 }} />
+                <span>
+                  Signed with this chain's replay protection: the transaction is valid on {chainNetworkName} only
+                  and cannot be replayed on Bitcoin. Coins you also hold on Bitcoin stay linked until you send
+                  them to yourself here once.
                 </span>
-              )}
-            </div>
-          )}
+              </div>
+            )}
 
-          {(broadcastError || mappedStoreError) && (
-            <div className="banner danger" style={{ marginBottom: 14 }} data-testid="live-send-error">
-              {broadcastError || mappedStoreError}
+            <div className="card solid" style={{ marginBottom: 14 }}>
+              <div className="summary-table">
+                <div className="sum-row">
+                  <span className="sum-key">To</span>
+                  <span className="sum-val mono" style={{ fontSize: 11 }}>{plan.toAddress}</span>
+                </div>
+                <div className="sum-row">
+                  <span className="sum-key">Amount</span>
+                  <span className="sum-val">{fmtSats(plan.amountSats, activeNet.decimals)} {amountUnit}</span>
+                </div>
+                <div className="sum-row" data-testid="live-review-fee">
+                  <span className="sum-key">Network fee</span>
+                  <span className="sum-val">{fmtSats(plan.feeSats, activeNet.decimals)} {nativeTicker}</span>
+                </div>
+                <div className="sum-row">
+                  <span className="sum-key">Virtual size</span>
+                  <span className="sum-val">{plan.built.virtualSize} vbytes</span>
+                </div>
+                <div className="sum-row" data-testid="live-review-txid">
+                  <span className="sum-key">Tx ID (preview)</span>
+                  <span className="sum-val mono" style={{ fontSize: 11 }}>{fmtShort(plan.built.txid)}</span>
+                </div>
+              </div>
             </div>
-          )}
-
-          <div style={{ display: 'flex', gap: 9 }}>
-            <Button variant="secondary" onClick={handleBack}>Back</Button>
-            <Button
-              block
-              variant="danger"
-              disabled={!armed}
-              loading={broadcasting}
-              onClick={handleBroadcast}
-              data-testid="live-broadcast"
+          </div>{/* /send-scroll */}
+          <div className="send-cta">
+            <div className="section-label">Confirm &amp; Send</div>
+            <div
+              className="card"
+              style={{ marginBottom: 14 }}
             >
-              Confirm & Send
-            </Button>
-          </div>
+              {/* Custom check tile (same design as the onboarding ack tiles) in
+                  the arm's danger accent. role="checkbox" + aria-checked kept so
+                  Playwright .check()/.uncheck() still drive it. */}
+              <div
+                role="checkbox"
+                aria-checked={armed}
+                tabIndex={0}
+                data-testid="live-arm-checkbox"
+                onClick={() => handleArmToggle(!armed)}
+                onKeyDown={(e) => {
+                  if (e.key === ' ' || e.key === 'Enter') {
+                    e.preventDefault();
+                    handleArmToggle(!armed);
+                  }
+                }}
+                style={{ display: 'flex', gap: 10, alignItems: 'flex-start', cursor: 'pointer' }}
+              >
+                <div
+                  style={{
+                    width: 18,
+                    height: 18,
+                    borderRadius: 5,
+                    border: `2px solid ${armed ? 'var(--danger)' : 'var(--border-strong)'}`,
+                    background: armed ? 'var(--danger-bg)' : 'transparent',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    flexShrink: 0,
+                    marginTop: 1,
+                    transition: 'all 0.15s',
+                  }}
+                >
+                  {armed && <span style={{ color: 'var(--danger)', fontSize: 11, fontWeight: 700 }}>✓</span>}
+                </div>
+                <span style={{ fontSize: 12, lineHeight: 1.5 }}>
+                  I understand this sends real {amountUnit} and cannot be undone.
+                </span>
+              </div>
+            </div>
+
+            {requirePassword && (
+              <div style={{ marginBottom: 14 }}>
+                <PasswordField
+                  label="Wallet password"
+                  showLabel="Show password"
+                  hideLabel="Hide password"
+                  value={password}
+                  onChange={(e) => {
+                    setPassword(e.target.value);
+                    setPasswordError('');
+                  }}
+                  placeholder="Enter your password to confirm"
+                  testId="live-send-password"
+                />
+                {passwordError && (
+                  <span
+                    role="alert"
+                    data-testid="live-send-password-error"
+                    style={{ fontSize: 11.5, color: 'var(--danger)', display: 'block', marginTop: 4 }}
+                  >
+                    {passwordError}
+                  </span>
+                )}
+              </div>
+            )}
+
+            {(broadcastError || mappedStoreError) && (
+              <div className="banner danger" style={{ marginBottom: 14 }} data-testid="live-send-error">
+                {broadcastError || mappedStoreError}
+              </div>
+            )}
+
+            <div style={{ display: 'flex', gap: 9 }}>
+              <Button variant="secondary" onClick={handleBack}>Back</Button>
+              <Button
+                block
+                variant="danger"
+                disabled={!armed}
+                loading={broadcasting}
+                onClick={handleBroadcast}
+                data-testid="live-broadcast"
+              >
+                Confirm & Send
+              </Button>
+            </div>
+          </div>{/* /send-cta */}
         </div>
       </div>
     );
@@ -846,136 +831,22 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
             label="Recipient address"
             placeholder={`${activeNet.displayName} address`}
             value={to}
-            onChange={(e) => { setTo(e.target.value); setContactSaved(false); }}
+            onChange={(e) => setTo(e.target.value)}
             testId="live-send-to"
           />
 
-          {/* Quick-pick your OWN wallets: one tap fills the recipient. The chosen
-              wallet's chip highlights green (matched by address, so it survives
-              duplicate names and clears itself when you edit the recipient). No
-              separate confirmation line, so picking never shifts the layout. */}
-          {/* Past a handful of wallets the chip grid would eat the screen (an
-              EVM seed can carry 20 accounts): a dropdown then, the chips stay
-              for the common 1 to 4. */}
-          {myWallets.length > MY_WALLETS_CHIPS_MAX && (
-            <div data-testid="live-send-my-wallets" style={{ margin: '10px 0 12px' }}>
-              <select
-                data-testid="live-send-my-wallets-select"
-                className="live-picker"
-                value={myWallets.find((w) => !!w.address && trimmedTo === w.address)?.address ?? ''}
-                onChange={(e) => { if (e.target.value) pickMyWallet(e.target.value); }}
-                aria-label="Send to one of my wallets"
-                style={{ width: '100%' }}
-              >
-                <option value="">Send to one of my wallets ({myWallets.length})…</option>
-                {myWallets.map((w) => (
-                  <option key={w.id} value={w.address}>
-                    {w.name} · {w.address.slice(0, 8)}…{w.address.slice(-4)}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
-          {myWallets.length > 0 && myWallets.length <= MY_WALLETS_CHIPS_MAX && (
-            <div data-testid="live-send-my-wallets" style={{ margin: '10px 0 12px' }}>
-              <div className="section-label" style={{ marginTop: 0, marginBottom: 6 }}>My wallets</div>
-              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                {myWallets.map((w, i) => {
-                  const isPicked = !!w.address && trimmedTo === w.address;
-                  return (
-                    <button
-                      key={w.id}
-                      type="button"
-                      className="chip"
-                      onClick={() => pickMyWallet(w.address)}
-                      aria-label={`Send to my wallet ${w.name}`}
-                      aria-pressed={isPicked}
-                      title={`${w.name}: ${w.address}`}
-                      data-testid={`live-send-wallet-${i}`}
-                      style={{
-                        cursor: 'pointer',
-                        maxWidth: '100%',
-                        color: isPicked ? 'var(--success)' : 'var(--text-dim)',
-                        background: isPicked ? 'var(--success-bg)' : 'var(--card)',
-                        border: isPicked
-                          ? '1px solid color-mix(in srgb, var(--success) 45%, transparent)'
-                          : '1px solid var(--border)',
-                        fontWeight: isPicked ? 700 : 600,
-                        transition: 'all 0.15s',
-                      }}
-                    >
-                      {isPicked ? <Check size={11} style={{ flexShrink: 0 }} /> : <Wallet size={11} style={{ flexShrink: 0 }} />}
-                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {w.name}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-
-          {/* Saved contacts from the address book. */}
-          {chainContacts.length > 0 && (
-            <div style={{ display: 'flex', gap: 8, margin: '2px 0 12px', flexWrap: 'wrap' }}>
-              <select
-                data-testid="live-send-contacts"
-                className="live-picker"
-                value=""
-                onChange={(e) => { if (e.target.value) fillRecipient(e.target.value); }}
-                aria-label="From address book"
-                style={{ flex: 1, minWidth: 128 }}
-              >
-                <option value="">From address book…</option>
-                {chainContacts.map((c) => (
-                  <option key={c.address} value={c.address}>
-                    {c.label} · {c.address.slice(0, 8)}…
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
-
-          {/* Save a freshly-entered recipient to the address book. */}
-          {canSaveContact && !savingContact && (
-            <button
-              type="button"
-              className="btn btn-ghost btn-sm"
-              onClick={() => { setSavingContact(true); setContactError(''); }}
-              data-testid="live-send-save-contact"
-              style={{ marginBottom: 12 }}
-            >
-              <BookUser size={13} /> Save to address book
-            </button>
-          )}
-          {contactSaved && (
-            <div className="text-dim" style={{ fontSize: 11.5, margin: '0 2px 12px', display: 'flex', alignItems: 'center', gap: 5 }}>
-              <Wallet size={12} /> Saved to address book.
-            </div>
-          )}
-          {savingContact && (
-            <div className="card" style={{ marginBottom: 12 }}>
-              <TextField
-                label="Contact name"
-                value={contactLabel}
-                onChange={(e) => { setContactLabel(e.target.value); setContactError(''); }}
-                placeholder="e.g. Exchange"
-                testId="live-send-contact-label"
-                autoComplete="off"
-                autoFocus
-                error={contactError || undefined}
-              />
-              <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-                <Button type="button" variant="secondary" size="sm" onClick={() => setSavingContact(false)}>
-                  Cancel
-                </Button>
-                <Button type="button" size="sm" block onClick={handleSaveContact} data-testid="live-send-contact-save">
-                  Save contact
-                </Button>
-              </div>
-            </div>
-          )}
-
+          {/* Quick-pick your OWN wallets, saved contacts and "Save to address
+              book": the same three components every Send screen shares
+              (RecipientPickers.tsx). Both lists are already scoped to the
+              ACTIVE chain above. */}
+          <MyWalletsPicker wallets={myWallets} current={trimmedTo} onPick={pickMyWallet} testIdPrefix="live-send" />
+          <ContactsPicker contacts={chainContacts} onPick={fillRecipient} testIdPrefix="live-send" />
+          <SaveContactPanel
+            canSave={canSaveContact}
+            recipient={trimmedTo}
+            onSave={(label) => addContact(label, trimmedTo)}
+            testIdPrefix="live-send"
+          />
           <TextField
             label={`Amount (${shownAsset})`}
             placeholder="0.00"

@@ -1,14 +1,17 @@
 // Live transaction detail — opened from a LiveHome activity row. Shows the
 // direction, asset, amount, status, block height, fee (senders only) and the
-// full txid, plus a "View in explorer" button that resolves the user's
-// explorer URL template ({txid} placeholder) and opens it in a new tab.
+// full txid, plus a "View on explorer" link that resolves the active chain's
+// explorer URL template ({txid} placeholder) and opens it in a new tab. Every
+// chain family has one: UTXO (per-ticker defaults), EVM (the chain's own
+// explorerTxUrl), Monero (xmrchain.net, the hash only), Zcash
+// (zcashexplorer.app) and Bittensor (taostats.io extrinsic page).
 
 import { ArrowDownLeft, ArrowUpRight, ChevronLeft, Clock, ExternalLink, XCircle } from 'lucide-react';
 import { Button } from '../../components/Button';
 import { SyncStatusPill } from '../../components/SyncStatusPill';
 import { CopyButton } from '../../components/CopyButton';
 import { EmptyState } from '../../components/EmptyState';
-import { useLiveStore, nativeTickerFor, activeEvmChain } from '../../store/liveStore';
+import { useLiveStore, nativeTickerFor, nativeDecimalsFor, isNativeAssetId, activeFamily, activeEvmChain } from '../../store/liveStore';
 import { LiveNav } from './LiveNav';
 import { stakingRowLabel, validatorName } from './stakingRowLabel';
 import { displaySymbol } from '../../services/displaySymbol';
@@ -18,11 +21,18 @@ interface LiveTxDetailProps {
   onBack(): void;
 }
 
-function fmtAmount(amount: number): string {
+/** `maxDecimals` is the CHAIN's, never a fixed 8: Monero has 12, an EVM
+ *  native coin 18, and a fixed 8 rounded a 12-decimal XMR amount away. */
+function fmtAmount(amount: number, maxDecimals: number): string {
   if (amount === 0) return '0';
   if (amount >= 1000) return amount.toLocaleString('en-US', { maximumFractionDigits: 2 });
-  return amount.toLocaleString('en-US', { maximumFractionDigits: 8 });
+  return amount.toLocaleString('en-US', { maximumFractionDigits: Math.min(20, Math.max(0, maxDecimals)) });
 }
+
+/** What the detail screen says in place of a counterparty a chain does not
+ *  reveal. Monero's ring signatures and stealth addresses hide the other side
+ *  of every transaction by design, so there is nothing to show or to copy. */
+export const MONERO_COUNTERPARTY_NOTE = 'Not visible. Monero hides the other party by design.';
 
 /**
  * Resolve a usable explorer URL for `txid`, or '' when this chain has none.
@@ -40,6 +50,9 @@ export function resolveExplorerUrl(template: string, txid: string): string {
   // No usable template means NO explorer for this chain. It must never fall back
   // to another chain's URL (it used to fall back to Evrmore's), because that
   // resolves a foreign txid on the wrong explorer and reads as "not found".
+  // A local placeholder id (e.g. Zcash's `unrecognised:<sha256>` for a tx it
+  // could not parse) is not a chain hash, so no explorer can resolve it.
+  if (txid.includes(':')) return '';
   return usable ? template.replace('{txid}', encodeURIComponent(txid)) : '';
 }
 
@@ -58,6 +71,10 @@ export function LiveTxDetail({ txid, onBack }: LiveTxDetailProps) {
   // The asset as it is DRAWN: on an EVM chain `tx.asset` is a symbol its own
   // author chose (services/displaySymbol.ts).
   const shownAsset = displaySymbol(tx?.asset ?? '');
+  // The native coin's precision comes from its chain (12 on Monero, 18 on an
+  // EVM chain, 8 on a UTXO chain); an issued asset keeps the 8 it always had.
+  const maxDecimals = tx && isNativeAssetId(tx.asset) ? nativeDecimalsFor() : 8;
+  const isMonero = activeFamily() === 'monero';
   const stakingInfo = tx?.staking;
   const staking =
     stakingInfo && stakeChain
@@ -114,15 +131,15 @@ export function LiveTxDetail({ txid, onBack }: LiveTxDetailProps) {
       <ArrowUpRight size={26} />
     );
 
-  // '' when this chain ships no explorer; drives BOTH the click and whether the
-  // button renders at all.
-  const explorerUrl = resolveExplorerUrl(explorerUrlTemplate, tx.txid);
-  const openExplorer = () => {
-    if (explorerUrl === '') return;
-    if (typeof window !== 'undefined' && typeof window.open === 'function') {
-      window.open(explorerUrl, '_blank', 'noopener');
-    }
-  };
+  // '' when this chain ships no explorer; drives whether the link renders.
+  // An EVM chain links through its OWN explorerTxUrl: the user-editable
+  // template's storage slot is not chain-scoped for EVM targets, so it could
+  // hold another chain's explorer. Only the txid is ever put in the URL (on
+  // Monero that is the public tx hash, never a key or any private data).
+  const explorerUrl = resolveExplorerUrl(
+    activeFamily() === 'evm' && stakeChain?.explorerTxUrl ? stakeChain.explorerTxUrl : explorerUrlTemplate,
+    tx.txid,
+  );
 
   return (
     <div className="app-frame screen-enter">
@@ -138,7 +155,7 @@ export function LiveTxDetail({ txid, onBack }: LiveTxDetailProps) {
               ? staking.amountText === ''
                 ? staking.title
                 : staking.amountText
-              : `${incoming ? '+' : '−'}${fmtAmount(tx.amount)} ${shownAsset}`}
+              : `${incoming ? '+' : '−'}${fmtAmount(tx.amount, maxDecimals)} ${shownAsset}`}
           </div>
           <span className={`chip ${statusChip}`} style={{ marginTop: 9 }} data-testid="live-tx-status">
             {tx.status}
@@ -163,7 +180,7 @@ export function LiveTxDetail({ txid, onBack }: LiveTxDetailProps) {
               <div className="sum-row">
                 <span className="sum-key">Amount</span>
                 <span className="sum-val tnum">
-                  {staking ? staking.amountText : `${fmtAmount(tx.amount)} ${shownAsset}`}
+                  {staking ? staking.amountText : `${fmtAmount(tx.amount, maxDecimals)} ${shownAsset}`}
                 </span>
               </div>
             )}
@@ -209,15 +226,25 @@ export function LiveTxDetail({ txid, onBack }: LiveTxDetailProps) {
             </div>
             <div className="sum-row">
               <span className="sum-key">{incoming ? 'From' : 'To'}</span>
-              <span className="sum-val mono" style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11 }}>
-                {tx.counterparty ? `${tx.counterparty.slice(0, 10)}…${tx.counterparty.slice(-6)}` : 'n/a'}
-                {tx.counterparty && <CopyButton value={tx.counterparty} label="Copy address" size={12} />}
-              </span>
+              {tx.counterparty ? (
+                <span className="sum-val mono" style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11 }}>
+                  {`${tx.counterparty.slice(0, 10)}…${tx.counterparty.slice(-6)}`}
+                  <CopyButton value={tx.counterparty} label="Copy address" size={12} />
+                </span>
+              ) : isMonero ? (
+                // Readable, not truncated, and NOT copyable: there is no
+                // address behind it.
+                <span className="sum-val text-dim" data-testid="live-tx-counterparty-private" style={{ fontSize: 11, textAlign: 'right' }}>
+                  {MONERO_COUNTERPARTY_NOTE}
+                </span>
+              ) : (
+                <span className="sum-val mono" style={{ fontSize: 11 }}>n/a</span>
+              )}
             </div>
             {!incoming && tx.feeEvr > 0 && (
               <div className="sum-row">
                 <span className="sum-key">Network fee</span>
-                <span className="sum-val tnum">{fmtAmount(tx.feeEvr)} {nativeTicker}</span>
+                <span className="sum-val tnum">{fmtAmount(tx.feeEvr, nativeDecimalsFor())} {nativeTicker}</span>
               </div>
             )}
             {tx.blockHeight !== undefined && (
@@ -247,16 +274,18 @@ export function LiveTxDetail({ txid, onBack }: LiveTxDetailProps) {
         {/* Hidden entirely on a chain with no known explorer: an inert or
             wrong-chain link is worse than no link at all. */}
         {explorerUrl !== '' && (
-          <div style={{ marginTop: 12 }}>
-            <Button
-              variant="secondary"
-              block
-              icon={<ExternalLink size={15} />}
-              onClick={openExplorer}
+          <div style={{ marginTop: 12, textAlign: 'center' }}>
+            <a
+              href={explorerUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="link"
               data-testid="live-tx-explorer"
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 12.5 }}
             >
-              View in explorer
-            </Button>
+              <ExternalLink size={13} />
+              View on explorer
+            </a>
           </div>
         )}
       </div>

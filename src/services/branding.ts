@@ -17,7 +17,11 @@ export type LogoSlot =
   | 'btc'
   | 'doge'
   | 'neox'
-  | 'btcb2';
+  | 'btcb2'
+  | 'xmr'
+  | 'zec'
+  | 'tao'
+  | 'avax';
 export type LogoSize = 'sm' | 'md' | 'lg';
 export type LogoStyle = 'circle' | 'rounded' | 'square';
 

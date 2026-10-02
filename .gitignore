@@ -4,8 +4,15 @@ release/
 *.log
 .DS_Store
 /store/
-# local-only docs (owner's decision: not published to the public repo)
-/docs/
+# local-only docs (owner's decision: not published to the public repo).
+# NOTE the /docs/* form: git will not re-include a path whose PARENT directory is
+# excluded, so `/docs/` plus a negation would silently do nothing.
+/docs/*
+# ...except the store submission copy, which IS versioned here. It is still
+# PRIVATE-ONLY: the public sync must drop it, exactly as it drops AGENTS.md.
+!/docs/store/
+# Design notes. PRIVATE like docs/store: architecture we have not committed to.
+!/docs/design/
 
 # Local secrets (never committed): API keys injected into DEV builds only.
 *.local.json

@@ -377,6 +377,52 @@ describe('listTransactions mapping', () => {
 // 3. Fee fill via eth_getTransactionReceipt.
 // ---------------------------------------------------------------------------
 
+describe('rows without metadata (Avalanche, 2026-10-02)', () => {
+  it('dates a receive that came with metadata: null from the block, instead of dropping it', async () => {
+    const { client, batchCalls } = makeFakeRpc([
+      [transfersResult([]), transfersResult([extTransfer({ from: OTHER, to: ADDRESS, metadata: null })])],
+      [ok({ number: '0x2fc1623', timestamp: '0x68a44c10' })],
+    ]);
+    const indexer = createAlchemyIndexer(client);
+
+    const txs = await indexer.listTransactions(ADDRESS);
+
+    expect(txs).toHaveLength(1);
+    expect(txs[0].timestamp).toBe(0x68a44c10 * 1000);
+    expect(batchCalls[1]).toEqual([{ method: 'eth_getBlockByNumber', params: ['0x2fc1623', false] }]);
+  });
+
+  it('asks once per distinct block, and a dated row costs no block lookup', async () => {
+    const { client, batchCalls } = makeFakeRpc([
+      [
+        transfersResult([]),
+        transfersResult([
+          tokenTransfer({ to: ADDRESS, from: OTHER, metadata: null, uniqueId: 'a' }),
+          tokenTransfer({ to: ADDRESS, from: OTHER, metadata: null, uniqueId: 'b', hash: HASH_B }),
+          tokenTransfer({ to: ADDRESS, from: OTHER, uniqueId: 'c', hash: HASH_C, blockNum: '0x10' }),
+        ]),
+      ],
+      [ok({ timestamp: '0x68a44c10' })],
+    ]);
+    const indexer = createAlchemyIndexer(client);
+
+    const rows = await indexer.listTokenTransfers(ADDRESS);
+
+    expect(rows).toHaveLength(3);
+    expect(batchCalls[1]).toHaveLength(1);
+  });
+
+  it('drops a row the node cannot date either, never inventing a time', async () => {
+    const { client } = makeFakeRpc([
+      [transfersResult([]), transfersResult([extTransfer({ from: OTHER, to: ADDRESS, metadata: null })])],
+      [ok(null)],
+    ]);
+    const indexer = createAlchemyIndexer(client);
+
+    expect(await indexer.listTransactions(ADDRESS)).toEqual([]);
+  });
+});
+
 describe('fee fill', () => {
   it('requests receipts only for rows the address SENT, not received', async () => {
     const sent = extTransfer({ from: ADDRESS, to: OTHER, hash: HASH_A, uniqueId: `${HASH_A}:external` });

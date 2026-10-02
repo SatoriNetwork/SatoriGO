@@ -160,9 +160,11 @@ describe('app password: an install that never sets one', () => {
     }
 
     // The summary keeps its EXACT historical key set: neither new field appears.
+    // (`origin`, 'generated' here, is the phrase's provenance for "Add Monero",
+    // not an app-password field, and is public.)
     const list = await svc.listWallets();
     expect(Object.keys(list[0]).sort()).toEqual(
-      ['active', 'address', 'createdAt', 'family', 'id', 'kind', 'name', 'network', 'passwordless'].sort(),
+      ['active', 'address', 'createdAt', 'family', 'id', 'kind', 'name', 'network', 'origin', 'passwordless'].sort(),
     );
     expect(list.some((w) => 'appProtected' in w)).toBe(false);
 

@@ -9,6 +9,141 @@ and release commits.
 
 ---
 
+## 1.5.0
+
+### Bitcoin BLAKE2b ticker
+
+Bitcoin BLAKE2b is now shown as XBT, the ticker the exchanges use for it. The
+address, balances and history are unchanged; only the label differs.
+
+### Zcash
+
+A new network: Zcash, marked new in the chain list. Add it to any wallet made
+from a recovery phrase through the network switcher: the transparent address is
+derived from the same phrase at the standard Zcash path, so Zashi, YWallet,
+Trust Wallet and Ledger show the same address for it. Transparent addresses
+only: payments to them are public, like Bitcoin, and shielded Zcash is not
+supported. Send accepts t1, t3 and tex1 recipients and refuses shielded and
+unified addresses with a clear message. The fee is the network's fixed rule
+(ZIP-317), shown exactly at review, and a send is valid for about 50 minutes
+before it fails and can be sent again. Balances, history and sends go through
+the Satori GO gateway to public lightwalletd servers. A send that expires is
+reported on the home screen as not sent, with a Send again button; a send the
+gateway could not confirm it received is kept as pending and looked up, never
+sent twice; and the coins a just-sent transaction spends are held back from the
+next send until the network has seen it.
+
+### Bittensor
+
+A new network: Bittensor, marked new in the chain list. Add it to any wallet
+made from a recovery phrase through the network switcher: the account is
+derived from the phrase the way btcli and polkadot.js derive a coldkey, so they
+show the same address for it. Receive, balance and send in v1: the fee comes
+from the network at review, a send keeps the account open, and Max sends the
+rest of the balance. Activity lists the sends made from this wallet and links
+to the full history on taostats.io; a pending send is followed to its final
+state even after the window that sent it was closed, and one the network let
+expire is marked so. Balances and sends go through the Satori GO gateway;
+sending is blocked with a clear notice if the network changes its transaction
+format before the wallet is updated.
+
+### Fixed
+
+- A Zcash or Bittensor wallet added from the EVM account and another network
+  added from the Evrmore wallet now count as the same recovery phrase in the
+  network switcher, instead of offering to add a network that already exists
+  (or adding a duplicate Evrmore wallet).
+- Hiding Zcash, Bittensor, Monero or an EVM network in Settings now survives
+  closing and reopening the wallet.
+- The block explorer URL typed for a Zcash, Bittensor, Monero or EVM wallet is
+  saved for that network, no longer overwriting the last UTXO network's.
+- Settings > Security on a Zcash or Bittensor wallet no longer offers "Show
+  private key" (there is none to show; the button answered "Incorrect
+  password" to the right password).
+- Avalanche Activity now lists incoming payments. The history service sends
+  them without a time on that network, and the wallet used to skip such rows
+  while the balance already showed the money; it now reads the time from the
+  block itself.
+- A custom block explorer saved on Bitcoin BLAKE2b or on an EVM network no
+  longer replaces the one saved for Evrmore.
+
+### Easier to use
+
+- Favourite networks. A star on every row of the network list puts that
+  network in a Favourites group at the top, in the order you choose.
+- The network list has a search box (name, ticker or website) and shows the
+  networks this wallet already has above the ones you can add.
+- Balances and prices in US dollars, euros or Polish zloty, chosen in
+  Settings > Appearance.
+- Confirm & Send is always visible on the review screen, on every network,
+  without scrolling.
+- Monero shows its first sync as a progress bar with blocks and the time
+  left, says how long a new payment stays locked, and can start a restore
+  from the date the phrase was first used with Monero.
+- Every transaction's details open it in the network's block explorer.
+- Links to CoinGecko, SafeTrade, satorinet.io and each network's website are
+  now blue and easier to spot, and the Satori Network line at the bottom of
+  the wallet links to satorinet.io.
+- Max on Bittensor explains that it keeps the network's minimum balance on the
+  account.
+
+### Avalanche
+
+A new EVM network: Avalanche C-Chain, marked new in the chain list. The same
+EVM account works on it, with USDC and USDt listed by default.
+
+### Robinhood Chain
+
+A new EVM network: Robinhood Chain, marked new in the chain list. Gas is paid
+in ETH, the same EVM account works on it, and the Global Dollar (USDG) is
+listed by default.
+
+### Monero
+
+A new network: Monero, marked new in the chain list. Add it to any wallet made
+from a recovery phrase through the network switcher: the Monero wallet is
+derived from the same phrase the way Cake Wallet's BIP39 option does, so Cake
+shows the same wallet for it (a Ledger or Trezor restored from the phrase shows
+a different one). An existing Monero wallet can also be imported from its 25
+words with its creation date or block height.
+
+Monero has no public balance to look up. The wallet scans the chain itself,
+in a background worker of the wallet window, and only while the window is
+open; the first scan runs from the day Monero was added (or from the date you
+gave at import). The scan is saved as it goes, encrypted with a key derived
+from the wallet's own keys, so reopening the wallet picks up where it left off.
+Blocks come through the Satori GO gateway, so the Monero node only ever sees
+the gateway.
+
+Receive shows the primary address and a list of subaddresses, with "New
+subaddress" for a fresh one per sender. Send takes a recipient, an amount (MAX
+sweeps the unlocked balance) and a fee priority (Unimportant, Normal,
+Elevated); the review shows the fee the wallet computed and refuses any fee
+above 0.05 XMR. Home shows the unlocked balance, the amount still unlocking,
+and the scan's progress. Settings shows the restore height, "Rescan from
+height", and the 25 recovery words with the height beside them.
+
+Desktop notifications for incoming Monero are not available: reading a Monero
+balance needs the wallet's view key, which never leaves the open wallet
+window.
+
+### Wallets stay with their recovery phrase
+
+The network switcher now acts on the active wallet's own recovery phrase. A
+network the phrase already has a wallet on switches to that wallet; one it
+does not yet have offers to add it for this phrase, even when another phrase
+on the device already has that network. Before, picking such a network could
+land on another phrase's wallet. A wallet imported from a single key or from
+25 Monero words belongs to no phrase and keeps the earlier behaviour.
+
+A Monero wallet imported from its 25 words is now shown for what it is: its
+own "25 words" tag in the wallet lists, and Diagnostics says it was imported
+rather than printing a derivation path it never had.
+
+The address book shows only the contacts that can receive on the network in
+use; contacts saved on other networks stay in the book and show when that
+network is active.
+
 ## 1.4.2
 
 ### Bitcoin BLAKE2b

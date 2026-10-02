@@ -427,3 +427,34 @@ describe('forgot password: the panel behind the lock screen', () => {
     expect((screen.getByTestId('live-recover-new-pw') as HTMLInputElement).value).toBe('');
   });
 });
+
+describe('recovery settings: restore preview names the chains', () => {
+  it('shows chain display names, never the raw network ids', async () => {
+    seed({
+      readBackupFile: vi.fn(async () => ({
+        ok: true as const,
+        preview: preview({
+          wallets: [
+            { id: 'w-1', name: 'My savings', network: 'mainnet', address: 'E1' },
+            { id: 'w-2', name: 'My XMR', network: 'xmr:mainnet', address: '4x' },
+            { id: 'w-3', name: 'Accounts', network: 'evm', address: '0x1' },
+          ],
+        }),
+      })),
+    });
+    render(<RecoverySettings />);
+    fireEvent.click(screen.getByTestId('live-rec-restore-open'));
+    const input = screen.getByTestId('live-rec-restore-file') as HTMLInputElement;
+    const file = new File(['{}'], 'backup.json', { type: 'application/json' });
+    Object.defineProperty(file, 'text', { value: async () => '{}' });
+    fireEvent.change(input, { target: { files: [file] } });
+    await waitFor(() => expect(screen.getByTestId('live-rec-restore-pw')).toBeTruthy());
+    fireEvent.change(screen.getByTestId('live-rec-restore-pw'), { target: { value: 'file-pw' } });
+    fireEvent.click(screen.getByTestId('live-rec-restore-read'));
+    await waitFor(() => expect(screen.getByTestId('live-rec-restore-preview')).toBeTruthy());
+    expect(screen.getByTestId('live-rec-restore-net-w-1').textContent).toBe('Evrmore');
+    expect(screen.getByTestId('live-rec-restore-net-w-2').textContent).toBe('Monero');
+    expect(screen.getByTestId('live-rec-restore-net-w-3').textContent).toBe('EVM');
+    expect(screen.getByTestId('live-rec-restore-preview').textContent).not.toContain('xmr:mainnet');
+  });
+});

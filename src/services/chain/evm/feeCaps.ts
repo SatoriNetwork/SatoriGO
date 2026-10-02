@@ -61,6 +61,24 @@ export const EVM_FEE_CAPS: Readonly<Record<string, EvmFeeCaps>> = Object.freeze(
   // 0.1 EPIX, so a quote that exceeds 0.1 EPIX is refused whatever combination
   // of gas limit and price produced it.
   epix: Object.freeze({ perGasCeiling: 500n * GWEI, totalCap: 100_000_000_000_000_000n /* 0.1 EPIX */ }),
+  // Avalanche C-Chain: read live 2026-09-29 through the gateway, eth_feeHistory
+  // answered baseFeePerGas 0x12a05f200 = 5 gwei on every block of the window
+  // (the chain's dynamic fee sits at its floor when idle) with priority tips
+  // of about 1 to 3 gwei. The C-Chain has real spikes (its historic minimum
+  // was 25 gwei, and congestion has pushed it well past 100). 250 gwei is 50x
+  // the idle base fee and above any level a user should confirm blind;
+  // 200,000 gas at 250 gwei is exactly 0.05 AVAX, the total cap, a hard stop
+  // far below anything a transfer could honestly cost.
+  avalanche: Object.freeze({ perGasCeiling: 250n * GWEI, totalCap: 50_000_000_000_000_000n /* 0.05 AVAX */ }),
+  // Robinhood Chain (Arbitrum Nitro L2): read live 2026-10-02 on the public
+  // RPC, eth_feeHistory answered baseFeePerGas about 0x1fac660 = 0.033 gwei
+  // with rewards 0 (Nitro ignores the tip), and a plain transfer estimated
+  // 21,408 gas. Nitro folds the L1 cost into the gas USED, so a gas estimate
+  // grows when Ethereum L1 is busy; the total cap has to leave room for that.
+  // 10 gwei is about 300x the idle base fee; 0.005 ETH (Base's cap) allows
+  // 500,000 gas at that ceiling, a hard stop far below anything a transfer
+  // could honestly cost.
+  robinhood: Object.freeze({ perGasCeiling: 10n * GWEI, totalCap: 5_000_000_000_000_000n /* 0.005 ETH */ }),
 });
 
 export type EvmFeeCapReason = 'per-gas-ceiling' | 'total-cap' | 'no-caps-for-chain';
