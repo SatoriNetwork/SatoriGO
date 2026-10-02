@@ -37,7 +37,7 @@ import { useSettingsStore } from '../../store/settingsStore';
 import { moveFavouriteChain, toggleFavouriteChain } from '../../services/favouriteChains';
 import { networkFor, chainsShareDerivation, type EvrmoreNetwork } from '../../services/chain/chainParams';
 import { moneroPhraseUsedBefore } from '../../services/chain/engine';
-import { localIsoDate, MONERO_GENESIS_DATE, restoreHeightFromDate } from '../../services/chain/monero/restoreDate';
+import { localIsoDate, MONERO_GENESIS_DATE, restoreHeightFromDate } from '../../services/moneroDates';
 import { isEvmChainTarget } from '../../store/evmChains';
 import { isMoneroChainTarget } from '../../store/moneroChains';
 import { isZcashChainTarget } from '../../store/zcashChain';

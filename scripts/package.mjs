@@ -38,7 +38,7 @@ for (const t of targets) {
 // Build first (typecheck runs once inside build.mjs).
 const build = spawnSync(
   process.execPath,
-  [path.join(root, 'scripts', 'build.mjs'), `--target=${requested}`, '--evm', '--package'],
+  [path.join(root, 'scripts', 'build.mjs'), `--target=${requested}`, '--evm', '--monero', '--package'],
   {
     cwd: root,
     stdio: 'inherit',

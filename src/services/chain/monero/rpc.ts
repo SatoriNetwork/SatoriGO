@@ -32,33 +32,6 @@ export const MONERO_RELEASE_HEIGHT = 3772358;
  *  the next block or two, is still inside the scanned range. */
 export const MONERO_NEW_WALLET_MARGIN = 20;
 
-/** A block every 120 s, Monero's target since v2. */
-const BLOCK_SECONDS = 120;
-
-/** The estimator's anchor: the gateway reported height 3772368 at about
- *  2026-09-28T13:50Z (measured during the research, §6.6). */
-const ANCHOR_HEIGHT = 3772368;
-const ANCHOR_TIME_MS = Date.UTC(2026, 8, 28, 13, 50, 0);
-
-/** Before the v2 hard fork Monero targeted a block every 60 s, twice today's
- *  rate. The fork activated at height 1,009,827 on 2016-03-23. A single
- *  120 s line drawn back from today's anchor therefore lands ABOVE the real
- *  height for every date before the fork (the chain grew faster than the line
- *  assumes), which is the one direction an estimate must never err in: a
- *  wallet from 2015 would start scanning about 200,000 blocks after its first
- *  receipts. Dates before the fork are estimated from the fork itself at 60 s
- *  blocks instead. The fork's time of day is rounded down to midnight UTC,
- *  which only pushes the estimate lower (safer); the week of margin covers it. */
-const V2_FORK_HEIGHT = 1009827;
-const V2_FORK_TIME_MS = Date.UTC(2016, 2, 23, 0, 0, 0);
-const V1_BLOCK_SECONDS = 60;
-
-/** Safety margin subtracted from a date estimate: one week of blocks. The
- *  estimate drifts with real block times (a few percent either way over a
- *  year), and starting a week early costs about 5,000 blocks (a couple of
- *  minutes) while starting a day late loses funds from view. */
-const ESTIMATE_MARGIN_BLOCKS = 5040;
-
 const DEFAULT_TIMEOUT_MS = 15_000;
 const MAX_FOREIGN_TEXT = 200;
 
@@ -215,29 +188,6 @@ export function restoreHeightForNewWallet(tipHeight: number): number {
   return Math.max(tipHeight - MONERO_NEW_WALLET_MARGIN, MONERO_RELEASE_HEIGHT);
 }
 
-/**
- * A restore height for an imported wallet created on `date` (§6.6).
- *
- *   height = anchorHeight + (date - anchorTime) / 120 s - one week of blocks
- *
- * clamped to [0, estimated tip at `now`]. A date in the future is read as
- * `now` (a wallet cannot have been created tomorrow). A local estimate rather
- * than monero-ts's getHeightByDate: that costs 12 round trips and 5 to 14 s,
- * and the week of margin already absorbs block-time drift.
- *
- * Two segments, because the block time halved at the v2 fork (see
- * V2_FORK_HEIGHT): the 120 s line from today's anchor, and a 60 s line from
- * the fork for the years before it. The answer is the LOWER of the two, which
- * is the accurate one on each side of the fork and keeps the function
- * monotonic through it (both lines rise with the date, so their minimum does).
- */
-export function estimateHeightForDate(date: Date, now: Date = new Date()): number {
-  const t = date instanceof Date ? date.getTime() : Number.NaN;
-  const n = now instanceof Date ? now.getTime() : Number.NaN;
-  if (!Number.isFinite(t)) throw new Error('Not a valid date.');
-  const at = Number.isFinite(n) ? Math.min(t, n) : t;
-  const sinceAnchor = ANCHOR_HEIGHT + Math.floor((at - ANCHOR_TIME_MS) / 1000 / BLOCK_SECONDS);
-  const sinceFork = V2_FORK_HEIGHT + Math.floor((at - V2_FORK_TIME_MS) / 1000 / V1_BLOCK_SECONDS);
-  const est = Math.min(sinceAnchor, sinceFork) - ESTIMATE_MARGIN_BLOCKS;
-  return Math.max(0, est);
-}
+// estimateHeightForDate lives in services/moneroDates.ts (pure date maths,
+// kept outside this directory so a build without the Monero engine can use it).
+export { estimateHeightForDate } from '../../moneroDates';
