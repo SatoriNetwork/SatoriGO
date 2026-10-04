@@ -47,6 +47,11 @@ vi.mock('../services/chain/liveWallet', () => {
     isUnlocked() {
       return true;
     }
+    /** No app password on this install: the real service answers false. The
+     *  import landing reads it to notice a lock pressed mid-import. */
+    appUnlocked() {
+      return false;
+    }
     network() {
       return 'mainnet';
     }

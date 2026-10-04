@@ -9,6 +9,24 @@ and release commits.
 
 ---
 
+## 1.5.1
+
+### Adding a network
+
+- A wallet that uses the app password no longer asks for the password again
+  when you add a network while it is unlocked. The new network is protected by
+  the same app password; the panel says so. Wallets that still have their own
+  password ask for it as before.
+
+### Fixed
+
+- Enabling Base or another EVM network on a wallet imported from a private key
+  failed with "An EVM private key is 64 hex characters". The same key is now
+  reused on the EVM network, as the screen says.
+- Locking the wallet at the exact moment a wallet was being moved to the app
+  password could store it under the wrong key. The lock is now detected and
+  nothing is written; the wallet keeps its own password and stays usable.
+
 ## 1.5.0
 
 ### Bitcoin BLAKE2b ticker

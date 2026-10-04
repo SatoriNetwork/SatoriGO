@@ -2,12 +2,13 @@
 // for the Live UI surface. All network errors are caught; they set `offline`
 // rather than crashing. The service instance is module-level (singleton).
 
-import { create } from 'zustand';
+import { create, type StoreApi } from 'zustand';
 import { parseAmount, formatAmount, amountToNumber } from '../services/chain/amounts';
 import {
   LiveWalletService,
   BroadcastGatedError,
   MAX_RECEIVE_ADDRESSES,
+  SESSION_KEY_UNAVAILABLE,
   type BackupPreview,
   type FeeEstimate,
   type LiveNetworkId,
@@ -27,7 +28,7 @@ import {
   NOTIF_REFRESH_MS,
   type NotificationItem,
 } from '../services/notifications';
-import { isValidAddress } from '../services/chain/keys';
+import { isValidAddress, parsePrivateKey } from '../services/chain/keys';
 import {
   feePolicyFor,
   isNewChain,
@@ -1832,6 +1833,14 @@ interface LiveState {
   appPasswordSet: boolean;
   /** True while the session holds the master key (page memory only). */
   appUnlocked: boolean;
+  /** True when the chain switcher's "Enable <chain>" panel may skip the
+   *  password: the active wallet is app-protected (v2), this page holds a
+   *  master key PROVEN against the current app record, and that key opens the
+   *  wallet (svc.sessionKeyOpensActive). A HINT for the UI only: enableChain
+   *  re-proves all of it before anything is created, and answers
+   *  `needsPassword` when it no longer holds. Recomputed by
+   *  refreshEnableChainWithoutPassword (loadWallets, lock, panel open). */
+  canEnableChainWithoutPassword: boolean;
   /** True when a recovery code exists on this device (the app-password design notes
    *  §13). Only ever true alongside `appPasswordSet`: the code is a second way
    *  to the app's master key, so there is nothing for it to open without one. */
@@ -2301,7 +2310,13 @@ interface LiveState {
    *  absent lets the service decide from the phrase's origin (§6.6).
    *  `opts.moneroRestoreHeight` (from the switcher's optional "First used
    *  around" date) overrides both: the scan starts there. */
-  enableChain(chainId: string, password: string, opts?: { moneroUsedBefore?: boolean; moneroRestoreHeight?: number }): Promise<{ ok: boolean; error?: string }>;
+  enableChain(
+    chainId: string,
+    password: string,
+    opts?: { moneroUsedBefore?: boolean; moneroRestoreHeight?: number },
+  ): Promise<{ ok: boolean; error?: string; needsPassword?: boolean }>;
+  /** Re-read `canEnableChainWithoutPassword` from the service. Never throws. */
+  refreshEnableChainWithoutPassword(): Promise<boolean>;
 
   addWalletStart(): void;
   cancelAddWallet(): void;
@@ -2553,11 +2568,150 @@ let evmNonces: EvmNonceTracker | null = null;
  *  deployment, which is not a change this wallet must catch mid-form. */
 const evmCodeCache = new Map<string, boolean>();
 
+type LiveSet = StoreApi<LiveState>['setState'];
+
+/** Bumped by every lock(). An import that was still being written when the
+ *  user locked compares it before landing (see landedAfterLock). */
+let lockGeneration = 0;
+
+/**
+ * Did the user lock (or did the app key go away) while `doImport` ran? Then
+ * the new wallet exists (its write landed) but must not open: its secret is
+ * dropped and the store is put back on the lock screen, instead of the import
+ * setting phase 'ready' over a lock the user pressed.
+ */
+function landedAfterLock(get: LiveGet, generationAtStart: number, appWasUnlocked: boolean): boolean {
+  if (lockGeneration === generationAtStart && !(appWasUnlocked && !svc.appUnlocked())) return false;
+  // lock() drops the master key AND the secret doImport just put in memory,
+  // and shows the right lock screen; running it again after a lock is harmless.
+  get().lock();
+  return true;
+}
+type LiveGet = StoreApi<LiveState>['getState'];
+
+/**
+ * What a SEED import does around the service call: close the Monero worker of
+ * the wallet being left, run `doImport`, then land on the new wallet (active,
+ * unlocked, on-screen data reset, first refresh, the one-time account/gap scan).
+ * importWallet and enableChain's no-password sibling path share it, so a sibling
+ * made either way lands byte-for-byte the same. Throws (after setting `error`)
+ * when `doImport` throws, so nothing is landed on.
+ */
+async function landSeedImport(set: LiveSet, get: LiveGet, evmKey: string | null, doImport: () => Promise<void>) {
+  set({ error: null });
+  try {
+    // enableChain lands here too (a UTXO or EVM sibling derived from the
+    // active phrase): a Monero wallet that was active a moment ago keeps
+    // its worker, and with it the view and spend keys, unless it is closed
+    // here. svc.import zeroes the page copy of the keys but knows nothing
+    // about the worker. See createWallet.
+    await get().closeMoneroHost();
+    const generation = lockGeneration;
+    const appWasUnlocked = svc.appUnlocked();
+    await doImport();
+    if (landedAfterLock(get, generation, appWasUnlocked)) {
+      void get().loadWallets();
+      return;
+    }
+    const address = svc.getAddress(0);
+    set({
+      phase: 'ready',
+      address,
+      addresses: [{ index: 0, address }],
+      assets: [],
+      txs: [],
+      network: null,
+      addingWallet: false,
+      syncProgress: null,
+      lastSyncAt: null,
+      addressScan: emptyAddressScan(),
+      // Staking figures belong to the account that was active a moment ago,
+      // exactly like the balances cleared above. Home now shows a staked
+      // total under the hero, so a leftover snapshot here would print another
+      // account's stake under this one's balance.
+      evmStaking: { snapshot: null, loading: false, plan: null, planning: false },
+    });
+    void get().loadWallets();
+    void get().loadWalletAssets();
+    // IMPORT is the one moment a gap-limit scan is worth its cost: the seed
+    // may already have been used in another wallet, on addresses this one has
+    // never derived, which is exactly the "my imported wallet shows a smaller
+    // balance than I expect" case. Deliberately NOT run on unlock or on every
+    // refresh (up to GAP_LIMIT+ sequential round-trips, and several of these
+    // chains run on small volunteer servers), and NOT on create either: a
+    // freshly generated seed has no history anywhere to find.
+    //
+    // Fire-and-forget and AFTER the first balance refresh, so the common case
+    // (funds on the primary address) paints immediately and the scan only ever
+    // adds to what is already on screen. scanForUsedAddresses never throws.
+    void get()
+      .loadAddresses()
+      .then(() => get().refresh())
+      // An EVM account is ONE address, so there is no gap to scan -- but the
+      // same words may already carry Account 2, 3, ... in MetaMask, which is
+      // the EVM shape of the exact same "my imported wallet is missing funds"
+      // problem. One batched probe per chain, on import only, for the same
+      // reason (the EVM accounts design notes).
+      .then(() => (evmKey !== null ? get().discoverEvmAccounts() : get().scanForUsedAddresses()));
+  } catch (err) {
+    set({ error: err instanceof Error ? err.message : String(err) });
+    throw err; // re-throw so the UI form can detect failure
+  }
+}
+
+/** The private-key twin of landSeedImport (importPrivateKeyWallet's landing). */
+async function landPkImport(set: LiveSet, get: LiveGet, doImport: () => Promise<void>) {
+  set({ error: null });
+  try {
+    // See createWallet: the Monero worker of the wallet being left goes first.
+    await get().closeMoneroHost();
+    const generation = lockGeneration;
+    const appWasUnlocked = svc.appUnlocked();
+    await doImport();
+    if (landedAfterLock(get, generation, appWasUnlocked)) {
+      void get().loadWallets();
+      return;
+    }
+    const address = svc.getAddress(0);
+    set({
+      phase: 'ready',
+      address,
+      addresses: [{ index: 0, address }],
+      assets: [],
+      txs: [],
+      network: null,
+      addingWallet: false,
+      syncProgress: null,
+      lastSyncAt: null,
+    });
+    void get().loadWallets();
+    void get().loadWalletAssets();
+    void get()
+      .loadAddresses()
+      .then(() => get().refresh());
+  } catch (err) {
+    set({ error: err instanceof Error ? err.message : String(err) });
+    throw err; // re-throw so the UI form can detect failure
+  }
+}
+
+/** What enableChain says when the no-password path cannot be proven (no key,
+ *  a stale key, a vault the key does not open). Not an error: the switcher
+ *  shows the password field with this line, and the next attempt carries the
+ *  password the way it always did. */
+export const ENABLE_CHAIN_ENTER_PASSWORD = 'Enter your password to continue.';
+
+function enableChainNeedsPassword(set: LiveSet): { ok: false; error: string; needsPassword: true } {
+  set({ canEnableChainWithoutPassword: false, error: null });
+  return { ok: false, error: ENABLE_CHAIN_ENTER_PASSWORD, needsPassword: true };
+}
+
 export const useLiveStore = create<LiveState>((set, get) => ({
   // --- initial state --------------------------------------------------------
   phase: 'boot',
   appPasswordSet: false,
   appUnlocked: false,
+  canEnableChainWithoutPassword: false,
   recoveryCodeSet: false,
   address: '',
   addresses: [],
@@ -2863,67 +3017,17 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     network: LiveNetworkId | EvmChainTarget = 'mainnet',
     passphrase = '',
   ) {
-    set({ error: null });
-    try {
-      // enableChain lands here too (a UTXO or EVM sibling derived from the
-      // active phrase): a Monero wallet that was active a moment ago keeps
-      // its worker, and with it the view and spend keys, unless it is closed
-      // here. svc.import zeroes the page copy of the keys but knows nothing
-      // about the worker. See createWallet.
-      await get().closeMoneroHost();
-      const evmKey = evmChainKeyOf(network);
-      await svc.import(
+    const evmKey = evmChainKeyOf(network);
+    await landSeedImport(set, get, evmKey, () =>
+      svc.import(
         mnemonic,
         password,
         evmKey !== null ? 'mainnet' : (network as LiveNetworkId),
         name?.trim() || undefined,
         passphrase,
         evmKey !== null ? { family: 'evm', evmChainKey: evmKey } : undefined,
-      );
-      const address = svc.getAddress(0);
-      set({
-        phase: 'ready',
-        address,
-        addresses: [{ index: 0, address }],
-        assets: [],
-        txs: [],
-        network: null,
-        addingWallet: false,
-        syncProgress: null,
-        lastSyncAt: null,
-        addressScan: emptyAddressScan(),
-        // Staking figures belong to the account that was active a moment ago,
-        // exactly like the balances cleared above. Home now shows a staked
-        // total under the hero, so a leftover snapshot here would print another
-        // account's stake under this one's balance.
-        evmStaking: { snapshot: null, loading: false, plan: null, planning: false },
-      });
-      void get().loadWallets();
-      void get().loadWalletAssets();
-      // IMPORT is the one moment a gap-limit scan is worth its cost: the seed
-      // may already have been used in another wallet, on addresses this one has
-      // never derived, which is exactly the "my imported wallet shows a smaller
-      // balance than I expect" case. Deliberately NOT run on unlock or on every
-      // refresh (up to GAP_LIMIT+ sequential round-trips, and several of these
-      // chains run on small volunteer servers), and NOT on create either: a
-      // freshly generated seed has no history anywhere to find.
-      //
-      // Fire-and-forget and AFTER the first balance refresh, so the common case
-      // (funds on the primary address) paints immediately and the scan only ever
-      // adds to what is already on screen. scanForUsedAddresses never throws.
-      void get()
-        .loadAddresses()
-        .then(() => get().refresh())
-        // An EVM account is ONE address, so there is no gap to scan -- but the
-        // same words may already carry Account 2, 3, ... in MetaMask, which is
-        // the EVM shape of the exact same "my imported wallet is missing funds"
-        // problem. One batched probe per chain, on import only, for the same
-        // reason (the EVM accounts design notes).
-        .then(() => (evmKey !== null ? get().discoverEvmAccounts() : get().scanForUsedAddresses()));
-    } catch (err) {
-      set({ error: err instanceof Error ? err.message : String(err) });
-      throw err; // re-throw so the UI form can detect failure
-    }
+      ),
+    );
   },
 
   // --- import a single private key (Satori-style single-address wallet) ------
@@ -2933,42 +3037,19 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     name?: string,
     network: LiveNetworkId | EvmChainTarget = 'mainnet',
   ) {
-    set({ error: null });
-    try {
-      // See createWallet: the Monero worker of the wallet being left goes first.
-      await get().closeMoneroHost();
-      // A single WIF/hex key becomes a one-address 'pk' wallet (how Satori-network
-      // wallets are generated). An empty password makes it passwordless. A raw
-      // hex key on an `evm:<key>` target becomes a single-address EVM account.
-      const evmKey = evmChainKeyOf(network);
-      await svc.importPrivateKey(
+    // A single WIF/hex key becomes a one-address 'pk' wallet (how Satori-network
+    // wallets are generated). An empty password makes it passwordless. A raw
+    // hex key on an `evm:<key>` target becomes a single-address EVM account.
+    const evmKey = evmChainKeyOf(network);
+    await landPkImport(set, get, () =>
+      svc.importPrivateKey(
         input.trim(),
         password,
         evmKey !== null ? 'mainnet' : (network as LiveNetworkId),
         name?.trim() || undefined,
         evmKey !== null ? { family: 'evm', evmChainKey: evmKey } : undefined,
-      );
-      const address = svc.getAddress(0);
-      set({
-        phase: 'ready',
-        address,
-        addresses: [{ index: 0, address }],
-        assets: [],
-        txs: [],
-        network: null,
-        addingWallet: false,
-        syncProgress: null,
-        lastSyncAt: null,
-      });
-      void get().loadWallets();
-      void get().loadWalletAssets();
-      void get()
-        .loadAddresses()
-        .then(() => get().refresh());
-    } catch (err) {
-      set({ error: err instanceof Error ? err.message : String(err) });
-      throw err; // re-throw so the UI form can detect failure
-    }
+      ),
+    );
   },
 
   // --- address book ---------------------------------------------------------
@@ -3183,6 +3264,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
 
   // --- lock -----------------------------------------------------------------
   lock() {
+    lockGeneration++;
     get().stopAutoRefresh();
     // Abandon any in-flight background classification: the address guard would
     // discard its results anyway, but clear the marker so the next wallet's sync
@@ -3201,6 +3283,8 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     void get().closeMoneroHost();
     set({
       appUnlocked: false,
+      // The master key is gone: adding a network asks for the password again.
+      canEnableChainWithoutPassword: false,
       phase: get().appPasswordSet ? 'app-locked' : 'locked',
       address: '',
       addresses: [],
@@ -3240,6 +3324,10 @@ export const useLiveStore = create<LiveState>((set, get) => ({
         // The chain the active EVM account is showing follows the wallet list.
         evm: { ...s.evm, activeChainKey: active && walletFamily(active) === 'evm' ? (active.evmChainKey ?? null) : null },
       }));
+      // Unlock, switch, import, app-password changes all route through here, so
+      // the switcher's no-password hint follows the wallet. Detached and never
+      // throws (see refreshEnableChainWithoutPassword).
+      void get().refreshEnableChainWithoutPassword();
       // The active chain may have just changed (init / switch / unlock / create /
       // import / remove all route through here). Load THIS chain's own server pool
       // + explorer template (per-chain storage keys; Evrmore uses the legacy keys)
@@ -3536,6 +3624,23 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     // derived sibling must stay passwordless too — so the vault password is a
     // property of the source wallet, not of whatever the caller passed in.
     const pw = active.passwordless ? '' : password;
+
+    // NO PASSWORD ON AN OPEN APP-PROTECTED WALLET (owner request, 2026-10-04).
+    // The switcher sends '' when canEnableChainWithoutPassword told it the
+    // field could be skipped. That flag is only a hint: the service re-proves
+    // everything here (this page's wallet, unlocked, v2, master key proven
+    // against the CURRENT app record, and opening this vault), and every path
+    // below re-proves the key again at the moment it writes. When any of it
+    // fails the answer is "type the password", never an error dead-end and
+    // never a write. A wallet with its own (v1) password never gets here (it is
+    // not appProtected), and a passwordless one keeps its own path above.
+    let sessionKey = false;
+    if (!active.passwordless && active.appProtected === true && password === '') {
+      // Bound to THIS wallet: the service answers no when its own session is
+      // on any other wallet than the one this store calls active.
+      sessionKey = await svc.sessionKeyOpensActive(active.id).catch(() => false);
+      if (!sessionKey) return enableChainNeedsPassword(set);
+    }
     // An EVM account is tagged with the family, not a chain: it spans them all.
     // The base comes from the SEED GROUP (siblingBaseName), so a renamed Monero
     // sibling does not lend its name to the next chain added from it.
@@ -3560,7 +3665,9 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       if (activeFamily() === 'zcash' || activeFamily() === 'substrate') {
         return { ok: false, error: `Switch to this phrase's main wallet first, then add ${targetInfo.displayName}.` };
       }
-      if (!active.passwordless && !(await svc.verifyPassword(pw))) return { ok: false, error: 'Incorrect password.' };
+      if (!active.passwordless && !sessionKey && !(await svc.verifyPassword(pw))) {
+        return { ok: false, error: 'Incorrect password.' };
+      }
       try {
         await svc.addMoneroAccount(active.id, name, {
           usedBefore: opts?.moneroUsedBefore,
@@ -3592,11 +3699,17 @@ export const useLiveStore = create<LiveState>((set, get) => ({
         return { ok: false, error: 'Zcash can only be added to a wallet made from a recovery phrase.' };
       }
       if (activeFamily() === 'zcash') return { ok: false, error: 'You already have a Zcash wallet.' };
-      if (!active.passwordless && !(await svc.verifyPassword(pw))) return { ok: false, error: 'Incorrect password.' };
+      if (!active.passwordless && !sessionKey && !(await svc.verifyPassword(pw))) {
+        return { ok: false, error: 'Incorrect password.' };
+      }
       try {
+        // In session mode `pw` is '': the source vault (read only when no seed
+        // is in memory) opens with the proven master key, and a key that went
+        // stale since the check fails as 'wrong-password', handled below.
         await svc.addZcashAccount(active.id, name, { password: pw });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
+        if (sessionKey && msg === 'wrong-password') return enableChainNeedsPassword(set);
         const error =
           msg === 'locked'
             ? 'Unlock this wallet before adding Zcash.'
@@ -3622,11 +3735,15 @@ export const useLiveStore = create<LiveState>((set, get) => ({
         return { ok: false, error: 'Bittensor can only be added to a wallet made from a recovery phrase.' };
       }
       if (activeFamily() === 'substrate') return { ok: false, error: 'You already have a Bittensor wallet.' };
-      if (!active.passwordless && !(await svc.verifyPassword(pw))) return { ok: false, error: 'Incorrect password.' };
+      if (!active.passwordless && !sessionKey && !(await svc.verifyPassword(pw))) {
+        return { ok: false, error: 'Incorrect password.' };
+      }
       try {
+        // Same as Zcash: '' in session mode, the vault opens with the proven key.
         await svc.addSubstrateAccount(active.id, pw, name);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
+        if (sessionKey && msg === 'wrong-password') return enableChainNeedsPassword(set);
         const error =
           msg === 'locked'
             ? 'Unlock this wallet before adding Bittensor.'
@@ -3640,6 +3757,46 @@ export const useLiveStore = create<LiveState>((set, get) => ({
         return { ok: false, error };
       }
       await get().openAddedMoneroWallet();
+      return { ok: true };
+    }
+
+    // UTXO / EVM in session mode: the service decrypts the active secret with
+    // the proven master key and writes the sibling as a v2 record sealed under
+    // that key, inside ONE CAS write (addSiblingWithSessionKey). No plaintext
+    // passes through the store at all on this path. The landing is the one the
+    // password path's import actions use (landSeedImport / landPkImport).
+    if (sessionKey) {
+      const evmKey = evmChainKeyOf(chainId);
+      const network = evmKey !== null ? 'mainnet' : (chainId as LiveNetworkId);
+      const family = evmKey !== null ? { family: 'evm' as const, evmChainKey: evmKey } : undefined;
+      // PREPARE FIRST, before anything is torn down: prove the key for THIS
+      // wallet and read its secret. A failure here leaves everything as it was
+      // (an active Monero wallet keeps its worker) and asks for the password.
+      let prepared: Awaited<ReturnType<LiveWalletService['prepareSiblingWithSessionKey']>>;
+      try {
+        prepared = await svc.prepareSiblingWithSessionKey(active.id);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg === SESSION_KEY_UNAVAILABLE) return enableChainNeedsPassword(set);
+        return { ok: false, error: msg };
+      }
+      const doImport = () => prepared.commit(network, name.trim() || undefined, family);
+      try {
+        if (active.kind === 'pk') await landPkImport(set, get, doImport);
+        else await landSeedImport(set, get, evmKey, doImport);
+      } catch (err) {
+        prepared.discard();
+        // The landing closed an active Monero wallet's worker before the write
+        // failed (the write-time proof refuses a key that went stale since the
+        // prepare). Nothing was created and the service is still on that
+        // wallet, so it gets its worker back. A no-op for any other family.
+        void get().openMoneroHost();
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg === SESSION_KEY_UNAVAILABLE) return enableChainNeedsPassword(set);
+        return { ok: false, error: msg };
+      }
+      await get().loadWallets();
+      set({ error: null });
       return { ok: true };
     }
 
@@ -3675,6 +3832,20 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       // unlocked, reset on-screen data, load the chain's servers/explorer,
       // refresh). They throw on failure, leaving NOTHING created.
       if (active.kind === 'pk') {
+        // A UTXO key wallet stores its key as a WIF, and the EVM import takes
+        // only the raw 64-hex form (what MetaMask exports). It is the same
+        // secp256k1 key either way, so an EVM target gets the hex of the very
+        // key the screen says it reuses. Before this, enabling Base on such a
+        // wallet failed with "An EVM private key is 64 hex characters"
+        // (user report, 2026-10-04; present since EVM chains were added).
+        if (evmChainKeyOf(chainId) !== null && !/^(0x)?[0-9a-fA-F]{64}$/.test(secret.trim())) {
+          const { privateKey } = parsePrivateKey(secret);
+          try {
+            secret = Array.from(privateKey, (b) => b.toString(16).padStart(2, '0')).join('');
+          } finally {
+            privateKey.fill(0);
+          }
+        }
         await get().importPrivateKeyWallet(secret, pw, name, chainId as LiveNetworkId | EvmChainTarget);
       } else {
         await get().importWallet(secret, pw, name, chainId as LiveNetworkId | EvmChainTarget, seedPassphrase);
@@ -3693,6 +3864,20 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     await get().loadWallets();
     set({ error: null });
     return { ok: true };
+  },
+
+  async refreshEnableChainWithoutPassword() {
+    let ok = false;
+    try {
+      ok = await svc.sessionKeyOpensActive(get().activeWalletId);
+      // A lock() that landed while the check ran has dropped the key: the
+      // answer computed before it is stale.
+      if (ok && !svc.appUnlocked()) ok = false;
+    } catch {
+      ok = false;
+    }
+    set({ canEnableChainWithoutPassword: ok });
+    return ok;
   },
 
   // --- EVM accounts on one seed (the EVM accounts design notes) ----------------

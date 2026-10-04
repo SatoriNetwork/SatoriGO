@@ -91,6 +91,11 @@ export function ChainSwitcher() {
   const switchChain = useLiveStore((s) => s.switchChain);
   const { tab, openTab } = useNav();
   const enableChain = useLiveStore((s) => s.enableChain);
+  // The no-password hint for an open app-protected wallet (owner request,
+  // 2026-10-04). Optional chaining: the switcher's own tests mock the store
+  // without it, and a missing flag must read as "ask for the password".
+  const canEnableWithoutPassword = useLiveStore((s) => s.canEnableChainWithoutPassword ?? false);
+  const refreshEnableWithoutPassword = useLiveStore((s) => s.refreshEnableChainWithoutPassword);
   // Empty in a build without the EVM engine, which collapses every branch below
   // back to the UTXO-only switcher this always was.
   const evmChains = useLiveStore((s) => s.evm.chains);
@@ -104,6 +109,9 @@ export function ChainSwitcher() {
   const [enableTarget, setEnableTarget] = useState<SwitcherChainId | null>(null);
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
+  // Set when enableChain answered `needsPassword` (the session's key turned
+  // out stale): the field comes back for this panel, whatever the flag says.
+  const [passwordRequired, setPasswordRequired] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   // "Add Monero" only: has this phrase been used with Monero before (Satori GO
   // on another device, or Cake Wallet with the same words)? Decides where the
@@ -164,12 +172,18 @@ export function ChainSwitcher() {
   // re-imports that SAME key on the target chain, so the hash160 — and thus the
   // address, bar the version byte — is identical on EVERY UTXO chain pair.
   const activeIsPk = activeWallet?.kind === 'pk';
+  // No field at all: the wallet is open, app-protected, and this page holds a
+  // master key proven for it, so the new network is sealed under the same app
+  // password without asking for it again. The store re-proves this on submit.
+  const skipPassword =
+    !activePasswordless && activeIsAppProtected && canEnableWithoutPassword && passwordRequired === null;
 
   function closeAll() {
     setOpen(false);
     setEnableTarget(null);
     setPassword('');
     setError(null);
+    setPasswordRequired(null);
     setSubmitting(false);
     setQuery('');
     setMoneroFirstUsed('');
@@ -197,6 +211,7 @@ export function ChainSwitcher() {
     setEnableTarget(null);
     setPassword('');
     setError(null);
+    setPasswordRequired(null);
     setMoneroFirstUsed('');
     setMoneroDateError(null);
   }
@@ -219,6 +234,10 @@ export function ChainSwitcher() {
     setEnableTarget(chainId);
     setPassword('');
     setError(null);
+    setPasswordRequired(null);
+    // Re-ask the service now: the app may have been locked, or its password
+    // changed in another window, since the flag was last computed.
+    void refreshEnableWithoutPassword?.();
     // A phrase generated on this install cannot hold Monero yet; anything
     // else (typed in, or from before the origin was recorded) may.
     setMoneroUsedBefore(isMoneroChainTarget(chainId) && moneroPhraseUsedBefore(activeWallet));
@@ -245,7 +264,9 @@ export function ChainSwitcher() {
     try {
       // A passwordless active wallet has nothing to re-enter — the spec is an
       // empty passphrase, not a UI asking for one that doesn't exist.
-      const pw = activePasswordless ? '' : password;
+      // An open app-protected wallet with a proven key sends '' too: the store
+      // seals the new network under the app key (see skipPassword).
+      const pw = activePasswordless || skipPassword ? '' : password;
       // The third argument exists only for the Monero target: every other
       // chain keeps the two-argument call it always made.
       // `moneroRestoreHeight` rides along only when a date was given, so an
@@ -257,6 +278,12 @@ export function ChainSwitcher() {
         : await enableChain(enableTarget, pw);
       if (result.ok) {
         closeAll();
+      } else if (result.needsPassword) {
+        // Not an error: the field comes back with one plain line, and the next
+        // submit carries the password the way it always did.
+        setPasswordRequired(result.error || 'Enter your password to continue.');
+        setError(null);
+        setSubmitting(false);
       } else {
         setError(result.error || 'Could not enable this chain.');
         setSubmitting(false);
@@ -824,7 +851,27 @@ export function ChainSwitcher() {
                     error={moneroDateError ?? undefined}
                   />
                 )}
-                {!activePasswordless && (
+                {skipPassword && (
+                  <p
+                    className="text-dim"
+                    data-testid="live-chain-enable-protected-note"
+                    style={{ fontSize: 11.5, lineHeight: 1.4, margin: '0 0 2px' }}
+                  >
+                    Protected by your main password.
+                  </p>
+                )}
+                {passwordRequired !== null && (
+                  <div
+                    className="banner info"
+                    role="status"
+                    data-testid="live-chain-enable-needs-password"
+                    style={{ marginBottom: 10, alignItems: 'flex-start' }}
+                  >
+                    <Info size={14} />
+                    <span>{passwordRequired}</span>
+                  </div>
+                )}
+                {!activePasswordless && !skipPassword && (
                   <PasswordField
                     /* An app-key wallet has no password of its own: the one that
                        opens its vault is the app password, so asking for a

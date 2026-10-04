@@ -26,6 +26,8 @@ interface MockWallet {
   evmChainKey?: string;
   /** Monero only: 'words' = imported from 25 words (outside every seed group). */
   moneroKeySource?: 'phrase' | 'words';
+  /** Vault v2: wrapped by the app master key (the app password opens it). */
+  appProtected?: boolean;
 }
 
 /** The one Monero row's chain record, the fields switcherChainOptionsFor (REAL)
@@ -75,7 +77,10 @@ interface MockState {
   /** Absent by default: a build without --monero (no Monero row). */
   monero?: { chain: MockMoneroChainInfo | null };
   switchChain: (id: string) => Promise<void>;
-  enableChain: (id: string, password: string) => Promise<{ ok: boolean; error?: string }>;
+  enableChain: (id: string, password: string) => Promise<{ ok: boolean; error?: string; needsPassword?: boolean }>;
+  /** Absent in most tests: reads as "ask for the password", as before. */
+  canEnableChainWithoutPassword?: boolean;
+  refreshEnableChainWithoutPassword?: () => Promise<boolean>;
 }
 
 // vi.mock factories are hoisted above imports, so the shared mutable state
@@ -1402,5 +1407,95 @@ describe('favourites', () => {
     for (const el of Array.from(pop.querySelectorAll('[aria-label]'))) {
       expect(el.getAttribute('aria-label')).not.toContain('\u2014');
     }
+  });
+});
+
+describe('no password on an open app-protected wallet (owner request 2026-10-04)', () => {
+  function setupKeyed(canEnableChainWithoutPassword: boolean, overrides: Partial<MockState> = {}) {
+    const refreshEnableChainWithoutPassword = vi.fn().mockResolvedValue(canEnableChainWithoutPassword);
+    const mocks = setup({
+      wallets: [wallet({ appProtected: true })],
+      canEnableChainWithoutPassword,
+      refreshEnableChainWithoutPassword,
+      ...overrides,
+    });
+    return { ...mocks, refreshEnableChainWithoutPassword };
+  }
+
+  it('hides the field and says the new network is protected by the main password; submits with no password', async () => {
+    const { enableChain, refreshEnableChainWithoutPassword } = setupKeyed(true);
+    renderSwitcher();
+    openSwitcher();
+    fireEvent.click(screen.getByTestId('live-chain-option-litecoin-mainnet'));
+
+    // The flag is re-read the moment the panel opens.
+    expect(refreshEnableChainWithoutPassword).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId('live-chain-enable-password')).toBeNull();
+    expect(screen.getByTestId('live-chain-enable-protected-note')).toHaveTextContent('Protected by your main password.');
+    expect(screen.getByTestId('live-chain-enable-panel').textContent).not.toContain('—');
+
+    fireEvent.click(screen.getByTestId('live-chain-enable-submit'));
+    await waitFor(() => expect(enableChain).toHaveBeenCalledWith('litecoin-mainnet', ''));
+    await waitFor(() => expect(screen.queryByTestId('live-chain-enable-panel')).toBeNull());
+  });
+
+  it('shows the (App password) field and no note when the flag is off', () => {
+    setupKeyed(false);
+    renderSwitcher();
+    openSwitcher();
+    fireEvent.click(screen.getByTestId('live-chain-option-litecoin-mainnet'));
+    expect(screen.getByTestId('live-chain-enable-password')).not.toBeNull();
+    expect(screen.getByText('App password')).not.toBeNull();
+    expect(screen.queryByTestId('live-chain-enable-protected-note')).toBeNull();
+  });
+
+  it('a wallet with its OWN password keeps the field even if the flag were on', () => {
+    setupKeyed(true, { wallets: [wallet({ appProtected: false })] });
+    renderSwitcher();
+    openSwitcher();
+    fireEvent.click(screen.getByTestId('live-chain-option-litecoin-mainnet'));
+    expect(screen.getByTestId('live-chain-enable-password')).not.toBeNull();
+    expect(screen.queryByTestId('live-chain-enable-protected-note')).toBeNull();
+  });
+
+  it('a stale key falls back to the field with a plain line, not an error, and the next submit carries the password', async () => {
+    const enableChain = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false, error: 'Enter your password to continue.', needsPassword: true })
+      .mockResolvedValueOnce({ ok: true });
+    setupKeyed(true, { enableChain });
+    renderSwitcher();
+    openSwitcher();
+    fireEvent.click(screen.getByTestId('live-chain-option-litecoin-mainnet'));
+    fireEvent.click(screen.getByTestId('live-chain-enable-submit'));
+
+    await waitFor(() =>
+      expect(screen.getByTestId('live-chain-enable-needs-password')).toHaveTextContent('Enter your password to continue.'),
+    );
+    expect(enableChain).toHaveBeenNthCalledWith(1, 'litecoin-mainnet', '');
+    expect(screen.queryByTestId('live-chain-enable-error')).toBeNull();
+    expect(screen.queryByTestId('live-chain-enable-protected-note')).toBeNull();
+
+    fireEvent.change(screen.getByTestId('live-chain-enable-password'), { target: { value: 'app-pw' } });
+    fireEvent.click(screen.getByTestId('live-chain-enable-submit'));
+    await waitFor(() => expect(enableChain).toHaveBeenNthCalledWith(2, 'litecoin-mainnet', 'app-pw'));
+    await waitFor(() => expect(screen.queryByTestId('live-chain-enable-panel')).toBeNull());
+  });
+
+  it('the fall-back lasts for that panel only: reopening asks the store again', async () => {
+    const enableChain = vi
+      .fn()
+      .mockResolvedValue({ ok: false, error: 'Enter your password to continue.', needsPassword: true });
+    setupKeyed(true, { enableChain });
+    renderSwitcher();
+    openSwitcher();
+    fireEvent.click(screen.getByTestId('live-chain-option-litecoin-mainnet'));
+    fireEvent.click(screen.getByTestId('live-chain-enable-submit'));
+    await waitFor(() => expect(screen.getByTestId('live-chain-enable-password')).not.toBeNull());
+
+    fireEvent.click(screen.getByTestId('live-chain-enable-cancel'));
+    fireEvent.click(screen.getByTestId('live-chain-option-litecoin-mainnet'));
+    expect(screen.queryByTestId('live-chain-enable-needs-password')).toBeNull();
+    expect(screen.getByTestId('live-chain-enable-protected-note')).not.toBeNull();
   });
 });

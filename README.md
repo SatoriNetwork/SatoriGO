@@ -112,7 +112,7 @@ offline while it is unreachable. You can add your own server for either in
 Settings > Network. `KNOWN_LIMITATIONS.md` records which networks are currently
 reaching the chain some other way and what that costs.
 
-Version **1.5.0**. (The canonical version lives in each target's manifest under
+Version **1.5.1**. (The canonical version lives in each target's manifest under
 `platforms/<target>/manifest.json`; this line is informational and can lag —
 check the manifest if in doubt.)
 

@@ -705,7 +705,7 @@ describe('E) LiveWalletService import paths', () => {
       const wif = await svc2.revealPrivateKeyWif('password123');
       expect(wif).toBe(refWif(refDerive(refSeed(MNEMONIC), derivationPath(net, 0, 0, 0)).key, net, true));
     }
-  });
+  }, 120_000); // one scrypt import + one scrypt unlock PER CHAIN: ~10 s alone, past 30 s under a full parallel run
 
   it('private-key import stores the chain-correct address and re-derives it on unlock', async () => {
     const PRIV = Uint8Array.from(
@@ -725,7 +725,7 @@ describe('E) LiveWalletService import paths', () => {
       expect(await svc2.unlock('password123')).toBe(true);
       expect(svc2.getAddress(0)).toBe(expected);
     }
-  });
+  }, 120_000); // one scrypt import + one scrypt unlock PER CHAIN: ~10 s alone, past 30 s under a full parallel run
 
   // STILL TRUE AT THIS LAYER, now warned about one layer up. importPrivateKey()
   // calls parsePrivateKey(), which ignores the version byte, so the chain the

@@ -494,6 +494,31 @@ function storeRev(store: LiveWalletsStore | undefined | null): number {
  */
 const NO_WRITE: unique symbol = Symbol('no-write');
 
+/**
+ * The one way a NEW entry's vault is written as v2 at birth: sealed under the
+ * session's app master key, proven against the store the write lands on
+ * (sealUnderSessionKey). Private to this module; only addSiblingWithSessionKey
+ * passes it, every other create/import path writes v1 exactly as it always did.
+ */
+const SESSION_KEY_SEALING = 'session-key' as const;
+
+/** True when every byte is 0: what a key looks like after zeroKey(). */
+function isAllZero(bytes: Uint8Array): boolean {
+  for (const b of bytes) if (b !== 0) return false;
+  return true;
+}
+type SessionKeySealing = typeof SESSION_KEY_SEALING;
+
+/**
+ * Thrown by addSiblingWithSessionKey (and the sealing it drives) when the
+ * session's master key cannot be PROVEN for the active wallet and the store
+ * being written: no key (app locked), a stale key (another page changed the
+ * app password), a v1 / passwordless source, or a key that does not open the
+ * source's vault. Nothing has been written when it is thrown. The answer to it
+ * is "ask for the password", never "wrong password".
+ */
+export const SESSION_KEY_UNAVAILABLE = 'session-key-unavailable';
+
 /** Thrown by writeStore() when storage moved under a prepared write. It never
  *  escapes updateStore(), which answers it by re-reading and re-applying. */
 class StoreConflictError extends Error {
@@ -1442,22 +1467,30 @@ export class LiveWalletService implements WalletEngine {
     passphrase = '',
     family?: { family?: WalletFamily; evmChainKey?: string },
     origin?: WalletOrigin,
+    sealing?: SessionKeySealing,
   ): Promise<void> {
     const isEvm = family?.family === 'evm';
     // Load (and thereby require) the engine BEFORE anything is written: a build
     // without it must fail here, not after a vault exists for an unusable wallet.
     const evm = isEvm ? await this.requireEvm() : null;
-    const passwordless = password.length === 0;
-    const vault = await createVault(
-      encodeSeedSecret(mnemonic, passphrase),
-      passwordless ? NO_PASSWORD : password,
-    );
+    // 'session-key' (addSiblingWithSessionKey only): the vault is a v2 record
+    // sealed INSIDE the write under the master key proven against that very
+    // store (sealUnderSessionKey). `password` is ignored and the wallet is NOT
+    // passwordless: the app password is what opens it. Every other caller takes
+    // the v1 branch exactly as before.
+    const sessionSealed = sealing === SESSION_KEY_SEALING;
+    const passwordless = !sessionSealed && password.length === 0;
+    const secretText = encodeSeedSecret(mnemonic, passphrase);
+    const v1Vault = sessionSealed ? null : await createVault(secretText, passwordless ? NO_PASSWORD : password);
     const seed = await mnemonicToSeed(mnemonic, passphrase);
     // The id and the default name are the two things that depend on WHAT ELSE is
     // in the store, so they are decided inside the write, on the store the write
     // is actually based on. Another page that added a wallet during the scrypt
     // above would otherwise have handed this one a colliding id.
-    const entry = await this.updateStore((store) => {
+    let entry: WalletEntry | typeof NO_WRITE;
+    try {
+      entry = await this.updateStore(async (store) => {
+      const vault: StoredVaultRecord = v1Vault ?? (await this.sealUnderSessionKey(store, secretText));
       const id = genWalletId(new Set(store.wallets.map((w) => w.id)));
       const walletName = name?.trim() || `Wallet ${store.wallets.length + 1}`;
       let created: WalletEntry;
@@ -1503,8 +1536,16 @@ export class LiveWalletService implements WalletEngine {
       store.wallets.push(created);
       store.activeId = id;
       return created;
-    });
-    if (entry === NO_WRITE) throw new Error('could not save the wallet');
+      });
+    } catch (e) {
+      // Nothing was written: the seed derived above must not outlive the call.
+      seed.fill(0);
+      throw e;
+    }
+    if (entry === NO_WRITE) {
+      seed.fill(0);
+      throw new Error('could not save the wallet');
+    }
     this.activateEntry(entry);
     this.setActiveSeed(seed);
   }
@@ -1521,7 +1562,23 @@ export class LiveWalletService implements WalletEngine {
     name?: string,
     family?: { family?: WalletFamily; evmChainKey?: string },
   ): Promise<void> {
-    if (family?.family === 'evm') return this.importEvmPrivateKey(privateKeyInput, password, name, family.evmChainKey);
+    return this.importPrivateKeyAs(privateKeyInput, password, network, name, family);
+  }
+
+  /** importPrivateKey, plus the PRIVATE `sealing` choice (see addWallet): only
+   *  addSiblingWithSessionKey passes 'session-key'. Kept off the public method
+   *  so no caller outside this class can ask for a v2 record. */
+  private async importPrivateKeyAs(
+    privateKeyInput: string,
+    password: string,
+    network: LiveNetworkId,
+    name: string | undefined,
+    family: { family?: WalletFamily; evmChainKey?: string } | undefined,
+    sealing?: SessionKeySealing,
+  ): Promise<void> {
+    if (family?.family === 'evm') {
+      return this.importEvmPrivateKey(privateKeyInput, password, name, family.evmChainKey, sealing);
+    }
     const { privateKey, compressed } = parsePrivateKey(privateKeyInput);
     const net = this.netFor(network);
     // An uncompressed key cannot back a usable native-segwit wallet: the P2WPKH
@@ -1538,10 +1595,12 @@ export class LiveWalletService implements WalletEngine {
       );
     }
     const derived = privateKeyToDerived(privateKey, net, compressed);
-    const passwordless = password.length === 0;
+    const sessionSealed = sealing === SESSION_KEY_SEALING;
+    const passwordless = !sessionSealed && password.length === 0;
     // Store the canonical WIF (not the user's raw input) so unlock() is uniform.
-    const vault = await createVault(derived.wif, passwordless ? NO_PASSWORD : password);
-    const created = await this.updateStore((store) => {
+    const v1Vault = sessionSealed ? null : await createVault(derived.wif, passwordless ? NO_PASSWORD : password);
+    const created = await this.updateStore(async (store) => {
+      const vault: StoredVaultRecord = v1Vault ?? (await this.sealUnderSessionKey(store, derived.wif));
       const id = genWalletId(new Set(store.wallets.map((w) => w.id)));
       const walletName = name?.trim() || `Satori wallet ${store.wallets.length + 1}`;
       const entry: WalletEntry = {
@@ -1577,6 +1636,7 @@ export class LiveWalletService implements WalletEngine {
     password: string,
     name?: string,
     evmChainKey?: string,
+    sealing?: SessionKeySealing,
   ): Promise<void> {
     const evm = await this.requireEvm();
     const trimmed = privateKeyInput.trim();
@@ -1586,9 +1646,12 @@ export class LiveWalletService implements WalletEngine {
     const { privateKey } = parsePrivateKey(trimmed);
     const key = evm.privateKeyToEvmKey(privateKey);
     const chainKey = evmChainKey && evm.isEvmChainKey(evmChainKey) ? evmChainKey : evm.DEFAULT_EVM_CHAIN_KEY;
-    const passwordless = password.length === 0;
-    const vault = await createVault(bytesToHex(privateKey), passwordless ? NO_PASSWORD : password);
-    const entry = await this.updateStore((store) => {
+    const sessionSealed = sealing === SESSION_KEY_SEALING;
+    const passwordless = !sessionSealed && password.length === 0;
+    const keyHex = bytesToHex(privateKey);
+    const v1Vault = sessionSealed ? null : await createVault(keyHex, passwordless ? NO_PASSWORD : password);
+    const entry = await this.updateStore(async (store) => {
+      const vault: StoredVaultRecord = v1Vault ?? (await this.sealUnderSessionKey(store, keyHex));
       const id = genWalletId(new Set(store.wallets.map((w) => w.id)));
       const walletName = name?.trim() || `Wallet ${store.wallets.length + 1}`;
       const created: WalletEntry = {
@@ -2415,8 +2478,7 @@ export class LiveWalletService implements WalletEngine {
           this.setMasterKey(null);
           return NO_WRITE;
         }
-        const master = this.masterKey;
-        if (!master) return NO_WRITE;
+        if (!this.masterKey) return NO_WRITE;
 
         const target = fresh.wallets.find((w) => w.id === entry.id);
         if (!target || isVaultRecordV2(target.vault)) return NO_WRITE;
@@ -2431,17 +2493,13 @@ export class LiveWalletService implements WalletEngine {
           }
         }
 
-        // 1 + 2.
-        const record = await createVaultV2(plaintext, master);
-        // 3. Decrypt it back with the master key and compare to the plaintext.
-        const roundTrip = await unlockVaultV2(record, master);
-        let verified: boolean;
-        try {
-          verified = bytesEqual(roundTrip, plaintext);
-        } finally {
-          roundTrip.fill(0);
-        }
-        if (!verified) return NO_WRITE;
+        // 1 + 2 + 3, and the guard on the key, against the store this write
+        // will be based on (sealUnderProvenKey): another page changed the app
+        // password, the record is gone, its salt is not the one this key came
+        // from, or this page was locked while the record was being built. Any
+        // of them: this key must not wrap anything, stay v1.
+        const record = await this.sealUnderProvenKey(fresh, plaintext);
+        if (!record) return NO_WRITE;
 
         // 4.
         for (const m of members) {
@@ -2476,6 +2534,86 @@ export class LiveWalletService implements WalletEngine {
       return false;
     } finally {
       plaintext.fill(0);
+    }
+  }
+
+  /**
+   * Seal `secret` as a v2 record for a NEW entry, inside an updateStore()
+   * mutator, under the master key PROVEN against `fresh` (the store this very
+   * write is based on). The new-entry twin of migrateEntryToAppKey's sealing,
+   * with the same two guards:
+   *
+   * - THE KEY MUST BELONG TO THE RECORD, checked here, inside the mutator, so a
+   *   retry after another page's write re-asks it. A key superseded by another
+   *   page's app-password change would wrap a seed under a key the record no
+   *   longer derives; the entry would look created and open for nobody. A
+   *   mismatch drops the stale key (as cachedMasterKeyFor does) and THROWS, so
+   *   the write is abandoned and nothing is created.
+   * - DECRYPT IT BACK BEFORE IT IS WRITTEN, byte for byte, as the migration
+   *   does. A record that does not round-trip is never stored.
+   *
+   * Unlike the migration there is no v1 record to discard: this only ADDS an
+   * entry, and touches no existing vault.
+   */
+  private async sealUnderSessionKey(fresh: LiveWalletsStore, secret: string): Promise<VaultRecordV2> {
+    const plaintext = new TextEncoder().encode(secret);
+    try {
+      const record = await this.sealUnderProvenKey(fresh, plaintext);
+      if (!record) throw new Error(SESSION_KEY_UNAVAILABLE);
+      return record;
+    } finally {
+      plaintext.fill(0);
+    }
+  }
+
+  /**
+   * THE ONE PLACE a secret is sealed under the session's master key, for both
+   * the lazy migration and a new entry. Called INSIDE an updateStore() mutator
+   * with the store that write is based on. Answers the v2 record, or null when
+   * it must not be written (the caller writes NOTHING then).
+   *
+   * THE KEY IS COPIED, synchronously, the moment it is proven. `this.masterKey`
+   * is a live array that lockApp() ZEROES IN PLACE (setMasterKey). Holding a
+   * reference to it across the awaits below meant that a lock landing mid-seal
+   * wrapped the wallet key under 32 zero bytes, the decrypt-back with the same
+   * zeroed array "verified" it, and lockApp writes nothing so the CAS could not
+   * notice: a record nothing opens (and whose wallet key anyone can unwrap).
+   * The copy is immune to that, and zeroed here on every exit.
+   *
+   * AND IT IS RE-PROVEN AFTER THE AWAITS. A lock during the seal means the
+   * user locked: nothing is created (fail closed), even though the copy would
+   * have sealed correctly. The copy must also not be all zeros, and must still
+   * open `fresh.appKey`'s own check blob.
+   */
+  private async sealUnderProvenKey(fresh: LiveWalletsStore, plaintext: Uint8Array): Promise<VaultRecordV2 | null> {
+    if (!(await this.masterKeyBelongsTo(fresh))) {
+      // Stale, gone, or not this record's: drop it, as cachedMasterKeyFor does.
+      this.setMasterKey(null);
+      return null;
+    }
+    const live = this.masterKey;
+    if (!live) return null;
+    const master = live.slice(); // synchronous: no await between proof and copy
+    try {
+      if (isAllZero(master)) return null;
+      const record = await createVaultV2(plaintext, master);
+      // Decrypt it back with the SAME key bytes and compare to the plaintext.
+      const roundTrip = await unlockVaultV2(record, master);
+      let verified: boolean;
+      try {
+        verified = bytesEqual(roundTrip, plaintext);
+      } finally {
+        roundTrip.fill(0);
+      }
+      if (!verified) return null;
+      // Re-proof after the awaits: still unlocked, still a real key, and still
+      // the key of the record this write is based on.
+      if (this.masterKey === null || isAllZero(master)) return null;
+      if (!(await masterKeyMatchesRecord(fresh.appKey, master))) return null;
+      if (this.masterKey === null) return null;
+      return record;
+    } finally {
+      master.fill(0);
     }
   }
 
@@ -3701,6 +3839,144 @@ export class LiveWalletService implements WalletEngine {
       if (this.substrateAccount !== account) zeroSubstrateAccount(account);
       throw e;
     }
+  }
+
+  // --- enabling a chain with the app key the session holds ------------------
+  //
+  // OWNER REQUEST (2026-10-04): an app-protected wallet that is already open
+  // adds a network without asking for the password again. The app password is
+  // what protects the new entry, exactly as it protects the wallet it came from.
+  //
+  // FAIL CLOSED. Everything below answers "no" (and the switcher asks for the
+  // password, as before) unless ALL of these hold for THIS page:
+  //   - the active entry is THIS page's wallet and it is unlocked;
+  //   - its vault is v2 (wrapped by the app master key) and it is not a
+  //     passwordless wallet (those have their own unchanged no-password path);
+  //   - the session's master key is proven against the CURRENT app record
+  //     (cachedMasterKeyFor: salt + check blob; a stale key is dropped);
+  //   - that key actually opens the active entry's vault.
+  // A v1 wallet with a password of its own never qualifies: its new sibling
+  // would need that password, which the master key does not know.
+
+  /** May the ACTIVE wallet derive a sibling with NO password typed? See the
+   *  block comment above. `expectedId` is the wallet the CALLER means (the
+   *  store's active wallet): when this page's service is on any other wallet
+   *  the answer is no. Opens the active vault once (no scrypt) to prove the key
+   *  fits it, and zeroes the bytes at once. Never writes. */
+  async sessionKeyOpensActive(expectedId: string | null): Promise<boolean> {
+    const store = await this.loadStore();
+    const master = await this.sessionKeyForActive(store, expectedId);
+    if (!master) return false;
+    const entry = this.sessionEntry(store) as WalletEntry;
+    try {
+      (await unlockVaultV2(entry.vault as VaultRecordV2, master)).fill(0);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** The proven master key for the active entry, or null (see above). */
+  private async sessionKeyForActive(store: LiveWalletsStore, expectedId: string | null): Promise<Uint8Array | null> {
+    const entry = this.sessionEntry(store);
+    if (!entry || !expectedId || entry.id !== expectedId) return null;
+    if (this.activeId !== entry.id || !this.isUnlocked()) return null;
+    if (entry.passwordless || !isVaultRecordV2(entry.vault)) return null;
+    return this.cachedMasterKeyFor(store);
+  }
+
+  /**
+   * "Enable <chain>" for a UTXO or EVM target, with NO password, in two steps
+   * so the caller can do the check BEFORE it tears anything down (the store
+   * closes an active Monero wallet's worker only after this has succeeded):
+   *
+   * PREPARE (this method): prove the key for `expectedId` (see above), decrypt
+   * the ACTIVE wallet's secret with it (the decrypt an unlock does, not a
+   * reveal), and parse it. Throws SESSION_KEY_UNAVAILABLE when anything does
+   * not hold, and 'not-a-seed-wallet' for a Monero wallet imported from 25
+   * words. Writes nothing.
+   *
+   * COMMIT (the returned function, single use): create the new entry exactly
+   * as the import path does, except that its vault is born v2, sealed INSIDE
+   * the write under the key proven against that store (sealUnderSessionKey).
+   * One CAS write; any failure writes nothing. Re-checks that this page is
+   * still on `expectedId`.
+   *
+   * The plaintext lives only in this closure, never in a returned value, and
+   * is dropped by commit or discard. It is re-imported the way enableChain
+   * always re-imported it: a seed wallet's phrase WITH its BIP39 passphrase
+   * (dropping it would derive a different wallet), a key wallet's key (as raw
+   * hex for an EVM target, which takes no WIF).
+   */
+  async prepareSiblingWithSessionKey(expectedId: string | null): Promise<{
+    commit(network: LiveNetworkId, name: string | undefined, family?: { family?: WalletFamily; evmChainKey?: string }): Promise<void>;
+    discard(): void;
+  }> {
+    const store = await this.loadStore();
+    const master = await this.sessionKeyForActive(store, expectedId);
+    if (!master) throw new Error(SESSION_KEY_UNAVAILABLE);
+    const entry = this.sessionEntry(store) as WalletEntry;
+    const isPk = (entry.kind ?? 'seed') === 'pk';
+    const fam = entry.family ?? 'utxo';
+    if (isPk && fam !== 'utxo' && fam !== 'evm') throw new Error('not-a-seed-wallet');
+    // The ONLY variable that holds the plaintext; dropped by commit/discard.
+    let secret: string | null;
+    try {
+      secret = await unlockVaultV2String(entry.vault as VaultRecordV2, master);
+    } catch {
+      throw new Error(SESSION_KEY_UNAVAILABLE);
+    }
+    if (!isPk) {
+      const { mnemonic } = decodeSeedSecret(secret);
+      // A Monero wallet imported from its 25 words has no phrase to derive from
+      // (revealSeedSecret answers nothing for it, for the same reason).
+      if (fam === 'monero' && isLegacyMoneroSecret(mnemonic)) {
+        secret = null;
+        throw new Error('not-a-seed-wallet');
+      }
+    }
+    const sourceId = entry.id;
+    return {
+      commit: async (network, name, family) => {
+        const held = secret;
+        secret = null;
+        if (held === null) throw new Error(SESSION_KEY_UNAVAILABLE); // single use
+        if (this.activeId !== sourceId) throw new Error(SESSION_KEY_UNAVAILABLE);
+        if (isPk) {
+          let key = held;
+          // A UTXO key wallet stores a WIF; the EVM import takes only raw hex.
+          // Same secp256k1 key either way (the store's password path does the same).
+          if (family?.family === 'evm' && !/^(0x)?[0-9a-fA-F]{64}$/.test(key.trim())) {
+            const { privateKey } = parsePrivateKey(key);
+            try {
+              key = bytesToHex(privateKey);
+            } finally {
+              privateKey.fill(0);
+            }
+          }
+          await this.importPrivateKeyAs(key, '', network, name, family, SESSION_KEY_SEALING);
+          return;
+        }
+        const { mnemonic, passphrase } = decodeSeedSecret(held);
+        const trimmed = mnemonic.trim().replace(/\s+/g, ' ');
+        if (!validateMnemonic(trimmed)) throw new Error('Invalid recovery phrase');
+        await this.addWallet(trimmed, '', network, name, passphrase, family, 'imported', SESSION_KEY_SEALING);
+      },
+      discard: () => {
+        secret = null;
+      },
+    };
+  }
+
+  /** prepareSiblingWithSessionKey + commit, in one call. */
+  async addSiblingWithSessionKey(
+    expectedId: string | null,
+    network: LiveNetworkId,
+    name: string | undefined,
+    family?: { family?: WalletFamily; evmChainKey?: string },
+  ): Promise<void> {
+    const prepared = await this.prepareSiblingWithSessionKey(expectedId);
+    await prepared.commit(network, name, family);
   }
 
   /**

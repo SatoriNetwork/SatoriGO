@@ -245,6 +245,18 @@ describe('EVM chains in the store', () => {
     expect(state().wallets.some((w) => w.family === 'evm')).toBe(false);
   }, 60_000);
 
+  it('6b. enableChain(evm:base) from a private-key wallet reuses the SAME key (stored as a WIF) instead of failing on the hex check', async () => {
+    // Private key 1: its EVM address is the well-known 0x7E5F...5Bdf.
+    await state().importPrivateKeyWallet('0'.repeat(63) + '1', PW, 'Key', 'mainnet');
+    await state().loadWallets();
+    const res = await state().enableChain('evm:base', PW);
+    expect(res).toEqual({ ok: true });
+    const evmWallet = state().wallets.find((w) => w.family === 'evm')!;
+    expect(evmWallet.kind).toBe('pk');
+    expect(evmWallet.address).toBe('0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf');
+    expect(evmWallet.evmChainKey).toBe('base');
+  }, 60_000);
+
   it('7. quoteEvmSend on a UTXO wallet refuses; confirmEvmSend with nothing to send refuses; both leave the gate closed', async () => {
     await state().importWallet(VECTOR_MNEMONIC, PW, 'Main', 'mainnet');
     await state().loadWallets();
