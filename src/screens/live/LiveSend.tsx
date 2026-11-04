@@ -18,7 +18,7 @@ import { displaySymbol } from '../../services/displaySymbol';
 import { supportsSegwit } from '../../services/chain/chainParams';
 import { networkFor } from '../../services/chain/chainParams';
 import { distinctFeeOptions } from '../../services/chain/feePolicy';
-import { isLegacyAsset } from '../../services/assetNotes';
+import { isLegacyAsset, getAssetNote } from '../../services/assetNotes';
 import type { FeeEstimate, LiveSendPlan, LiveNetworkId } from '../../services/chain/liveWallet';
 import { estimateTxBytes } from '../../services/chain/txBuilder';
 import { ELECTRUM_CLOSED, ELECTRUM_NOT_CONNECTED } from '../../services/chain/electrumClient';
@@ -1065,7 +1065,7 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
               data-testid="legacy-asset-send-note"
               style={{ fontSize: 11.5, margin: '0 2px 8px', lineHeight: 1.5 }}
             >
-              Legacy SATORI. The Satori Network now uses SATORIEVR.
+              {getAssetNote(assetId, nativeTicker)?.sendNote}
             </p>
           )}
           </div>{/* /send-scroll */}

@@ -9,6 +9,15 @@ and release commits.
 
 ---
 
+## 1.5.2
+
+### Satori moved to Base
+
+- SATORIEVR is now marked as the old token, with a note naming the official
+  SATORI token on Base. You can still send and receive it.
+- Pool staking on Evrmore is switched off, because the Satori server no longer
+  accepts Evrmore addresses. Staking on Base is not in this version.
+
 ## 1.5.1
 
 ### Adding a network

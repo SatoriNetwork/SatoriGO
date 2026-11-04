@@ -593,7 +593,7 @@ function BalanceRow({
               background: 'var(--warning-bg)',
             }}
           >
-            legacy
+            {getAssetNote(asset.name, nativeTicker)?.badge}
           </span>
         )}
         {staked && (

@@ -489,7 +489,8 @@ try {
   // price we just read, and require both to be real numbers so this cannot pass on
   // two empty tiles.
   check(
-    price > 0 && stakeCost > 0 && Math.abs(stakeCost - 250 * price) < 0.02,
+    // The tile rounds the price to cents, which is up to $1.25 at 250 tokens.
+    price > 0 && stakeCost > 0 && Math.abs(stakeCost - 250 * price) <= 1.27,
     `stake cost is 250 x price ($${stakeCost} vs 250 x $${price})`,
   );
   await page.screenshot({ path: path.join(shotsDir, '30-live-network.png') });
@@ -1254,32 +1255,15 @@ try {
   await byId('live-asset-row-SATORIEVR').click({ timeout: 10_000 });
   await byId('live-asset-detail').waitFor({ timeout: 10_000 });
 
-  // Satori pool staking (SATORIEVR only): the asset detail must offer a third
-  // "Stake" action; opening it reaches the staking screen, which must resolve to
-  // a loaded pool list OR a clean empty/error state (network-tolerant — the
-  // central server may be slow/unreachable headless). We do NOT join/leave here
-  // (that would mutate real server state for a test wallet).
-  check((await byId('live-stake-button').count()) === 1, 'SATORIEVR detail offers a Stake action');
-  await byId('live-stake-button').click({ timeout: 10_000 });
-  await byId('live-staking').waitFor({ timeout: 10_000 });
-  check(true, 'Stake -> staking screen opens');
-  // Poll ~20s for the screen to settle into pools, an empty state, or an error
-  // banner — any of these is a valid, non-hung outcome.
-  let stakingSettled = false;
-  for (let i = 0; i < 40; i++) {
-    const hasPools = (await page.locator('[data-testid^="staking-pool-row-"]').count()) > 0;
-    const hasStatus = (await byId('staking-status').count()) > 0;
-    const hasError = (await byId('staking-error').count()) > 0;
-    const stakingText = (await byId('live-staking').innerText().catch(() => '')) || '';
-    const hasEmpty = /No SATORIEVR to stake|No open pools/i.test(stakingText);
-    if (hasPools || hasStatus || hasError || hasEmpty) { stakingSettled = true; break; }
-    await page.waitForTimeout(500);
-  }
-  check(stakingSettled, 'staking screen reaches a loaded pool list or a clean empty/error state');
+  // SATORIEVR is the old token since the move to Base: its detail says so and
+  // names the official token, and no longer offers Stake. Send stays.
+  check((await byId('live-stake-button').count()) === 0, 'SATORIEVR detail no longer offers a Stake action');
+  const oldTokenBanner = (await byId('legacy-asset-banner').innerText().catch(() => '')) || '';
+  check(
+    /old Satori token/.test(oldTokenBanner) && /0xd0a5bFF2789230b0fb1Bd989fc7CE7084c947E17/.test(oldTokenBanner),
+    'SATORIEVR detail marks it as the old token and names the Base token',
+  );
   await page.screenshot({ path: path.join(shotsDir, '29-live-staking.png') });
-  // Back to the SATORIEVR detail to continue with the asset-send path.
-  await page.locator('button[aria-label="Back"]').first().click({ timeout: 10_000 });
-  await byId('live-asset-detail').waitFor({ timeout: 10_000 });
 
   await byId('live-asset-detail-send').click({ timeout: 10_000 });
   await byId('live-send-to').waitFor({ timeout: 10_000 });

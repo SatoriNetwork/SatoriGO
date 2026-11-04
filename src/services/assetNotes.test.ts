@@ -6,8 +6,8 @@ describe('isLegacyAsset', () => {
     expect(isLegacyAsset('SATORI')).toBe(true);
   });
 
-  it('is false for the current asset SATORIEVR', () => {
-    expect(isLegacyAsset('SATORIEVR')).toBe(false);
+  it('is true for the old Evrmore token SATORIEVR', () => {
+    expect(isLegacyAsset('SATORIEVR')).toBe(true);
   });
 
   it('is false for a reissuable marker SATORI!', () => {
@@ -53,12 +53,19 @@ describe('getAssetNote / ASSET_NOTES', () => {
     expect(note?.badge).toBe('legacy');
     expect(note?.note).toBe(
       'This is the legacy SATORI token. It is no longer used by the Satori Network. ' +
-        'The current Satori asset on Evrmore is SATORIEVR.',
+        'Satori now lives on Base, where the official SATORI token is 0xd0a5bFF2789230b0fb1Bd989fc7CE7084c947E17.',
     );
   });
 
+  it('marks SATORIEVR as the old token, says staking ended and that it can still be sent', () => {
+    const note = getAssetNote('SATORIEVR');
+    expect(note?.badge).toBe('old token');
+    expect(note?.note).toContain('0xd0a5bFF2789230b0fb1Bd989fc7CE7084c947E17');
+    expect(note?.note).toContain('Pool staking on Evrmore has ended');
+    expect(note?.note).toContain('send and receive');
+  });
+
   it('returns undefined for assets with no note', () => {
-    expect(getAssetNote('SATORIEVR')).toBeUndefined();
     expect(getAssetNote('EVR')).toBeUndefined();
   });
 
@@ -67,7 +74,7 @@ describe('getAssetNote / ASSET_NOTES', () => {
     expect(getAssetNote('SATORI', 'EVR')).toBeDefined();
   });
 
-  it('is data-driven: ASSET_NOTES is keyed exactly by SATORI', () => {
-    expect(Object.keys(ASSET_NOTES)).toEqual(['SATORI']);
+  it('is data-driven: ASSET_NOTES is keyed exactly by SATORI and SATORIEVR', () => {
+    expect(Object.keys(ASSET_NOTES)).toEqual(['SATORI', 'SATORIEVR']);
   });
 });

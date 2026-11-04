@@ -647,11 +647,15 @@ export function walletOnChain(wallets: WalletSummary[], chainId: string): Wallet
   return belongsToSeedGroup(active) ? null : candidates[0];
 }
 
-/** Whether Satori pool staking applies on this chain. SATORIEVR is an Evrmore
- *  asset, so staking is Evrmore-only; it is inert on Ravencoin. Exported so the
- *  UI can hide/guard the Stake action without re-deriving the chain check. */
+/** Whether Satori pool staking on an Evrmore address still works. It does not:
+ *  Satori moved to Base and the central server keys every peer by its Base
+ *  address (it answers 400 to an Evrmore address), so this is off everywhere and
+ *  the Stake action, its screen and the store's join/leave all stand down.
+ *  Exported so the UI can hide/guard the Stake action without a chain check. */
+const EVRMORE_POOL_STAKING_LIVE = false;
+
 export function stakingSupported(chainId: string = activeChainTarget()): boolean {
-  return nativeTickerFor(chainId) === 'EVR';
+  return EVRMORE_POOL_STAKING_LIVE && nativeTickerFor(chainId) === 'EVR';
 }
 
 /** Whether this chain has NATIVE staking, the kind a cosmos/evm chain exposes

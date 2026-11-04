@@ -200,7 +200,7 @@ export function LiveAssetDetail({ asset, onBack, onReceive, onSend, onSelectTx, 
             style={{ alignItems: 'flex-start' }}
           >
             <Info size={14} />
-            <span>{getAssetNote(asset.name, nativeTicker)?.note}</span>
+            <span style={{ overflowWrap: 'anywhere' }}>{getAssetNote(asset.name, nativeTicker)?.note}</span>
           </div>
         )}
 

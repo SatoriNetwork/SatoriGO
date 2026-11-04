@@ -114,7 +114,7 @@ export function LiveNetwork() {
         >
           satorinet.io
         </a>
-        . A neuron stake is 250 SATORIEVR.
+        .
       </p>
     </div>
   );

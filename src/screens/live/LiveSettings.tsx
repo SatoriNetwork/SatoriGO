@@ -3021,7 +3021,7 @@ export function LiveSettings({ onBack, onOpenAddressBook, onImportMonero }: Live
             style={{ fontSize: 11, margin: '0 2px 10px', lineHeight: 1.6 }}
           >
             Satori GO is a non-custodial wallet made by Satori Network, the decentralized AI network
-            whose neurons predict the future and earn SATORIEVR for it. Your keys are encrypted and
+            whose neurons predict the future and earn SATORI for it. Your keys are encrypted and
             never leave this device.
           </p>
 

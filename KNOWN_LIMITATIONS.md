@@ -1,6 +1,6 @@
 # Known limitations
 
-Current, honest limitations of the wallet (v1.5.1).
+Current, honest limitations of the wallet (v1.5.2).
 
 Satori GO is a non-custodial multi-chain wallet. Eight coin networks and four
 EVM networks ship in this version, and every one of them has had a funded send
@@ -17,7 +17,7 @@ confirmed by the owner on mainnet (item 7). Nothing below is marketing.
    approval window shows the exact message, so read it. This is inherent to the
    signmessage format, which must stay byte-compatible with Satori.
 3. **The Satori pool challenge is validated by shape, not by origin.** Staking
-   signs a nonce the pool server supplies. The wallet refuses anything that is
+   (ended on Evrmore, item 20) signed a nonce the pool server supplies. The wallet refuses anything that is
    not a bare UUID, which excludes every human-readable or structured message,
    but another service whose challenges are also bare UUIDs under the same
    signing scheme could not be told apart. Only server-side domain binding can
@@ -147,12 +147,11 @@ confirmed by the owner on mainnet (item 7). Nothing below is marketing.
 
 ## Satori Network features
 
-20. **Pool staking is an off-chain registration, not a transaction.** Joining or
-    leaving signs a challenge and registers your address as a lender on
-    network.satorinet.io. **No funds move and your SATORIEVR never leaves your
-    wallet.** Nothing is at risk on-chain, but the wallet cannot verify the
-    pool's behaviour or your rewards; it shows what that server reports. If the
-    service changes or goes down, staking stops working.
+20. **Pool staking on Evrmore has ended, and the wallet has no pool staking on
+    Base yet.** Satori moved to Base and SATORIEVR is now the old token: the
+    Satori server only accepts Base addresses, so the wallet removed its Stake
+    action. Your SATORIEVR stays on your address and can still be sent and
+    received. Rewards on Base cannot be claimed from this version of the wallet.
 21. **The Satori Network tab reports, it does not verify.** Its figures come from
     satorinet.io, are cached briefly, and a failing endpoint leaves its own tile
     showing "n/a" rather than blanking the screen. Nothing there is cross-checked
@@ -160,8 +159,8 @@ confirmed by the owner on mainnet (item 7). Nothing below is marketing.
 22. **Assets are Evrmore-only, and there are two unrelated kinds of staking.**
     Five of the eight UTXO chains have no asset layer at all, and the wallet says
     so rather than showing an empty asset list. (Neoxa has one, but the wallet
-    cannot read it until its server is live, item 35.) *Pool* staking (items 20 and 21)
-    is Evrmore-only. *Native* staking is a different feature on a different
+    cannot read it until its server is live, item 35.) *Pool* staking has ended
+    (item 20). *Native* staking is a different feature on a different
     family: it exists only on an EVM chain whose registry row declares it, which
     today is Epix alone, and the wallet offers no Stake action anywhere else.
     Both are gated on a capability, never on a chain name, so a chain that gains
