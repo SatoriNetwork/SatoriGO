@@ -11,6 +11,7 @@
 
 import { loadEvmModules } from '../services/chain/engine';
 import { evmProviderFor } from './evmBalances';
+import { SATORI_BASE_TOKEN } from '../services/assetNotes';
 import type { EtherscanIndexer } from '../services/chain/evm/indexer/etherscan';
 import type { StakingCallInfo } from '../services/chain/evm/cosmosStaking';
 import type { LiveTransaction } from '../services/chain/electrumProvider';
@@ -229,6 +230,38 @@ async function labelStakingRows(
 }
 
 /**
+ * Say where received SATORI came from: a reward claim or an ordinary transfer.
+ *
+ * The transfer rows name only the sender, and every channel mints from the zero
+ * address, so the transaction's `to` is what tells them apart. Same bounds as the
+ * staking labels: asked once ever per transaction (the answer stays on the row in
+ * the cache), only for SATORI received on a chain listing the contract, capped per
+ * refresh, and a failure labels nothing and is asked again next refresh. A token
+ * merely calling itself SATORI elsewhere never gets a claim label: its transaction
+ * would have to be sent to the reward contract.
+ */
+async function labelSatoriClaims(evm: EvmMods, chain: EvmChainInfo, rows: LiveTransaction[]): Promise<LiveTransaction[]> {
+  const contract = SATORI_BASE_TOKEN.toLowerCase();
+  if (!evm.evmChainByKey(chain.key)?.defaultTokens?.some((t) => t.address.toLowerCase() === contract)) return rows;
+  const wanted = enrichCandidates(
+    rows,
+    STAKING_ENRICH_MAX_PER_REFRESH,
+    (row) => row.asset === 'SATORI' && row.direction === 'in' && row.status === 'confirmed' && !row.satoriSource,
+  );
+  if (wanted.length === 0) return rows;
+  const provider = await evmProviderFor(chain.key);
+  if (!provider) return rows;
+  const answers = await askNodeByHash(provider, 'eth_getTransactionByHash', wanted);
+  if (answers.size === 0) return rows;
+  return rows.map((row) => {
+    if (row.asset !== 'SATORI' || row.direction !== 'in' || row.satoriSource) return row;
+    const answer = answers.get(row.txid);
+    if (!answer) return row;
+    return { ...row, satoriSource: evm.satoriClaimKindOfContract(answer.to) ?? 'transfer' };
+  });
+}
+
+/**
  * The history client for `chain`, built once per session and cached, or null
  * when this build has no source for that chain. Shared by the newest-page read
  * and the older-page read so the two can never end up on different sources.
@@ -317,7 +350,7 @@ export async function refreshEvmHistory(
       ...(stakingCfg ? { staking: stakingCfg } : {}),
     });
     const merged = cache ? mergeEvmHistory(cache.rows, freshRows) : freshRows;
-    const rows = await labelStakingRows(evm, chain, merged, address);
+    const rows = await labelSatoriClaims(evm, chain, await labelStakingRows(evm, chain, merged, address));
     void saveEvmHistoryCache(chain.key, address, {
       rows,
       highestBlock: Math.max(cache?.highestBlock ?? 0, highestBlockOf(rows)),
@@ -420,7 +453,7 @@ export async function loadOlderEvmHistory(
       tipBlock: tipBlock !== undefined ? BigInt(tipBlock) : undefined,
       ...(stakingCfg ? { staking: stakingCfg } : {}),
     });
-    return { rows, cursor: page.cursor, hasMore: page.cursor !== null, issue: null };
+    return { rows: await labelSatoriClaims(evm, chain, rows), cursor: page.cursor, hasMore: page.cursor !== null, issue: null };
   } catch (err) {
     const reason = err instanceof evm.EvmIndexerError ? err.reason : 'unavailable';
     const detail = err instanceof Error ? err.message : String(err);

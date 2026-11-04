@@ -171,6 +171,9 @@ export function mergeEvmHistory(
     // The fee is deliberately NOT on that list: the fresh row's fee is the real
     // gasUsed x gasPrice the chain charged, and it must always beat the local
     // estimate a just-broadcast row was built with.
+    // Where received SATORI came from is likewise bought with one node read.
+    const freshRow = out.get(k) as LiveTransaction;
+    if (t.satoriSource && !freshRow.satoriSource) out.set(k, { ...freshRow, satoriSource: t.satoriSource });
     const merged = out.get(k) as LiveTransaction;
     if (t.staking && !merged.staking) {
       out.set(k, { ...merged, staking: t.staking });

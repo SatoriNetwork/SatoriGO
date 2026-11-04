@@ -24,7 +24,9 @@ vi.mock('./engine', async (importOriginal) => {
 import { LiveWalletService, EVM_NETWORK, type WalletEntry } from './liveWallet';
 import { MemoryStorageAdapter, setStorageForTests, getStorage } from '../storage';
 import type { ElectrumClient } from './electrumTypes';
-import { recoverTxPublicKey, decodeSignedTx, type EvmTxRequest } from './evm';
+import { recoverTxPublicKey, decodeSignedTx, deriveEvrmoreKeyAsEvm, type EvmTxRequest } from './evm';
+import { deriveAddress, encodeWif, mnemonicToSeed } from './keys';
+import { EVRMORE_MAINNET } from './chainParams';
 import * as secp256k1 from '@noble/secp256k1';
 import { hexToBytes } from '@noble/hashes/utils';
 
@@ -173,7 +175,7 @@ describe('LiveWalletService: EVM account', () => {
     expect(svc.getAddress()).toBe(VECTOR_ADDRESS_0);
   }, 60_000);
 
-  it('8. importPrivateKey(family evm) with a raw hex key: 0x7E5F… for key 1, kind pk, WIF refused', async () => {
+  it('8. importPrivateKey(family evm) with a raw hex key: 0x7E5F… for key 1, kind pk', async () => {
     const svc = new LiveWalletService(offlineClient);
     await svc.importPrivateKey('0x' + '0'.repeat(63) + '1', PW, 'mainnet', 'Imported', { family: 'evm' });
     expect(svc.getAddress()).toBe(KEY_ONE_ADDRESS);
@@ -187,10 +189,43 @@ describe('LiveWalletService: EVM account', () => {
     expect(Buffer.from(recoverTxPublicKey(signed.raw)).toString('hex')).toBe(
       Buffer.from(secp256k1.getPublicKey(hexToBytes('0'.repeat(63) + '1'), false)).toString('hex'),
     );
-    const svc2 = new LiveWalletService(offlineClient);
-    await expect(
-      svc2.importPrivateKey('5HueCGU8rMjxEXxiPuD5BDku4MkFqeZyd4dZ1jvhTVqvbTLvyTJ', PW, 'mainnet', undefined, { family: 'evm' }),
-    ).rejects.toThrow(/64 hex characters/);
+  }, 45_000);
+
+  it('8b. a WIF imports as the same key: same address and signer as its hex, in every WIF form', async () => {
+    const hex = '0'.repeat(63) + '1';
+    const key = hexToBytes(hex);
+    for (const wif of [encodeWif(key, EVRMORE_MAINNET, true), encodeWif(key, EVRMORE_MAINNET, false)]) {
+      const svc = new LiveWalletService(offlineClient);
+      await svc.importPrivateKey(wif, PW, 'mainnet', 'From Evrmore', { family: 'evm', evmChainKey: 'base' });
+      expect(svc.getAddress()).toBe(KEY_ONE_ADDRESS);
+      svc.lock();
+      await svc.unlock(PW);
+      expect(svc.getAddress()).toBe(KEY_ONE_ADDRESS);
+      expect(Buffer.from(recoverTxPublicKey(svc.signEvmTransaction(sampleTx(8453)).raw)).toString('hex')).toBe(
+        Buffer.from(secp256k1.getPublicKey(key, false)).toString('hex'),
+      );
+      // What the vault holds, and what reveal hands back, is the hex form.
+      expect(await svc.revealPrivateKeyWif(PW)).toBe(hex);
+      setStorageForTests(new MemoryStorageAdapter());
+    }
+  }, 60_000);
+
+  it('8c. a seed\'s Evrmore WIF lands on the address the Rewards screen calls its old key', async () => {
+    const seed = await mnemonicToSeed(VECTOR_MNEMONIC, '');
+    const evr = deriveAddress(seed, EVRMORE_MAINNET, 0, 0, 0);
+    const svc = new LiveWalletService(offlineClient);
+    await svc.importPrivateKey(encodeWif(evr.privateKey, EVRMORE_MAINNET, true), PW, 'mainnet', undefined, { family: 'evm', evmChainKey: 'base' });
+    expect(svc.getAddress()).toBe(deriveEvrmoreKeyAsEvm(seed, 0).address);
+  }, 45_000);
+
+  it('8d. a mistyped WIF or a short hex imports nothing', async () => {
+    const svc = new LiveWalletService(offlineClient);
+    const wif = encodeWif(hexToBytes('0'.repeat(63) + '1'), EVRMORE_MAINNET, true);
+    const mistyped = wif.slice(0, -1) + (wif.endsWith('a') ? 'b' : 'a');
+    await expect(svc.importPrivateKey(mistyped, PW, 'mainnet', undefined, { family: 'evm' })).rejects.toThrow();
+    await expect(svc.importPrivateKey('abc123', PW, 'mainnet', undefined, { family: 'evm' })).rejects.toThrow();
+    await expect(svc.importPrivateKey('0'.repeat(64), PW, 'mainnet', undefined, { family: 'evm' })).rejects.toThrow(/secp256k1/);
+    expect(await storedWallets()).toHaveLength(0);
   }, 45_000);
 
   it('9. revealPrivateKeyWif on an EVM seed wallet returns the 0x hex key MetaMask imports', async () => {

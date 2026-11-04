@@ -9,6 +9,40 @@ and release commits.
 
 ---
 
+## 1.6.0
+
+### Satori on Base
+
+- SATORI on Base is now the default Satori token, with its price in the wallet.
+- Pool staking works on Base. Joining or leaving a pool is a signed registration
+  with the Satori server: no fee, and your SATORI stays in your wallet.
+- Claim your Satori rewards, airdrop and prediction rewards from the new Rewards
+  screen. Each claim is a Base transaction and pays a small fee in ETH.
+- A blinking status on the wallet screen and a note on the SATORI screen tell you
+  when something is waiting to be claimed, and how much.
+- A wallet made from a recovery phrase also reads the Base address of its Evrmore
+  key, where older rewards are kept, and can claim from it and move its SATORI to
+  your main address.
+- Activity tells claimed rewards, airdrop and prediction rewards apart from
+  ordinary transfers.
+- The SATORI screen shows when tokens are locked and until when, and sending them
+  is refused in plain words until the lock ends.
+- Rewards history lists what you earned each day and whether it has been claimed.
+- A private key in WIF form, such as one from Evrmore, can now be imported on an
+  EVM network. It stays the same key, on that network's address format.
+
+### Fixes
+
+- Sending to a MetaMask smart account no longer warns that the address is a
+  contract. It is an ordinary wallet that has delegated to one.
+- A double click on the final Send, Stake or Claim button can no longer send twice
+  while the password is being checked.
+
+### Privacy
+
+- Opening Base now sends your Base address to the Satori server to look up your
+  rewards, even if you hold no SATORI. See PRIVACY.md.
+
 ## 1.5.2
 
 ### Satori moved to Base

@@ -28,7 +28,7 @@ import {
   NOTIF_REFRESH_MS,
   type NotificationItem,
 } from '../services/notifications';
-import { isValidAddress, parsePrivateKey } from '../services/chain/keys';
+import { isValidAddress } from '../services/chain/keys';
 import {
   feePolicyFor,
   isNewChain,
@@ -113,6 +113,17 @@ import {
   type EvmStakePlan,
   type EvmStakingSnapshot,
 } from './evmStaking';
+import {
+  buildSatoriClaimPlan,
+  buildSatoriMovePlan,
+  evrKeyNativeBalance,
+  loadSatoriEvrKeyAccount,
+  loadSatoriRewards,
+  EMPTY_SATORI_REWARDS,
+  type SatoriClaimKind,
+  type SatoriClaimPlan,
+  type SatoriRewardsState,
+} from './satoriRewards';
 import { withCallGasHeadroom, withEvmCallFeeLevel } from './evmCall';
 import type { EvmFeeLevel } from '../services/chain/evm/fees';
 import type { EvmNonceTracker } from '../services/chain/evm/nonce';
@@ -144,11 +155,13 @@ import {
   type TransactionCacheProvider,
 } from '../services/chain/txCache';
 import type { NetworkStatus } from '../types/domain';
+import { SATORI_BASE_TOKEN } from '../services/assetNotes';
+import { evmCodeIsContract } from '../services/recipientRisk';
 import {
   fetchOpenPools,
   getLenderStatus,
-  joinPoolForKeys,
-  leavePoolForKeys,
+  joinPool as joinSatoriPool,
+  leavePool as leaveSatoriPool,
   type PoolInfo,
   type LenderStatus,
 } from '../services/satoriPool';
@@ -647,15 +660,13 @@ export function walletOnChain(wallets: WalletSummary[], chainId: string): Wallet
   return belongsToSeedGroup(active) ? null : candidates[0];
 }
 
-/** Whether Satori pool staking on an Evrmore address still works. It does not:
- *  Satori moved to Base and the central server keys every peer by its Base
- *  address (it answers 400 to an Evrmore address), so this is off everywhere and
- *  the Stake action, its screen and the store's join/leave all stand down.
- *  Exported so the UI can hide/guard the Stake action without a chain check. */
-const EVRMORE_POOL_STAKING_LIVE = false;
-
+/** Whether Satori pool staking applies on this chain: the chain that lists the
+ *  official SATORI token (Base). The central server keys every peer by its Base
+ *  address, so it ended on Evrmore. Exported so the UI can hide/guard the Stake
+ *  action; the capability is the registry row, never a chain name. */
 export function stakingSupported(chainId: string = activeChainTarget()): boolean {
-  return EVRMORE_POOL_STAKING_LIVE && nativeTickerFor(chainId) === 'EVR';
+  const official = SATORI_BASE_TOKEN.toLowerCase();
+  return (evmChainInfoFor(chainId)?.defaultTokens ?? []).some((t) => t.address.toLowerCase() === official);
 }
 
 /** Whether this chain has NATIVE staking, the kind a cosmos/evm chain exposes
@@ -686,8 +697,6 @@ export function assetsSupported(chainId: string = activeChainTarget()): boolean 
   return supportsAssets(networkFor(chainId as LiveNetworkId));
 }
 
-/** The SATORIEVR asset name — the ONLY asset eligible for Satori pool staking. */
-const STAKING_ASSET = 'SATORIEVR';
 
 /** Structural view of the dynamic-asset API that LiveWalletService.getProvider()
  *  returns (the ElectrumWalletDataProvider). Declared locally so we depend only
@@ -1187,13 +1196,20 @@ export interface ServerStatus {
   latencyMs?: number;
 }
 
-/** Per-address Satori lender status: which pool (if any) this held-SATORIEVR
+/** Per-address Satori lender status: which pool (if any) this Base
  *  address is registered with. Aggregated to drive the staking UI honestly when
  *  addresses are in different states. */
+/** A Satori claim is on its way to the node. */
+let satoriClaimSending = false;
+/** Bumped by each new review and by leaving one: a slower one must not land. */
+let satoriPlanRun = 0;
+
 export interface AddressLenderStatus {
   address: string;
   poolAddress: string | null;
   isPool?: boolean;
+  /** The server did not answer: poolAddress says nothing. */
+  unknown?: boolean;
 }
 
 /** Snapshot of the active wallet's Satori pool-staking state. Server truth is
@@ -1201,7 +1217,7 @@ export interface AddressLenderStatus {
 export interface StakingState {
   /** Open pools to delegate to (sorted by commission ascending). */
   pools: PoolInfo[];
-  /** Lender status per SATORIEVR-holding address (empty = holds none anywhere). */
+  /** Lender status of the active Base account (empty until loaded). */
   addressStatuses: AddressLenderStatus[];
   /** True while pools + statuses are (re)loading. */
   loading: boolean;
@@ -1956,6 +1972,7 @@ interface LiveState {
    *  read and on a chain with no staking; `plan` is the priced precompile call
    *  waiting for the arming gate, exactly as `evmSend` is for a send. */
   evmStaking: { snapshot: EvmStakingSnapshot | null; loading: boolean; plan: EvmStakePlan | null; planning: boolean };
+  satoriRewards: SatoriRewardsState;
 
   // --- Monero (family 'monero', the Monero engine design notes §8/§15) ---------
   /** The open Monero wallet of THIS PAGE and what it last reported.
@@ -2067,7 +2084,7 @@ interface LiveState {
   // --- pending send plan ----------------------------------------------------
   sendPlan: LiveSendPlan | null;
 
-  // --- Satori pool staking (SATORIEVR only) ---------------------------------
+  // --- Satori pool staking (SATORI on Base) ---------------------------------
   /** Live pool-staking state for the active wallet (server truth; not persisted). */
   staking: StakingState;
 
@@ -2183,6 +2200,17 @@ interface LiveState {
   /** Sign and broadcast the staking plan under review (requires arm(true)). */
   confirmEvmStake(): Promise<{ txid: string; explorerUrl: string; chainKey: string }>;
   clearEvmStake(): void;
+  /** Read what the active Base account can claim from the Satori reward contracts.
+   *  Never throws: failures land in `satoriRewards.snapshot.issue`. */
+  refreshSatoriRewards(): Promise<void>;
+  /** Price one reward claim for review. Sets `satoriRewards.plan`, or `.error`. */
+  planSatoriClaim(kind: SatoriClaimKind, fromEvrKey?: boolean): Promise<SatoriClaimPlan | null>;
+  /** Price moving all SATORI from the Evrmore key's address to this account. */
+  planSatoriMove(): Promise<SatoriClaimPlan | null>;
+  selectSatoriClaimFeeLevel(level: EvmFeeLevel): Promise<void>;
+  /** Sign and broadcast the claim under review (requires arm(true)). */
+  confirmSatoriClaim(): Promise<{ txid: string; explorerUrl: string; chainKey: string }>;
+  clearSatoriClaim(): void;
   /** Unlock the ACTIVE wallet. `password` is that wallet's own password on a v1
    *  vault and the APP password on a migrated one (ignored once the session
    *  holds the master key). `opts.migrate === false` declines the transitional
@@ -2424,7 +2452,7 @@ interface LiveState {
   loadWalletAssets(): Promise<void>;
   /** Mark all current activity as seen (clears the badge); persists per wallet. */
   markActivitySeen(): void;
-  // --- Satori pool staking (SATORIEVR only) ---------------------------------
+  // --- Satori pool staking (SATORI on Base) ---------------------------------
   /** Reload open pools + per-address lender status for all SATORIEVR-holding
    *  addresses of the active wallet. Errors set staking.error (never throw). */
   refreshStaking(): Promise<void>;
@@ -2634,6 +2662,7 @@ async function landSeedImport(set: LiveSet, get: LiveGet, evmKey: string | null,
       // total under the hero, so a leftover snapshot here would print another
       // account's stake under this one's balance.
       evmStaking: { snapshot: null, loading: false, plan: null, planning: false },
+      satoriRewards: EMPTY_SATORI_REWARDS,
     });
     void get().loadWallets();
     void get().loadWalletAssets();
@@ -2742,6 +2771,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   evmSend: null,
   loadingEvmSend: false,
   evmStaking: { snapshot: null, loading: false, plan: null, planning: false },
+  satoriRewards: EMPTY_SATORI_REWARDS,
   monero: { chain: null, ...EMPTY_MONERO },
   zcash: { chain: ZCASH_CHAIN, ...EMPTY_ZCASH },
   tao: { chain: TAO_CHAIN, ...EMPTY_TAO },
@@ -3042,8 +3072,8 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     network: LiveNetworkId | EvmChainTarget = 'mainnet',
   ) {
     // A single WIF/hex key becomes a one-address 'pk' wallet (how Satori-network
-    // wallets are generated). An empty password makes it passwordless. A raw
-    // hex key on an `evm:<key>` target becomes a single-address EVM account.
+    // wallets are generated). An empty password makes it passwordless. On an
+    // `evm:<key>` target either form becomes a single-address EVM account.
     const evmKey = evmChainKeyOf(network);
     await landPkImport(set, get, () =>
       svc.importPrivateKey(
@@ -3307,6 +3337,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       sendPlan: null,
       evmSend: null,
       evmStaking: { snapshot: null, loading: false, plan: null, planning: false },
+      satoriRewards: EMPTY_SATORI_REWARDS,
       evmTokens: { tracked: [], discovered: [] },
       error: null,
       syncing: 'idle',
@@ -3436,6 +3467,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
         evmSend: null,
         // Staking is per account AND per chain, exactly like the token lists.
         evmStaking: { snapshot: null, loading: false, plan: null, planning: false },
+        satoriRewards: EMPTY_SATORI_REWARDS,
         // Token lists are per wallet AND per chain; loadWalletAssets below reads
         // the new account's own, so the old account's must not show meanwhile.
         evmTokens: { tracked: [], discovered: [] },
@@ -3568,6 +3600,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       network: null,
       evmSend: null,
       evmStaking: { snapshot: null, loading: false, plan: null, planning: false },
+      satoriRewards: EMPTY_SATORI_REWARDS,
       // The manual row order belongs to the chain being left; the new chain's
       // own is read below. Cleared first so the old arrangement cannot briefly
       // reorder the new chain's rows.
@@ -3836,20 +3869,6 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       // unlocked, reset on-screen data, load the chain's servers/explorer,
       // refresh). They throw on failure, leaving NOTHING created.
       if (active.kind === 'pk') {
-        // A UTXO key wallet stores its key as a WIF, and the EVM import takes
-        // only the raw 64-hex form (what MetaMask exports). It is the same
-        // secp256k1 key either way, so an EVM target gets the hex of the very
-        // key the screen says it reuses. Before this, enabling Base on such a
-        // wallet failed with "An EVM private key is 64 hex characters"
-        // (user report, 2026-10-04; present since EVM chains were added).
-        if (evmChainKeyOf(chainId) !== null && !/^(0x)?[0-9a-fA-F]{64}$/.test(secret.trim())) {
-          const { privateKey } = parsePrivateKey(secret);
-          try {
-            secret = Array.from(privateKey, (b) => b.toString(16).padStart(2, '0')).join('');
-          } finally {
-            privateKey.fill(0);
-          }
-        }
         await get().importPrivateKeyWallet(secret, pw, name, chainId as LiveNetworkId | EvmChainTarget);
       } else {
         await get().importWallet(secret, pw, name, chainId as LiveNetworkId | EvmChainTarget, seedPassphrase);
@@ -4366,6 +4385,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       sendPlan: null,
       evmSend: null,
       evmStaking: { snapshot: null, loading: false, plan: null, planning: false },
+      satoriRewards: EMPTY_SATORI_REWARDS,
       evmTokens: { tracked: [], discovered: [] },
       assetOrder: [],
       pendingMnemonic: null,
@@ -5585,13 +5605,13 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     set({ activitySeen: next, unreadActivity: countUnread(get().txs, next) });
   },
 
-  // --- Satori pool staking (SATORIEVR only) ---------------------------------
+  // --- Satori pool staking (SATORI on Base) ---------------------------------
   // Server truth: pools + per-address lender status are re-fetched here (called
   // when the staking screen opens). Errors set staking.error and never throw to
   // the UI. Requires the wallet unlocked (keysHoldingAsset derives per-address
   // keys); it is, in the ready phase where the screen lives.
   async refreshStaking() {
-    // Staking is Evrmore-only (SATORIEVR). Inert on Ravencoin: report an empty,
+    // Only on the chain carrying the SATORI token: elsewhere report an empty,
     // loaded state without touching the Satori pool server.
     if (!stakingSupported()) {
       set({ staking: { ...emptyStaking(), loaded: true } });
@@ -5599,26 +5619,17 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     }
     set((s) => ({ staking: { ...s.staking, loading: true, error: null } }));
     try {
-      // Fetch pools and figure out which of our addresses hold SATORIEVR (only
-      // those can meaningfully stake) in parallel.
-      const [pools, heldKeys] = await Promise.all([
-        fetchOpenPools(),
-        svc.keysHoldingAsset(STAKING_ASSET),
-      ]);
-      // Per-address lender status (sequential is fine — a handful of addresses).
-      const addressStatuses: AddressLenderStatus[] = [];
-      for (const key of heldKeys) {
-        try {
-          const st: LenderStatus = await getLenderStatus(key.address);
-          addressStatuses.push({ address: key.address, poolAddress: st.poolAddress, isPool: st.isPool });
-        } catch {
-          // An address whose status couldn't be read is reported as unknown
-          // (null pool) rather than blocking the whole screen.
-          addressStatuses.push({ address: key.address, poolAddress: null });
-        }
-      }
+      const { address } = svc.satoriPoolSigner();
+      const pools = await fetchOpenPools();
+      // A status that could not be read must not read as "not staked": joining a
+      // pool on the server moves the address out of the pool it is in.
+      const st: LenderStatus | null = await getLenderStatus(address).catch(() => null);
+      const addressStatuses: AddressLenderStatus[] = [
+        { address, poolAddress: st?.poolAddress ?? null, isPool: st?.isPool, unknown: st === null },
+      ];
+      const error = st === null ? 'Your pool could not be read. Joining stays off until it can.' : null;
       set((s) => ({
-        staking: { ...s.staking, pools, addressStatuses, loading: false, loaded: true, error: null },
+        staking: { ...s.staking, pools, addressStatuses, loading: false, loaded: true, error },
       }));
     } catch (err) {
       set((s) => ({
@@ -5643,56 +5654,29 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   },
 
   async joinPool(poolAddress: string) {
-    // Evrmore-only: the store refuses on Ravencoin even if the UI (phase 3) is hidden.
+    if (get().staking.addressStatuses.some((a) => a.unknown)) {
+      return { ok: false, error: 'Your pool could not be read. Try again before joining.' };
+    }
     if (!stakingSupported()) {
-      const error = 'Staking is only available on Evrmore.';
+      const error = 'Staking is only available on Base.';
       set((s) => ({ staking: { ...s.staking, error } }));
       return { ok: false, error };
     }
     set((s) => ({ staking: { ...s.staking, submitting: true, error: null } }));
     try {
-      const keys = await svc.keysHoldingAsset(STAKING_ASSET);
-      if (keys.length === 0) {
-        const error = 'This wallet holds no SATORIEVR to stake.';
-        set((s) => ({ staking: { ...s.staking, submitting: false, error } }));
-        return { ok: false, error };
-      }
       // Resolve the pool alias for the event label BEFORE refreshStaking (which
       // could change the open-pool list). Uses the alias currently on screen.
       const poolAlias = get().staking.pools.find((p) => p.address === poolAddress)?.alias ?? null;
-      const results = await joinPoolForKeys(
-        poolAddress,
-        keys.map((k) => ({
-          privateKey: k.privateKey,
-          publicKey: k.publicKey,
-          compressed: k.publicKey.length === 33,
-          address: k.address,
-        })),
-      );
-      const failed = results.filter((r) => !r.ok);
-      const joined = results.length - failed.length;
+      await joinSatoriPool(poolAddress, svc.satoriPoolSigner().sign);
       set((s) => ({ staking: { ...s.staking, submitting: false } }));
-      // Record the join for Activity when at least one address succeeded.
-      if (joined > 0) {
-        get().recordStakingEvent({
-          type: 'pool-join',
-          poolAddress,
-          poolAlias,
-          addressCount: joined,
-          timestamp: Date.now(),
-        });
-      }
+      get().recordStakingEvent({
+        type: 'pool-join',
+        poolAddress,
+        poolAlias,
+        addressCount: 1,
+        timestamp: Date.now(),
+      });
       await get().refreshStaking();
-      if (failed.length === results.length) {
-        const error = failed[0]?.error || 'Joining the pool failed.';
-        set((s) => ({ staking: { ...s.staking, error } }));
-        return { ok: false, error };
-      }
-      if (failed.length > 0) {
-        const error = `${failed.length} of ${results.length} address(es) could not join.`;
-        set((s) => ({ staking: { ...s.staking, error } }));
-        return { ok: false, error };
-      }
       return { ok: true };
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
@@ -5702,62 +5686,32 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   },
 
   async leavePool() {
-    // Evrmore-only: the store refuses on Ravencoin even if the UI (phase 3) is hidden.
     if (!stakingSupported()) {
-      const error = 'Staking is only available on Evrmore.';
+      const error = 'Staking is only available on Base.';
       set((s) => ({ staking: { ...s.staking, error } }));
       return { ok: false, error };
     }
     set((s) => ({ staking: { ...s.staking, submitting: true, error: null } }));
     try {
-      const keys = await svc.keysHoldingAsset(STAKING_ASSET);
-      if (keys.length === 0) {
-        // Nothing held anywhere -> nothing to leave; treat as a no-op success.
-        set((s) => ({ staking: { ...s.staking, submitting: false } }));
-        await get().refreshStaking();
-        return { ok: true };
-      }
-      // The pool being left (for the Activity label): the address our held
-      // addresses are currently registered with, resolved to its alias if known.
+      // The pool being left, for the Activity label. A no-op leave of an
+      // unregistered wallet records nothing.
       const leftPoolAddress =
         get().staking.addressStatuses.find((a) => a.poolAddress)?.poolAddress ?? null;
       const leftPoolAlias = leftPoolAddress
         ? get().staking.pools.find((p) => p.address === leftPoolAddress)?.alias ?? null
         : null;
-      const results = await leavePoolForKeys(
-        keys.map((k) => ({
-          privateKey: k.privateKey,
-          publicKey: k.publicKey,
-          compressed: k.publicKey.length === 33,
-          address: k.address,
-        })),
-      );
-      const failed = results.filter((r) => !r.ok);
-      const left = results.length - failed.length;
+      await leaveSatoriPool(svc.satoriPoolSigner().sign);
       set((s) => ({ staking: { ...s.staking, submitting: false } }));
-      // Record the leave for Activity when at least one address succeeded and we
-      // actually knew which pool we were registered with (a no-op leave of an
-      // unregistered wallet records nothing).
-      if (left > 0 && leftPoolAddress) {
+      if (leftPoolAddress) {
         get().recordStakingEvent({
           type: 'pool-leave',
           poolAddress: leftPoolAddress,
           poolAlias: leftPoolAlias,
-          addressCount: left,
+          addressCount: 1,
           timestamp: Date.now(),
         });
       }
       await get().refreshStaking();
-      if (failed.length === results.length) {
-        const error = failed[0]?.error || 'Leaving the pool failed.';
-        set((s) => ({ staking: { ...s.staking, error } }));
-        return { ok: false, error };
-      }
-      if (failed.length > 0) {
-        const error = `${failed.length} of ${results.length} address(es) could not leave.`;
-        set((s) => ({ staking: { ...s.staking, error } }));
-        return { ok: false, error };
-      }
       return { ok: true };
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
@@ -5926,16 +5880,10 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     try {
       const provider = await evmProviderFor(chain.key);
       if (!provider) return null;
-      // eth_getCode returns the deployed bytecode as DATA: '0x' (or an empty
-      // string on a sloppy node) means there is nothing there but a plain
-      // account. Anything else is code, and coins sent to code are gone unless
-      // the code was written to take them.
+      // Coins sent to a contract are gone unless it was written to take them.
       const code = await provider.rpc.call<string>('eth_getCode', [addr, 'latest']);
       if (typeof code !== 'string') return null;
-      // '0x' is the canonical empty answer; '0x0' / '0x00' are what a sloppier
-      // node writes for the same thing, so an all-zero body is read as empty.
-      const body = code.replace(/^0x/i, '');
-      const isContract = /[^0]/.test(body);
+      const isContract = evmCodeIsContract(code);
       evmCodeCache.set(cacheKey, isContract);
       return isContract;
     } catch {
@@ -6279,6 +6227,209 @@ export const useLiveStore = create<LiveState>((set, get) => ({
 
   clearEvmStake() {
     set((s) => ({ evmStaking: { ...s.evmStaking, plan: null }, error: null }));
+    svc.allowBroadcast = false;
+  },
+
+  // --- Satori reward claims on Base ------------------------------------------
+  // Ordinary contract calls: buildSatoriClaimPlan makes the calldata, planEvmCall
+  // prices it, the same arming gate guards it and broadcastEvmPlan sends it.
+  async refreshSatoriRewards() {
+    const chain = activeEvmChain(get());
+    const address = get().address;
+    if (!chain || !address || activeFamily() !== 'evm' || !stakingSupported()) {
+      set((s) => ({ satoriRewards: { ...s.satoriRewards, snapshot: null, evrKey: null, loading: false } }));
+      return;
+    }
+    set((s) => ({ satoriRewards: { ...s.satoriRewards, loading: true } }));
+    try {
+      const provider = await evmProviderFor(chain.key);
+      const evrKeyAddress = svc.satoriEvrKeyAddress();
+      const [snapshot, evrKey] = provider
+        ? await Promise.all([
+            loadSatoriRewards(provider, address),
+            evrKeyAddress ? loadSatoriEvrKeyAccount(provider, address, evrKeyAddress) : null,
+          ])
+        : [null, null];
+      // A snapshot for an account or chain the user has left must not land on screen.
+      if (activeEvmChain(get())?.key !== chain.key || get().address !== address) {
+        set((s) => ({ satoriRewards: { ...s.satoriRewards, loading: false } }));
+        return;
+      }
+      set((s) => ({ satoriRewards: { ...s.satoriRewards, snapshot, evrKey, loading: false } }));
+    } catch {
+      // Timers land here too, say on a wallet locked meanwhile. Stuck on loading,
+      // Home would never read again.
+      set((s) => ({ satoriRewards: { ...s.satoriRewards, loading: false } }));
+    }
+  },
+
+  async planSatoriClaim(kind: SatoriClaimKind, fromEvrKey = false) {
+    set((s) => ({ satoriRewards: { ...s.satoriRewards, planning: true, plan: null, error: null } }));
+    svc.allowBroadcast = false;
+    const planRun = ++satoriPlanRun;
+    const startedOn = get().address;
+    const abandoned = () => planRun !== satoriPlanRun || get().address !== startedOn;
+    try {
+      const chain = activeEvmChain(get());
+      const from = get().address;
+      if (!chain || !from || activeFamily() !== 'evm' || !stakingSupported()) {
+        throw new EvmSendError('unknown-asset', 'Satori rewards can only be claimed on Base.');
+      }
+      const provider = await evmProviderFor(chain.key);
+      if (!provider) throw new EvmSendError('no-engine', 'This build of Satori GO has no EVM engine.');
+      const native = get().assets.find((a) => a.isNative && a.name === chain.nativeTicker);
+      const evrKeyAddress = fromEvrKey ? svc.satoriEvrKeyAddress() : null;
+      if (fromEvrKey && !evrKeyAddress) throw new EvmSendError('gated', 'This account has no separate Evrmore key.');
+      const plan = await buildSatoriClaimPlan({
+        provider,
+        chain,
+        from: evrKeyAddress ?? from,
+        kind,
+        nativeBalanceBase: evrKeyAddress ? await evrKeyNativeBalance(provider, evrKeyAddress) : native?.amountBase,
+      });
+      if (abandoned()) return null;
+      set((s) => ({ satoriRewards: { ...s.satoriRewards, plan, planning: false } }));
+      return plan;
+    } catch (err) {
+      if (abandoned()) return null;
+      const error = err instanceof Error ? err.message : String(err);
+      set((s) => ({ satoriRewards: { ...s.satoriRewards, planning: false, error } }));
+      return null;
+    }
+  },
+
+  async planSatoriMove() {
+    set((s) => ({ satoriRewards: { ...s.satoriRewards, planning: true, plan: null, error: null } }));
+    svc.allowBroadcast = false;
+    const planRun = ++satoriPlanRun;
+    const startedOn = get().address;
+    const abandoned = () => planRun !== satoriPlanRun || get().address !== startedOn;
+    try {
+      const chain = activeEvmChain(get());
+      const to = get().address;
+      const from = svc.satoriEvrKeyAddress();
+      if (!chain || !to || !from || !stakingSupported()) throw new EvmSendError('gated', 'This account has no separate Evrmore key.');
+      const provider = await evmProviderFor(chain.key);
+      if (!provider) throw new EvmSendError('no-engine', 'This build of Satori GO has no EVM engine.');
+      const nativeBalanceBase = await evrKeyNativeBalance(provider, from);
+      const plan = await buildSatoriMovePlan({ provider, chain, from, to, nativeBalanceBase });
+      if (abandoned()) return null;
+      set((s) => ({ satoriRewards: { ...s.satoriRewards, plan, planning: false } }));
+      return plan;
+    } catch (err) {
+      if (abandoned()) return null;
+      const error = err instanceof Error ? err.message : String(err);
+      set((s) => ({ satoriRewards: { ...s.satoriRewards, planning: false, error } }));
+      return null;
+    }
+  },
+
+  async selectSatoriClaimFeeLevel(level: EvmFeeLevel) {
+    const plan = get().satoriRewards.plan;
+    const chain = activeEvmChain(get());
+    if (!plan || !chain) return;
+    try {
+      const native = get().assets.find((a) => a.isNative && a.name === chain.nativeTicker);
+      const provider = plan.from === get().address ? null : await evmProviderFor(chain.key);
+      const balance = provider ? await evrKeyNativeBalance(provider, plan.from) : native?.amountBase;
+      // Unread is not "enough": repricing without it would drop the plan's shortfall.
+      if (provider && balance === undefined) throw new EvmSendError('quote-failed', 'The balance could not be read right now. Try again.');
+      const repriced = await withEvmCallFeeLevel(plan, level, chain, balance);
+      if (get().satoriRewards.plan !== plan) return;
+      set((s) => ({
+        satoriRewards: {
+          ...s.satoriRewards,
+          plan: { ...repriced, kind: plan.kind, amountBase: plan.amountBase, amountIsLowerBound: plan.amountIsLowerBound },
+        },
+      }));
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
+      set((s) => ({ satoriRewards: { ...s.satoriRewards, error } }));
+    }
+  },
+
+  async confirmSatoriClaim() {
+    const plan = get().satoriRewards.plan;
+    const chain = activeEvmChain(get());
+    if (!plan || !chain) throw new EvmSendError('gated', 'Nothing to confirm.');
+    // The plan is only cleared once the node has answered: until then a second
+    // call would find it again and broadcast it under the next nonce.
+    if (satoriClaimSending) throw new EvmSendError('gated', 'This is already being sent.');
+    if (plan.chainKey !== chain.key) throw new EvmSendError('gated', 'The chain changed since this claim was reviewed.');
+    const fromMain = plan.from === get().address;
+    if (!fromMain && plan.from !== svc.satoriEvrKeyAddress()) {
+      throw new EvmSendError('gated', 'The account changed since this claim was reviewed.');
+    }
+    // Before the first await: both calls of a double click get this far otherwise.
+    satoriClaimSending = true;
+    let evm: NonNullable<Awaited<ReturnType<typeof loadEvmModules>>>;
+    let result: Awaited<ReturnType<typeof broadcastEvmPlan>>;
+    try {
+      const provider = await evmProviderFor(chain.key);
+      const modules = await loadEvmModules();
+      if (!provider || !modules) throw new EvmSendError('no-engine', 'This build of Satori GO has no EVM engine.');
+      evm = modules;
+      evmNonces ??= new evm.EvmNonceTracker();
+      result = await broadcastEvmPlan({
+        provider,
+        plan,
+        nonces: evmNonces,
+        sign: (request) => (fromMain ? svc.signEvmTransaction(request) : svc.signEvmTransactionWithEvrKey(request)),
+        allowBroadcast: svc.allowBroadcast,
+      });
+    } finally {
+      satoriClaimSending = false;
+    }
+    if (!fromMain) {
+      // Not this account's history: the wallet lists no activity for that address.
+      set((s) => ({ satoriRewards: { ...s.satoriRewards, plan: null } }));
+      svc.allowBroadcast = false;
+      void get().refreshSatoriRewards();
+      if (typeof setTimeout !== 'undefined') {
+        setTimeout(() => void get().refreshSatoriRewards(), 6000);
+        setTimeout(() => void get().refresh({ silent: true }), 6000);
+      }
+      return { txid: result.txid, explorerUrl: evmExplorerTxUrl(chain, result.txid), chainKey: chain.key };
+    }
+    // A claim mints SATORI to this account, so the row reads as the receipt the
+    // indexer will report for the same txid, which then replaces it.
+    const pending = {
+      ...evm.localPendingEvmTx({
+        txid: result.txid,
+        from: plan.from,
+        to: plan.to,
+        asset: 'SATORI',
+        decimals: 18,
+        amountBase: plan.amountBase,
+        feeBase: plan.quote.estimatedTotal,
+        nativeDecimals: chain.nativeDecimals,
+        nativeTicker: chain.nativeTicker,
+        timestamp: Date.now(),
+      }),
+      direction: 'in' as const,
+      satoriSource: plan.kind === 'move' ? ('transfer' as const) : plan.kind,
+    };
+    localPendingTxs = [
+      { address: plan.from, tx: pending, at: Date.now() },
+      ...localPendingTxs.filter((p) => p.tx.txid !== pending.txid),
+    ];
+    set((s) => ({
+      txs: [pending, ...s.txs.filter((t) => t.txid !== pending.txid)].sort(compareLiveTx),
+      satoriRewards: { ...s.satoriRewards, plan: null },
+    }));
+    svc.allowBroadcast = false;
+    void get().refresh({ silent: true });
+    void get().refreshSatoriRewards();
+    if (typeof setTimeout !== 'undefined') {
+      setTimeout(() => void get().refreshSatoriRewards(), 6000);
+      setTimeout(() => void get().refresh({ silent: true }), 6000);
+    }
+    return { txid: result.txid, explorerUrl: evmExplorerTxUrl(chain, result.txid), chainKey: chain.key };
+  },
+
+  clearSatoriClaim() {
+    satoriPlanRun++;
+    set((s) => ({ satoriRewards: { ...s.satoriRewards, plan: null, planning: false, error: null } }));
     svc.allowBroadcast = false;
   },
 
@@ -6901,6 +7052,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       staking: emptyStaking(),
       addressScan: emptyAddressScan(),
       evmStaking: { snapshot: null, loading: false, plan: null, planning: false },
+      satoriRewards: EMPTY_SATORI_REWARDS,
     });
   },
 }));

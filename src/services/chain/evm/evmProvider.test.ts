@@ -26,7 +26,10 @@ import type { TransactionRequest } from '../../../types/domain';
 
 /** Base: the chain phase 2 reads first (the EVM rollout plan, section 8),
  *  with its live-read default token (USDC). */
-const CHAIN: EvmChain = evmChainByKey('base')!;
+// Base with USDC alone: these tests script one token's calls, whatever else the
+// registry lists by default (chains.test.ts pins that list).
+const BASE: EvmChain = evmChainByKey('base')!;
+const CHAIN: EvmChain = { ...BASE, defaultTokens: BASE.defaultTokens!.slice(0, 1) };
 const USDC: EvmTokenRef = CHAIN.defaultTokens![0];
 
 /** The published "abandon ... about" seed vector's address 0, already pinned

@@ -46,6 +46,17 @@ export function isLegacyAsset(name: string, nativeTicker: string = 'EVR'): boole
   return (name === 'SATORI' || name === 'SATORIEVR') && nativeTicker === 'EVR';
 }
 
+/** Which price ticker a token row reads, or null for none. The chain's own coin
+ *  and SATORIEVR by name; SATORI only when `officialSatori` says the row IS the
+ *  Base token (its contract, not its name), and then at the SATORIEVR quote until
+ *  the gateway publishes a ticker of its own. A token merely calling itself
+ *  SATORI, or the legacy Evrmore asset, gets no price. */
+export function pricedTickerFor(name: string, isNative: boolean, officialSatori: boolean): string | null {
+  const ticker = name.trim().toUpperCase();
+  if (isNative || ticker === 'SATORIEVR') return ticker;
+  return ticker === 'SATORI' && officialSatori ? 'SATORIEVR' : null;
+}
+
 /** Looks up the note for an asset name, if one applies on the given chain (exact
  *  match only). Returns undefined where the asset is not legacy on that chain. */
 export function getAssetNote(name: string, nativeTicker: string = 'EVR'): AssetNote | undefined {

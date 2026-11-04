@@ -1,11 +1,11 @@
-// Satori pool staking (delegation) for the SATORIEVR asset.
+// Satori pool staking (delegation) for the SATORI token on Base.
 //
-// Staking on Satori is NOT an on-chain transaction: the user's SATORIEVR stays
-// on their own address(es). This screen registers/deregisters those addresses as
-// a "lender" of a chosen pool on Satori's central server (network.satorinet.io),
-// authenticated with a locally-signed challenge. No funds move; no password is
-// required (signing a challenge cannot move funds) — the wallet is already
-// unlocked in the ready phase where this screen lives.
+// Staking on Satori is NOT an on-chain transaction: the user's SATORI stays on
+// their own address. This screen registers/deregisters that address as a "lender"
+// of a chosen pool on Satori's central server (network.satorinet.io), logged in
+// with a locally-made signature. No funds move, no gas; no password is required
+// (the login signature cannot move funds) and the wallet is already unlocked in
+// the ready phase where this screen lives.
 //
 // Data is SERVER TRUTH, re-fetched on open (refreshStaking). All errors surface
 // via the store's staking.error (never thrown to the UI).
@@ -25,9 +25,10 @@ import { LiveNav } from './LiveNav';
 
 interface LiveStakingProps {
   onBack(): void;
+  onRewards?(): void;
 }
 
-/** Shorten an E-address for display: first 8 … last 6. */
+/** Shorten an address for display: first 8 … last 6. */
 function shortAddr(address: string): string {
   return address.length > 16 ? `${address.slice(0, 8)}…${address.slice(-6)}` : address;
 }
@@ -35,7 +36,7 @@ function shortAddr(address: string): string {
 /** A pending confirm action: join a specific pool, or leave the current pool. */
 type PendingAction = { kind: 'join'; pool: PoolInfo } | { kind: 'leave' };
 
-export function LiveStaking({ onBack }: LiveStakingProps) {
+export function LiveStaking({ onBack, onRewards }: LiveStakingProps) {
   const staking = useLiveStore((s) => s.staking);
   const refreshStaking = useLiveStore((s) => s.refreshStaking);
   const joinPool = useLiveStore((s) => s.joinPool);
@@ -54,12 +55,13 @@ export function LiveStaking({ onBack }: LiveStakingProps) {
 
   const { pools, addressStatuses, loading, submitting, error, loaded } = staking;
 
-  // Total SATORIEVR balance across the wallet — joining is impossible at 0 (the
+  // Total SATORI balance across the wallet — joining is impossible at 0 (the
   // user has nothing to delegate); leaving stays possible regardless (they may
   // have spent it after joining and still want to unregister).
-  const satoriRow = assets.find((a) => a.name === 'SATORIEVR');
+  const satoriRow = assets.find((a) => a.name === 'SATORI');
   const satoriBalance = satoriRow ? amountToNumber(satoriRow.amountBase, satoriRow.scale) : 0;
-  const canJoin = satoriBalance > 0;
+  const statusUnknown = addressStatuses.some((a) => a.unknown);
+  const canJoin = satoriBalance > 0 && !statusUnknown;
 
   // Distinct pool addresses our held addresses are currently registered with.
   const stakedPools = useMemo(
@@ -68,7 +70,6 @@ export function LiveStaking({ onBack }: LiveStakingProps) {
   );
   const anyStaked = stakedPools.length > 0;
   const mixed = stakedPools.length > 1 || (anyStaked && addressStatuses.some((a) => !a.poolAddress));
-  const holdsSatori = addressStatuses.length > 0;
 
   // Resolve a pool address to its alias (for the status card) when we know it.
   const aliasFor = (poolAddress: string): string | null =>
@@ -119,7 +120,7 @@ export function LiveStaking({ onBack }: LiveStakingProps) {
       {pending.kind === 'join' ? (
         <div style={{ fontSize: 12.5, lineHeight: 1.55 }}>
           <p style={{ marginTop: 0 }}>
-            Register your SATORIEVR address{addressStatuses.length > 1 ? 'es' : ''} as a lender of:
+            Register your SATORI address{addressStatuses.length > 1 ? 'es' : ''} as a lender of:
           </p>
           <div className="card" style={{ padding: 10, margin: '10px 0' }}>
             <div style={{ fontWeight: 600 }}>{pending.pool.alias || 'Unnamed pool'}</div>
@@ -137,20 +138,19 @@ export function LiveStaking({ onBack }: LiveStakingProps) {
             </p>
           )}
           <p className="text-dim" style={{ marginBottom: 0 }}>
-            No funds move. Your SATORIEVR stays in your wallet. This only registers your address on
-            the Satori network, using a signature made locally. No EVR fee: nothing is broadcast
-            on-chain.
+            No funds move. Your SATORI stays in your wallet. This only registers your address on
+            the Satori network, using a signature made locally. No fee: nothing is sent on-chain.
           </p>
         </div>
       ) : (
         <div style={{ fontSize: 12.5, lineHeight: 1.55 }}>
           <p style={{ marginTop: 0 }}>
-            Deregister your SATORIEVR address{addressStatuses.length > 1 ? 'es' : ''} from
+            Deregister your SATORI address{addressStatuses.length > 1 ? 'es' : ''} from
             {stakedPools.length === 1 ? ` ${aliasFor(stakedPools[0]) || shortAddr(stakedPools[0])}` : ' your pool'}.
           </p>
           <p className="text-dim" style={{ marginBottom: 0 }}>
-            No funds move. Your SATORIEVR stays in your wallet. This only removes your address as a
-            pool lender on the Satori network. No EVR fee: nothing is broadcast on-chain.
+            No funds move. Your SATORI stays in your wallet. This only removes your address as a
+            pool lender on the Satori network. No fee: nothing is sent on-chain.
           </p>
         </div>
       )}
@@ -167,7 +167,7 @@ export function LiveStaking({ onBack }: LiveStakingProps) {
         <button type="button" className="icon-btn" onClick={onBack} aria-label="Back">
           <ChevronLeft size={20} />
         </button>
-        <h2>Stake SATORIEVR</h2>
+        <h2>Stake SATORI</h2>
         <span className="header-slot">
           <SyncStatusPill compact />
           <button
@@ -206,13 +206,6 @@ export function LiveStaking({ onBack }: LiveStakingProps) {
             <div className="skeleton" style={{ height: 52, borderRadius: 12 }} />
             <div className="skeleton" style={{ height: 52, borderRadius: 12 }} />
           </div>
-        ) : loaded && !holdsSatori ? (
-          // Empty state: no SATORIEVR held anywhere.
-          <EmptyState
-            icon={<Landmark size={20} />}
-            title="No SATORIEVR to stake"
-            description="You need SATORIEVR in this wallet to stake. Receive some SATORIEVR, then come back here to delegate it to a pool."
-          />
         ) : (
           <>
             {/* Status card. */}
@@ -296,16 +289,31 @@ export function LiveStaking({ onBack }: LiveStakingProps) {
                 <>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <Landmark size={16} />
-                    <span style={{ fontWeight: 600, fontSize: 13 }}>Not staked</span>
+                    <span style={{ fontWeight: 600, fontSize: 13 }} data-testid="staking-status-title">
+                      {statusUnknown ? 'Pool unknown' : 'Not staked'}
+                    </span>
                   </div>
                   <p className="text-dim" style={{ fontSize: 12, lineHeight: 1.55, marginBottom: 0 }}>
-                    Staking keeps your SATORIEVR in your wallet. Your address is registered with a
-                    pool on the Satori network. Pick a pool below to start. No EVR fee: nothing is
-                    broadcast on-chain.
+                    {statusUnknown
+                      ? 'The Satori server did not say which pool this address is in, if any.'
+                      : 'Staking keeps your SATORI in your wallet. Your address is registered with a pool on the Satori network. Pick a pool below to start. No fee: nothing is sent on-chain.'}
                   </p>
                 </>
               )}
             </div>
+
+            {onRewards && (
+              <Button
+                variant="secondary"
+                block
+                size="sm"
+                onClick={onRewards}
+                data-testid="staking-rewards"
+                style={{ marginBottom: 16 }}
+              >
+                Claim rewards
+              </Button>
+            )}
 
             {/* Pool list. */}
             <div className="section-label">Open pools</div>
@@ -317,14 +325,14 @@ export function LiveStaking({ onBack }: LiveStakingProps) {
               </span>
             </div>
 
-            {!canJoin && pools.length > 0 && (
+            {satoriBalance <= 0 && pools.length > 0 && (
               <div
                 className="banner warning"
                 data-testid="staking-zero-balance-note"
                 style={{ alignItems: 'flex-start', marginBottom: 10 }}
               >
                 <AlertTriangle size={14} />
-                <span style={{ fontSize: 11.5 }}>You need SATORIEVR to stake.</span>
+                <span style={{ fontSize: 11.5 }}>You need SATORI to stake.</span>
               </div>
             )}
 
@@ -394,7 +402,7 @@ export function LiveStaking({ onBack }: LiveStakingProps) {
                                   style={{ fontSize: 9.5, whiteSpace: 'nowrap' }}
                                   data-testid={`staking-join-note-${pool.address.slice(0, 8)}`}
                                 >
-                                  Need SATORIEVR
+                                  Need SATORI
                                 </span>
                               )}
                             </div>

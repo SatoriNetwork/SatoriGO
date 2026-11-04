@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isLegacyAsset, getAssetNote, ASSET_NOTES } from './assetNotes';
+import { isLegacyAsset, getAssetNote, pricedTickerFor, ASSET_NOTES } from './assetNotes';
 
 describe('isLegacyAsset', () => {
   it('is true for the exact legacy asset name SATORI', () => {
@@ -43,6 +43,19 @@ describe('isLegacyAsset', () => {
     expect(isLegacyAsset('SATORI', 'RVN')).toBe(false);
     // SATORIEVR is not a normal RVN asset name but still never "legacy" anywhere.
     expect(isLegacyAsset('SATORIEVR', 'RVN')).toBe(false);
+  });
+});
+
+describe('pricedTickerFor', () => {
+  it('prices the Base SATORI token at the SATORIEVR quote only when it is the official contract', () => {
+    expect(pricedTickerFor('SATORI', false, true)).toBe('SATORIEVR');
+    expect(pricedTickerFor('SATORI', false, false)).toBeNull();
+  });
+
+  it('keeps the chain coin and SATORIEVR, and never prices another token by name', () => {
+    expect(pricedTickerFor('ETH', true, false)).toBe('ETH');
+    expect(pricedTickerFor('SATORIEVR', false, false)).toBe('SATORIEVR');
+    expect(pricedTickerFor('BTC', false, true)).toBeNull();
   });
 });
 

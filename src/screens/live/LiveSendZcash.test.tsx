@@ -210,6 +210,29 @@ describe('LiveSendZcash', () => {
     expect(screen.getByTestId('live-zec-broadcast')).not.toBeDisabled();
   });
 
+  it('a double click while the password is being checked sends once', async () => {
+    hoisted.state.requirePasswordToSend = true;
+    let release: (ok: boolean) => void = () => {};
+    const passwordChecked = new Promise<boolean>((resolve) => { release = resolve; });
+    hoisted.state.verifyPassword = vi.fn(() => passwordChecked);
+    zcashSendMock.build.mockResolvedValue(plan);
+    zcashSendMock.broadcast.mockResolvedValue({ txid: 'the-real-txid' });
+    renderScreen();
+    fireEvent.change(screen.getByTestId('live-zec-send-to'), { target: { value: ADDR } });
+    fireEvent.change(screen.getByTestId('live-zec-send-amount'), { target: { value: '1' } });
+    fireEvent.click(screen.getByTestId('live-zec-send-submit'));
+    await waitFor(() => expect(screen.getByTestId('live-zec-send-password')).toBeTruthy());
+    fireEvent.click(screen.getByTestId('live-zec-arm-checkbox'));
+    fireEvent.change(screen.getByTestId('live-zec-send-password'), { target: { value: 'right' } });
+    fireEvent.click(screen.getByTestId('live-zec-broadcast'));
+    fireEvent.click(screen.getByTestId('live-zec-broadcast'));
+    release(true);
+    await waitFor(() => expect(zcashSendMock.broadcast).toHaveBeenCalled());
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(zcashSendMock.broadcast).toHaveBeenCalledTimes(1);
+    expect(hoisted.state.verifyPassword).toHaveBeenCalledTimes(1);
+  });
+
   it('asks for the wallet password before broadcasting when requirePasswordToSend is on', async () => {
     hoisted.state.requirePasswordToSend = true;
     hoisted.state.verifyPassword = vi.fn(async () => false);

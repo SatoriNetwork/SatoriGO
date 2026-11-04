@@ -124,3 +124,16 @@ export function assessRecipient(recipient: string, known: RecipientKnowledge): R
 
   return { firstTime: true, lookalikeOf };
 }
+
+/**
+ * Whether an eth_getCode answer means the address is a contract. '0x' is the
+ * canonical empty answer and '0x0' / '0x00' are what a sloppier node writes for
+ * it. EIP-7702 code (0xef0100 + a 20-byte address) is an ordinary wallet that
+ * still has its private key and has delegated to a contract, which is what
+ * MetaMask's smart account upgrade does: nothing sent there is stuck.
+ */
+export function evmCodeIsContract(code: string): boolean {
+  const body = code.replace(/^0x/i, '');
+  if (/^ef0100[0-9a-f]{40}$/i.test(body)) return false;
+  return /[^0]/.test(body);
+}

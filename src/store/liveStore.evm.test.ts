@@ -65,10 +65,11 @@ function fakeNodes() {
               : '0x0',
           );
         case 'eth_call': {
-          const call = req.params[0] as { data: string };
+          const call = req.params[0] as { data: string; to?: string };
+          const isSatori = call.to?.toLowerCase() === '0xd0a5bff2789230b0fb1bd989fc7ce7084c947e17';
           if (call.data.startsWith('0x70a08231')) return ok('0x' + word('bc614e'));
-          if (call.data.startsWith('0x313ce567')) return ok('0x' + word(isBase ? '6' : '12'));
-          if (call.data.startsWith('0x95d89b41')) return ok(abiString(isBase ? 'USDC' : 'USDT'));
+          if (call.data.startsWith('0x313ce567')) return ok('0x' + word(isSatori ? '12' : isBase ? '6' : '12'));
+          if (call.data.startsWith('0x95d89b41')) return ok(abiString(isSatori ? 'SATORI' : isBase ? 'USDC' : 'USDT'));
           return { jsonrpc: '2.0', id: req.id, error: { code: 3, message: 'execution reverted' } };
         }
         default:
@@ -154,11 +155,11 @@ describe('EVM chains in the store', () => {
     expect(mod.chainDisplayName()).toBe('Base');
     expect(mod.isNativeAssetId('eth')).toBe(true);
     expect(mod.assetsSupported()).toBe(true);
-    expect(mod.stakingSupported()).toBe(false);
+    expect(mod.stakingSupported()).toBe(true);
     expect(mod.activeEvmChain(state())?.chainId).toBe(8453);
     // The refresh path read balances over JSON-RPC (Base) for this address.
     await settle(150);
-    expect(state().assets.map((a) => `${a.name}=${a.amountBase}`)).toEqual(['ETH=1000000000000000000', 'USDC=12345678']);
+    expect(state().assets.map((a) => `${a.name}=${a.amountBase}`)).toEqual(['ETH=1000000000000000000', 'USDC=12345678', 'SATORI=12345678']);
     expect(state().offline).toBe(false);
   }, 30_000);
 

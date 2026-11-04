@@ -2,7 +2,8 @@
 // Mounted directly by App.tsx once display settings + branding have loaded.
 
 import { Suspense, lazy, useEffect, useState } from 'react';
-import { useLiveStore, computeDisplayedAssets, stakingSupported, evmStakingSupported, nativeTickerFor } from '../../store/liveStore';
+import { useLiveStore, activeEvmChain, computeDisplayedAssets, stakingSupported, evmStakingSupported, nativeTickerFor } from '../../store/liveStore';
+import { satoriRowIsOfficial } from '../../store/satoriRewards';
 import { LiveOnboarding } from './LiveOnboarding';
 import { LiveLock } from './LiveLock';
 import { LiveAppLock } from './LiveAppLock';
@@ -16,6 +17,7 @@ import { LiveSettings } from './LiveSettings';
 import { LiveTxDetail } from './LiveTxDetail';
 import { LiveAddressBook } from './LiveAddressBook';
 import { LiveStaking } from './LiveStaking';
+import { LiveRewards } from './LiveRewards';
 import { LiveStakeEvm } from './LiveStakeEvm';
 // The Zcash and Bittensor screens are STATIC imports: neither engine has a
 // build flag (their design notes §13), so nothing about them is code-split.
@@ -72,6 +74,7 @@ type LiveSubView =
   // screen on one route, reached from the asset detail and (on a chain with
   // native staking) from the Home action row.
   | { name: 'staking'; from?: 'home' }
+  | { name: 'rewards'; from?: 'staking' | 'home' }
   | { name: 'tx'; txid: string }
   // "Import Monero wallet" (25 words plus a restore height), reached from
   // Settings > Wallets on a ready wallet; the first-run entry lives in
@@ -80,6 +83,7 @@ type LiveSubView =
 
 export function LiveApp() {
   const phase = useLiveStore((s) => s.phase);
+  const satoriOfficial = useLiveStore((s) => satoriRowIsOfficial(activeEvmChain(s)?.defaultTokens, s.evmTokens));
   const syncing = useLiveStore((s) => s.syncing);
   const init = useLiveStore((s) => s.init);
   const refresh = useLiveStore((s) => s.refresh);
@@ -301,6 +305,7 @@ export function LiveApp() {
       // check), and this route degrades to home on a chain that has neither
       // kind of staking, so a stale navigation cannot dead-end.
       onStake={() => setSubView({ name: 'staking', from: 'home' })}
+      onRewards={() => setSubView({ name: 'rewards', from: 'home' })}
     />
   );
 
@@ -378,7 +383,7 @@ export function LiveApp() {
   if (subView.name === 'staking') {
     // TWO staking screens, one route, chosen by what the ACTIVE CHAIN actually
     // has. Neither is a chain-name check:
-    //   - stakingSupported()    Satori POOL staking (SATORIEVR on Evrmore), the
+    //   - stakingSupported()    Satori POOL staking (SATORI on Base), the
     //                           HTTP registration flow in LiveStaking.
     //   - evmStakingSupported() NATIVE staking on an EVM chain whose registry
     //                           row carries `staking` (Epix, cosmos/evm
@@ -399,7 +404,22 @@ export function LiveApp() {
     if (!stakingSupported()) return wrap(home);
     return wrap(
       <LiveStaking
-        onBack={() => setSubView(fromHome ? { name: 'home' } : { name: 'asset', asset: 'SATORIEVR' })}
+        onBack={() => setSubView(fromHome ? { name: 'home' } : { name: 'asset', asset: 'SATORI' })}
+        onRewards={() => setSubView({ name: 'rewards', from: 'staking' })}
+      />,
+    );
+  }
+
+  if (subView.name === 'rewards') {
+    if (!stakingSupported()) return wrap(home);
+    const backTo = subView.from;
+    return wrap(
+      <LiveRewards
+        onBack={() =>
+          setSubView(
+            backTo === 'home' ? { name: 'home' } : backTo === 'staking' ? { name: 'staking' } : { name: 'asset', asset: 'SATORI' },
+          )
+        }
       />,
     );
   }
@@ -415,14 +435,15 @@ export function LiveApp() {
     if (!selected) return wrap(home);
     // Which asset carries a Stake action depends on WHICH staking the chain
     // has, and the two answers differ:
-    //   - Satori pool staking is a SATORIEVR affordance (Evrmore only);
+    //   - Satori pool staking is a SATORI affordance (Base only);
     //   - native staking stakes the chain's own coin, so it belongs on the
     //     native asset (EPIX on Epix), never on a token row.
     // Both go through the store's own chain checks, so this can never drift
     // from the store's refusal, and a chain with neither shows no Stake button.
+    const selectedIsSatori = selected.name === 'SATORI' && stakingSupported() && satoriOfficial;
     const canStake = evmStakingSupported()
       ? selected.isNative && selected.name === nativeTickerFor()
-      : selected.name === 'SATORIEVR' && stakingSupported();
+      : selectedIsSatori;
     return wrap(
       <LiveAssetDetail
         asset={selected}
@@ -431,6 +452,7 @@ export function LiveApp() {
         onSend={() => setSubView({ name: 'send', asset: selected.name })}
         onSelectTx={(txid) => setSubView({ name: 'tx', txid })}
         onStake={canStake ? () => setSubView({ name: 'staking' }) : undefined}
+        onRewards={selectedIsSatori ? () => setSubView({ name: 'rewards' }) : undefined}
       />,
     );
   }

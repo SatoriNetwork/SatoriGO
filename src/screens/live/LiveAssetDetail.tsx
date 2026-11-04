@@ -3,14 +3,16 @@
 // Sending is enabled for EVR and every issued asset (asset transfers pay an EVR fee).
 
 import { useMemo, useState } from 'react';
-import { ArrowDownLeft, ArrowUpRight, ChevronLeft, Info, Landmark, Trash2 } from 'lucide-react';
+import { ArrowDownLeft, ArrowUpRight, ChevronLeft, Gift, Info, Landmark, Trash2, Lock } from 'lucide-react';
 import { ActivityPager } from '../../components/ActivityPager';
 import { TokenIcon } from '../../components/BrandLogo';
 import { UntrustedTokenBanner } from '../../components/UntrustedTokenBadge';
 import { SyncStatusPill } from '../../components/SyncStatusPill';
-import { formatAmount } from '../../services/chain/amounts';
+import { formatAmount, formatListAmount } from '../../services/chain/amounts';
 import { EmptyState } from '../../components/EmptyState';
 import { useLiveStore, isRemovableAsset, nativeTickerFor, chainDisplayName } from '../../store/liveStore';
+import { allPendingSatoriRewards, satoriClaimRowTitle, SATORI_CLAIM_TITLE } from '../../store/satoriRewards';
+import { satoriLockText } from '../../store/evmSend';
 import { isLegacyAsset, getAssetNote } from '../../services/assetNotes';
 import { displaySymbol } from '../../services/displaySymbol';
 import { ACTIVITY_PER_PAGE, paginate } from '../../services/activityFeed';
@@ -25,11 +27,13 @@ interface LiveAssetDetailProps {
   onSend(): void;
   onSelectTx(txid: string): void;
   /** Open the staking screen for this chain. Provided ONLY for the asset that
-   *  can be staked on the ACTIVE chain (SATORIEVR for Satori pool staking on
-   *  Evrmore; the native coin on a chain with native staking, e.g. EPIX), and
+   *  can be staked on the ACTIVE chain (SATORI for Satori pool staking on
+   *  Base; the native coin on a chain with native staking, e.g. EPIX), and
    *  LiveApp is what decides which. When absent, the Stake action is not
    *  shown, and its absence is the whole gate. */
   onStake?(): void;
+  /** Open the Satori reward claims. Provided only for SATORI on Base. */
+  onRewards?(): void;
 }
 
 /** Human sub-label for an asset row. The chain's own displayName is used rather
@@ -112,7 +116,7 @@ function AssetTxRow({
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontSize: 12.5, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6 }}>
           <span {...(staking ? { 'data-testid': `live-tx-staking-${tx.txid}` } : {})}>
-            {staking ? staking.title : isIn ? 'Received' : 'Sent'}
+            {staking ? staking.title : satoriClaimRowTitle(tx) ?? (isIn ? 'Received' : 'Sent')}
           </span>
           {tx.status === 'pending' && (
             <span className="chip warning" style={{ fontSize: 9, padding: '1px 5px' }}>pending</span>
@@ -141,7 +145,7 @@ function AssetTxRow({
   );
 }
 
-export function LiveAssetDetail({ asset, onBack, onReceive, onSend, onSelectTx, onStake }: LiveAssetDetailProps) {
+export function LiveAssetDetail({ asset, onBack, onReceive, onSend, onSelectTx, onStake, onRewards }: LiveAssetDetailProps) {
   const removeAsset = useLiveStore((s) => s.removeAsset);
   const txs = useLiveStore((s) => s.txs);
   const stakingStatuses = useLiveStore((s) => s.staking.addressStatuses);
@@ -155,7 +159,12 @@ export function LiveAssetDetail({ asset, onBack, onReceive, onSend, onSelectTx, 
   // re-checking the asset name here would hardcode Satori pool staking and hide
   // the action on every other kind, which is exactly what it used to do.
   const canStake = !!onStake;
-  // "Staked" header chip when any SATORIEVR-holding address is registered with a
+  const address = useLiveStore((s) => s.address);
+  const rewardsState = useLiveStore((s) => s.satoriRewards);
+  const pendingRewards = onRewards && address ? allPendingSatoriRewards(rewardsState, address) : null;
+  const lockText =
+    onRewards && rewardsState.snapshot?.address === address ? satoriLockText(rewardsState.snapshot.lock) : null;
+  // "Staked" header chip when the SATORI address is registered with a
   // pool. Nice-to-have; only meaningful once the staking screen has fetched status.
   const isStaked = canStake && stakingStatuses.some((s) => s.poolAddress);
 
@@ -239,6 +248,62 @@ export function LiveAssetDetail({ asset, onBack, onReceive, onSend, onSelectTx, 
             )}
           </div>
           <div className="text-dim" style={{ fontSize: 12 }}>{assetSubLabel(asset, nativeTicker, chainDisplayName())}</div>
+          {lockText && (
+            <div
+              data-testid="live-asset-lock"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 5,
+                padding: '6px 12px',
+                borderRadius: 10,
+                maxWidth: '100%',
+                color: 'var(--warning)',
+                background: 'var(--warning-bg)',
+                fontSize: 11.5,
+                fontWeight: 600,
+              }}
+            >
+              <Lock size={13} aria-hidden="true" style={{ flexShrink: 0 }} />
+              {lockText}
+            </div>
+          )}
+          {pendingRewards && (
+            <button
+              type="button"
+              onClick={onRewards}
+              data-testid="live-asset-rewards-summary"
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                gap: 2,
+                padding: '6px 12px',
+                borderRadius: 10,
+                maxWidth: '100%',
+                color: 'var(--warning)',
+                background: 'var(--warning-bg)',
+                fontSize: 12,
+                fontWeight: 600,
+              }}
+            >
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                <Gift size={13} aria-hidden="true" />
+                {pendingRewards.isLowerBound ? 'At least ' : ''}
+                {formatListAmount(pendingRewards.totalBase, asset.scale)} SATORI to claim
+              </span>
+              {pendingRewards.parts.map((part) => (
+                <span key={part.kind} style={{ fontSize: 10.5, fontWeight: 500 }}>
+                  {SATORI_CLAIM_TITLE[part.kind]}: {formatListAmount(part.amountBase, asset.scale)}
+                </span>
+              ))}
+              {pendingRewards.evrKeyBase > 0n && (
+                <span style={{ fontSize: 10.5, fontWeight: 500 }}>
+                  Old Evrmore key: {formatListAmount(pendingRewards.evrKeyBase, asset.scale)}
+                </span>
+              )}
+            </button>
+          )}
           <div
             className="hero-value"
             data-testid={`live-asset-detail-balance-${asset.name}`}
@@ -292,6 +357,22 @@ export function LiveAssetDetail({ asset, onBack, onReceive, onSend, onSelectTx, 
                 <Landmark size={20} />
               </div>
               Stake
+            </button>
+          )}
+          {onRewards && (
+            <button
+              type="button"
+              className="action-round"
+              onClick={onRewards}
+              data-testid="live-rewards-button"
+            >
+              <div className="action-circle" style={{ position: 'relative' }}>
+                <Gift size={20} />
+                {pendingRewards && (
+                  <span className="reward-dot reward-pulse" data-testid="live-rewards-button-dot" aria-label="Rewards to claim" />
+                )}
+              </div>
+              Rewards
             </button>
           )}
         </div>

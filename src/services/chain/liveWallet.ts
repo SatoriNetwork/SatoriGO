@@ -1625,11 +1625,12 @@ export class LiveWalletService implements WalletEngine {
   }
 
   /**
-   * Import a raw EVM private key (64 hex chars, optional 0x: what MetaMask
-   * exports) as a NEW single-address EVM account, make it active and unlock it.
-   * A WIF is refused: it is UTXO key material and importing it here would show
-   * an address nobody else derives for that key. The vault stores the canonical
-   * bare hex so unlock() parses it the same way it parses a seed-wallet's key.
+   * Import an EVM private key as a NEW single-address EVM account, make it active
+   * and unlock it. Raw hex (64 chars, optional 0x: what MetaMask exports) or a WIF:
+   * a WIF wraps the same secp256k1 key, so an Evrmore key lands on the Base address
+   * of that key, the one Satori keeps its rewards for (owner's call, 2026-11-04).
+   * The vault stores the canonical bare hex so unlock() parses it the same way it
+   * parses a seed-wallet's key.
    */
   private async importEvmPrivateKey(
     privateKeyInput: string,
@@ -1639,11 +1640,7 @@ export class LiveWalletService implements WalletEngine {
     sealing?: SessionKeySealing,
   ): Promise<void> {
     const evm = await this.requireEvm();
-    const trimmed = privateKeyInput.trim();
-    if (!/^(0x)?[0-9a-fA-F]{64}$/.test(trimmed)) {
-      throw new Error('An EVM private key is 64 hex characters (optionally 0x-prefixed).');
-    }
-    const { privateKey } = parsePrivateKey(trimmed);
+    const { privateKey } = parsePrivateKey(privateKeyInput);
     const key = evm.privateKeyToEvmKey(privateKey);
     const chainKey = evmChainKey && evm.isEvmChainKey(evmChainKey) ? evmChainKey : evm.DEFAULT_EVM_CHAIN_KEY;
     const sessionSealed = sealing === SESSION_KEY_SEALING;
@@ -4335,6 +4332,53 @@ export class LiveWalletService implements WalletEngine {
     } finally {
       priv.fill(0);
     }
+  }
+
+  /** The Base address of the Evrmore key at this account's index, or null where
+   *  there is no separate one: an imported key IS the same key on both chains. */
+  satoriEvrKeyAddress(): string | null {
+    if (this.activeFamily !== 'evm' || this.activeKind === 'pk') return null;
+    const key = this.evmModules().deriveEvrmoreKeyAsEvm(this.requireSeed(), this.activeHdIndex);
+    try {
+      return key.address;
+    } finally {
+      key.privateKey.fill(0);
+    }
+  }
+
+  /** Sign with that Evrmore key instead of the account's own, for Satori claims
+   *  from its address. Derived for this call and zeroed before it returns. */
+  signEvmTransactionWithEvrKey(request: import('./evm').EvmTxRequest): import('./evm').SignedEvmTx {
+    if (this.activeFamily !== 'evm' || this.activeKind === 'pk') throw new Error('no-evrmore-key');
+    const evm = this.evmModules();
+    const key = evm.deriveEvrmoreKeyAsEvm(this.requireSeed(), this.activeHdIndex);
+    try {
+      return evm.signTx(request, key.privateKey);
+    } finally {
+      key.privateKey.fill(0);
+    }
+  }
+
+  /** The active EVM account as a Satori pool signer: its address, and a signer
+   *  that derives the key per call, signs EIP-191 and zeroes it. No key leaves
+   *  this class. Requires an unlocked EVM wallet. */
+  satoriPoolSigner(): { address: string; sign(message: string): { aliasPubkey: string; signature: string } } {
+    if (this.activeFamily !== 'evm') throw new Error('not-an-evm-wallet');
+    const evm = this.evmModules();
+    return {
+      address: this.evmAddress(),
+      sign: (message) => {
+        const priv = this.evmPrivateKey();
+        try {
+          return {
+            aliasPubkey: bytesToHex(evm.compressedPublicKey(priv)),
+            signature: evm.personalSign(message, priv),
+          };
+        } finally {
+          priv.fill(0);
+        }
+      },
+    };
   }
 
   /** Sign an arbitrary message with the ACTIVE wallet's PRIMARY key (index 0) in

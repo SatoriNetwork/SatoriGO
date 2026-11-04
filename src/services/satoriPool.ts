@@ -1,26 +1,24 @@
-// Satori pool staking (delegation) — HTTP client for the Satori central server.
+// Satori pool staking (delegation) on Base: HTTP client for the Satori central server.
 //
 // This is NOT chain code: staking on Satori is NOT an on-chain transaction. The
-// user's SATORIEVR tokens stay put on their own address; that address is simply
+// user's SATORI stays put on their own Base address; that address is simply
 // registered as a "lender" of a chosen pool on Satori's central server
 // (network.satorinet.io). Nothing here builds, signs, or broadcasts a tx.
 //
-// Authenticating a join/leave uses a fresh server-issued challenge signed with
-// the Evrmore `signmessage` format — the SAME format src/services/chain/message.ts
-// (`signMessageWithKey`) already produces, which the Satori backend verifies with
-// python-evrmorelib. We REUSE that; no crypto is added here.
+// Same exchange as the neuron (satori-lite web/routes.py, satorilib server.py),
+// verified live with a throwaway key on 2026-11-04. A key the server has not seen
+// logs in as a peer of its own:
+//   POST   /api/v1/auth/login     headers alias-pubkey, message, signature (EIP-191)
+//                                 -> { access_token, expires_in, ... }
+//   GET    /api/v1/pool/open      -> { "pools": [{address, alias|null, commission}] }
+//   GET    /api/v1/lender/status?wallet_address=0x.. -> { pool_address, is_pool, ... }
+//   POST   /api/v1/lender/lend    Authorization: Bearer, { pool_address, source }
+//   DELETE /api/v1/lender/lend    Authorization: Bearer
 //
-// Response shapes verified against the Magic Flutter reference AND re-verified
-// live via scripts/pool-api-probe.ts (2026-07-13):
-//   GET  /api/v1/pool/open            -> { "pools": [{address, alias|null, commission}] }
-//   GET  /api/v1/auth/challenge?t=..  -> { "challenge": "<uuid>" }
-//   GET  /api/v1/lender/status?..     -> { pool_address: string|null, is_pool?: bool, ... }
-//   POST /api/v1/lender/lend          -> HTTP <400 = joined  (auth headers + body)
-//   DELETE /api/v1/lender/lend        -> HTTP <400 = left    (auth headers, no body)
+// The access token lives for one join or leave and is never stored.
 //
-// SECURITY: never log private keys, public keys, signatures, or challenges.
+// SECURITY: never log private keys, public keys, signatures, or tokens.
 
-import { signMessageWithKey } from './chain/message';
 import { paginate } from './activityFeed';
 
 /** Base URL of the Satori central server (network.satorinet.io — a DIFFERENT
@@ -29,6 +27,7 @@ export const SATORI_NETWORK_BASE = 'https://network.satorinet.io';
 
 /** How long any single request may take before we abort it (offline guard). */
 const REQUEST_TIMEOUT_MS = 15_000;
+const AUDIT_BODY_TIMEOUT_MS = 45_000;
 
 /** The `source` tag the server records for a lend request (mirrors Magic's tag,
  *  branded for this client). */
@@ -53,17 +52,9 @@ export interface LenderStatus {
   isPool?: boolean;
 }
 
-/** The minimal key material a join/leave needs: the private key to sign the
- *  challenge and the compressed public key sent as the `wallet-pubkey` header.
- *  (Structurally compatible with keys.DerivedKey.) */
-export interface PoolSigningKey {
-  privateKey: Uint8Array;
-  publicKey: Uint8Array;
-  /** Compression flag; defaults to true (all our wallets use compressed keys). */
-  compressed?: boolean;
-  /** The address this key controls — used only to label per-address results. */
-  address?: string;
-}
+/** Signs the login message with the active account's key, which stays in the
+ *  wallet service: only the compressed public key (hex) and the signature leave. */
+export type PoolSigner = (message: string) => { aliasPubkey: string; signature: string };
 
 /** Thrown when the network could not be reached (offline, timeout, DNS, CORS).
  *  Distinct from SatoriServerError so the UI can say "check your connection"
@@ -85,14 +76,6 @@ export class SatoriServerError extends Error {
     this.name = 'SatoriServerError';
     this.status = status;
   }
-}
-
-/** hex-encode a byte array (lowercase, no prefix). Local so this module pulls in
- *  no extra dependency. */
-function toHex(bytes: Uint8Array): string {
-  let s = '';
-  for (const b of bytes) s += b.toString(16).padStart(2, '0');
-  return s;
 }
 
 /** GET/POST/DELETE with a hard timeout. Maps abort/network faults to
@@ -238,67 +221,6 @@ export function paginatePools(pools: PoolInfo[], page: number, pageSize: number 
 }
 
 /**
- * The exact shape of a signable challenge: one bare UUID (8-4-4-4-12 hex),
- * which is what the live server issues (verified against the Magic Flutter
- * reference AND live via scripts/pool-api-probe.ts — see the header block).
- *
- * WHY SHAPE-VALIDATE INSTEAD OF SHOWING THE CHALLENGE TO THE USER: the staking
- * flow signs this server-supplied string sight unseen, so a compromised or
- * MITM'd server could substitute a message that MEANS something elsewhere
- * (another service's login challenge, an "I authorize..." statement, a txid to
- * confirm a withdrawal) and replay the signature there. A confirmation UI would
- * not fix that: the legitimate challenge is an opaque machine nonce, so a user
- * shown "2f1a…-…" has no basis to approve or reject it — the dialog would only
- * train click-through. What a reviewing user WOULD catch is the challenge not
- * looking like a nonce, and this regex checks exactly that, mechanically:
- * nothing human-readable, nothing structured (SIWE-style multi-line prompts),
- * and no bare hex payloads (a 64-char txid fails the fixed 8-4-4-4-12 layout)
- * can ever reach the signer. Deliberately STRICT (fail closed): if the server
- * ever changes its nonce format, staking fails loudly with a clear error and
- * the fix is a reviewed edit here — never silently signing whatever arrives.
- *
- * Residual risk, stated honestly: another service whose challenges are ALSO
- * bare UUIDs verified under the same Evrmore signmessage scheme cannot be
- * distinguished by shape. Preventing that replay needs the SERVER to bind its
- * challenges to itself (e.g. an audience/domain field); no wallet-side check
- * on an unbound nonce can do it.
- */
-const CHALLENGE_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-/**
- * Fetch a fresh authentication challenge (a nonce to sign). Cache-busted with a
- * timestamp query param + no-store headers so each join/leave signs a unique
- * challenge (the server will not accept a replayed one). Refuses (throws) any
- * challenge that is not nonce-shaped — see CHALLENGE_SHAPE for why this is the
- * blind-signing defence.
- */
-export async function getChallenge(): Promise<string> {
-  const url = `${SATORI_NETWORK_BASE}/api/v1/auth/challenge?t=${Date.now()}`;
-  const res = await requestWithTimeout(url, {
-    method: 'GET',
-    headers: {
-      'Cache-Control': 'no-cache, no-store, must-revalidate',
-      Pragma: 'no-cache',
-    },
-  });
-  const json = await parseJsonOk(res, 'Getting challenge');
-  const challenge = (json as Record<string, unknown>)?.challenge;
-  if (typeof challenge !== 'string' || !challenge) {
-    throw new SatoriServerError('Getting challenge: no challenge in response.', res.status);
-  }
-  // Trust boundary: this is the ONLY place a challenge enters the wallet, and
-  // buildAuthHeaders (the only signer) takes its challenge exclusively from
-  // here, so validating once at this boundary covers every signing path.
-  if (!CHALLENGE_SHAPE.test(challenge)) {
-    throw new SatoriServerError(
-      'Getting challenge: the server sent a challenge that does not look like a nonce, so it was not signed.',
-      res.status,
-    );
-  }
-  return challenge;
-}
-
-/**
  * Read whether `address` is currently registered as a lender (and to which pool).
  * A null `poolAddress` means the address lends to no pool.
  */
@@ -312,108 +234,116 @@ export async function getLenderStatus(address: string): Promise<LenderStatus> {
   return { poolAddress, isPool };
 }
 
-/** Build the exact auth headers the server expects for a lend/unlend request:
- *  the compressed pubkey (hex), the challenge as the signed `message`, and its
- *  base64 recoverable signature. Signs with the shared Evrmore signmessage impl.
- *  INVARIANT: `challenge` must come from getChallenge(), which shape-validates
- *  it (CHALLENGE_SHAPE) so an arbitrary foreign message can never be signed
- *  blind here. A new caller sourcing a challenge from anywhere else must apply
- *  the same validation before signing. */
-function buildAuthHeaders(challenge: string, key: PoolSigningKey): Record<string, string> {
-  const compressed = key.compressed ?? true;
-  const signature = signMessageWithKey(key.privateKey, challenge, compressed);
-  return {
-    'wallet-pubkey': toHex(key.publicKey),
-    message: challenge,
-    signature,
-  };
+/** The server's own reason for a refusal when it gave one (`detail`, e.g. a pool
+ *  closed to new lenders), so the user sees why rather than a status code. */
+async function refusalReason(res: Response): Promise<string> {
+  const text = await res.text().catch(() => '');
+  try {
+    const detail = (JSON.parse(text) as Record<string, unknown>)?.detail;
+    if (typeof detail === 'string' && detail.trim()) return ` ${detail.trim().slice(0, 160)}`;
+  } catch {
+    // Not JSON: the status code alone says enough.
+  }
+  return '';
+}
+
+/** Log in with `sign` and return the access token. The message is a timestamp of
+ *  the wallet's own making, as the neuron signs, never text a server supplied. */
+async function login(sign: PoolSigner): Promise<string> {
+  const message = String(Date.now() / 1000);
+  const { aliasPubkey, signature } = sign(message);
+  const res = await requestWithTimeout(`${SATORI_NETWORK_BASE}/api/v1/auth/login`, {
+    method: 'POST',
+    headers: { 'alias-pubkey': aliasPubkey, message, signature },
+  });
+  if (res.status >= 400) {
+    throw new SatoriServerError(`Signing in to the Satori network failed (HTTP ${res.status}).${await refusalReason(res)}`, res.status);
+  }
+  const token = ((await parseJsonOk(res, 'Signing in')) as Record<string, unknown>)?.access_token;
+  if (typeof token !== 'string' || !token) {
+    throw new SatoriServerError('Signing in: no access token in response.', res.status);
+  }
+  return token;
 }
 
 /**
- * Register `key`'s address as a lender of `poolAddress` (join/stake). Fetches a
- * FRESH challenge, signs it, and POSTs the lend request. The server handles
- * leave-then-join automatically when the address already lends elsewhere.
+ * Register the signer's address as a lender of `poolAddress` (join/stake). The
+ * server handles leave-then-join when the address already lends elsewhere.
  * Resolves on success; throws SatoriOfflineError / SatoriServerError otherwise.
  */
-export async function joinPool(poolAddress: string, key: PoolSigningKey): Promise<void> {
-  const challenge = await getChallenge();
+export async function joinPool(poolAddress: string, sign: PoolSigner): Promise<void> {
+  const token = await login(sign);
   const res = await requestWithTimeout(`${SATORI_NETWORK_BASE}/api/v1/lender/lend`, {
     method: 'POST',
-    headers: {
-      ...buildAuthHeaders(challenge, key),
-      'Content-Type': 'application/json',
-    },
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ pool_address: poolAddress, source: LEND_SOURCE }),
   });
   if (res.status >= 400) {
-    throw new SatoriServerError(`Joining the pool failed (HTTP ${res.status}).`, res.status);
+    throw new SatoriServerError(`Joining the pool failed (HTTP ${res.status}).${await refusalReason(res)}`, res.status);
   }
 }
 
-/**
- * Deregister `key`'s address as a lender (leave/unstake). Fresh challenge, signed,
- * then a DELETE with no body. Resolves on success; throws otherwise.
- */
-export async function leavePool(key: PoolSigningKey): Promise<void> {
-  const challenge = await getChallenge();
+/** Deregister the signer's address as a lender (leave/unstake). Resolves on
+ *  success; throws otherwise. */
+export async function leavePool(sign: PoolSigner): Promise<void> {
+  const token = await login(sign);
   const res = await requestWithTimeout(`${SATORI_NETWORK_BASE}/api/v1/lender/lend`, {
     method: 'DELETE',
-    headers: buildAuthHeaders(challenge, key),
+    headers: { Authorization: `Bearer ${token}` },
   });
   if (res.status >= 400) {
-    throw new SatoriServerError(`Leaving the pool failed (HTTP ${res.status}).`, res.status);
+    throw new SatoriServerError(`Leaving the pool failed (HTTP ${res.status}).${await refusalReason(res)}`, res.status);
   }
 }
 
-/** Per-address outcome of a multi-address join/leave. `ok` true = success; on
- *  failure `error` carries a short human message (never any key/signature). */
-export interface PoolAddressResult {
-  address: string;
-  ok: boolean;
-  error?: string;
+
+/** One address's place in the current reward drop. */
+export interface MerkleProofEntry {
+  /** Lifetime entitlement in wei; the contract mints the part not yet minted. */
+  amountBase: bigint;
+  proof: string[];
 }
 
-/** Short, log-safe message for a pool op failure. */
-function resultError(err: unknown): string {
-  if (err instanceof SatoriOfflineError || err instanceof SatoriServerError) return err.message;
-  return 'Unexpected error.';
-}
-
-/**
- * Join `poolAddress` for EVERY key SEQUENTIALLY (funds can sit on several derived
- * addresses; mirrors Magic's per-address registration). Each address gets its OWN
- * fresh challenge. One address failing does not abort the others — every result
- * is returned so the UI can report partial success honestly.
- */
-export async function joinPoolForKeys(
-  poolAddress: string,
-  keys: PoolSigningKey[],
-): Promise<PoolAddressResult[]> {
-  const results: PoolAddressResult[] = [];
-  for (const key of keys) {
-    const address = key.address ?? '';
-    try {
-      await joinPool(poolAddress, key);
-      results.push({ address, ok: true });
-    } catch (err) {
-      results.push({ address, ok: false, error: resultError(err) });
-    }
+/** The address's Merkle proof, or null when it is not in the current drop (404). */
+/** One UTC day's public audit file, or null when the server has none for that date. */
+export async function fetchSatoriAuditCsv(file: 'predictors' | 'stakers', date: string): Promise<string | null> {
+  const url = `${SATORI_NETWORK_BASE}/api/v1/audit/${file}?date=${encodeURIComponent(date)}`;
+  const res = await requestWithTimeout(url, { method: 'GET' });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new SatoriServerError(`Reading rewards history: HTTP ${res.status}.`, res.status);
+  // The timeout above ends with the headers; these files are large enough for a
+  // stalled body to matter, and the days behind it wait for this one.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const stalled = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new SatoriOfflineError('Could not reach the Satori network (timed out).')), AUDIT_BODY_TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([res.text(), stalled]);
+  } finally {
+    clearTimeout(timer);
   }
-  return results;
 }
 
-/** Leave the current pool for EVERY key SEQUENTIALLY (per-address challenge).
- *  One failure does not abort the rest; all results are returned. */
-export async function leavePoolForKeys(keys: PoolSigningKey[]): Promise<PoolAddressResult[]> {
-  const results: PoolAddressResult[] = [];
-  for (const key of keys) {
-    const address = key.address ?? '';
-    try {
-      await leavePool(key);
-      results.push({ address, ok: true });
-    } catch (err) {
-      results.push({ address, ok: false, error: resultError(err) });
-    }
+export async function fetchMerkleProof(address: string): Promise<MerkleProofEntry | null> {
+  const url = `${SATORI_NETWORK_BASE}/api/v1/merkle/proof/${encodeURIComponent(address)}`;
+  const res = await requestWithTimeout(url, { method: 'GET' });
+  if (res.status === 404) return null;
+  const json = await parseJsonOk(res, 'Reading rewards');
+  const { amountWei, proof } = (json ?? {}) as Record<string, unknown>;
+  if (
+    typeof amountWei !== 'string' ||
+    !/^\d+$/.test(amountWei) ||
+    !Array.isArray(proof) ||
+    proof.some((node) => typeof node !== 'string')
+  ) {
+    throw new SatoriServerError('Reading rewards: unexpected response shape.', res.status);
   }
-  return results;
+  return { amountBase: BigInt(amountWei), proof: proof as string[] };
+}
+
+/** The Base config the server currently publishes, reward contracts included. */
+export async function fetchBaseConfig(): Promise<Record<string, unknown>> {
+  const res = await requestWithTimeout(`${SATORI_NETWORK_BASE}/api/v1/base/config`, { method: 'GET' });
+  const json = await parseJsonOk(res, 'Reading the reward contracts');
+  return (json ?? {}) as Record<string, unknown>;
 }

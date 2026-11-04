@@ -13,7 +13,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 vi.mock('../../services/chain/liveWallet', () => {
   class BroadcastGatedError extends Error {}
@@ -44,6 +44,8 @@ vi.mock('../../services/chain/liveWallet', () => {
   return { LiveWalletService, BroadcastGatedError };
 });
 
+import { encodeWif } from '../../services/chain/keys';
+import { EVRMORE_MAINNET } from '../../services/chain/chainParams';
 import { LiveOnboarding } from './LiveOnboarding';
 import { useLiveStore } from '../../store/liveStore';
 import { MemoryStorageAdapter, setStorageForTests } from '../../services/storage';
@@ -108,6 +110,31 @@ describe('create form: the EVM chain row', () => {
   it('is absent from the picker when this build carries no EVM chains', () => {
     openCreateForm();
     expect(screen.queryByTestId('live-create-chain-evm:base')).toBeNull();
+  });
+
+  it('importing a WIF on Base says it will be converted, and hands the key to the store as pasted', async () => {
+    const importSpy = vi.fn(async () => {});
+    useLiveStore.setState({ evm: { chains: EVM_CHAINS, activeChainKey: null }, importPrivateKeyWallet: importSpy });
+    render(<LiveOnboarding />);
+    fireEvent.click(byId('live-choose-pk'));
+    fireEvent.click(byId('live-pk-chain-evm:base'));
+    const wif = encodeWif(new Uint8Array(32).fill(7), EVRMORE_MAINNET, true);
+    fireEvent.change(byId('live-pk-input'), { target: { value: wif } });
+    expect(byId('live-pk-chain-notice').textContent).toMatch(/same private key/);
+    expect(screen.queryByTestId('live-pk-error')).toBeNull();
+    fireEvent.change(byId('live-password'), { target: { value: 'password123' } });
+    fireEvent.change(byId('live-password-confirm'), { target: { value: 'password123' } });
+    fireEvent.click(byId('live-pk-submit'));
+    await waitFor(() => expect(importSpy).toHaveBeenCalledWith(wif, 'password123', '', 'evm:base'));
+  });
+
+  it('a raw hex key on Base has nothing to explain', () => {
+    useLiveStore.setState({ evm: { chains: EVM_CHAINS, activeChainKey: null } });
+    render(<LiveOnboarding />);
+    fireEvent.click(byId('live-choose-pk'));
+    fireEvent.click(byId('live-pk-chain-evm:base'));
+    fireEvent.change(byId('live-pk-input'), { target: { value: '07'.repeat(32) } });
+    expect(screen.queryByTestId('live-pk-chain-notice')).toBeNull();
   });
 
   it('appears once evm.chains is loaded, and choosing it creates on the evm:<key> target', () => {

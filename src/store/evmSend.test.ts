@@ -18,7 +18,7 @@ vi.mock('../services/chain/engine', async (importOriginal) => {
   };
 });
 
-import { broadcastEvmPlan, buildEvmSendPlan, withEvmFeeLevel, resolveEvmSendAsset } from './evmSend';
+import { broadcastEvmPlan, buildEvmSendPlan, satoriLockText, withEvmFeeLevel, resolveEvmSendAsset } from './evmSend';
 import { EvmWalletDataProvider, createEvmRpcClient, evmChainByKey, signTx, decodeSignedTx, EvmNonceTracker, encodeTransfer, toHexData } from '../services/chain/evm';
 import type { EvmChainInfo } from './evmChains';
 import type { LiveAssetBalance } from '../services/chain/electrumProvider';
@@ -59,7 +59,7 @@ interface Req { id: number; method: string; params: unknown[] }
 
 /** A scripted Base node: chain id, fee market, gas estimate, L1 oracle, nonce
  *  and broadcast, all by METHOD; every request is recorded. */
-function fakeBase(opts: { pending?: () => bigint; estimateReverts?: boolean; sendRejects?: boolean; gasPriceWei?: bigint } = {}) {
+function fakeBase(opts: { pending?: () => bigint; estimateReverts?: boolean; sendRejects?: boolean; gasPriceWei?: bigint; satoriLockRound?: bigint } = {}) {
   const seen: Req[] = [];
   const baseFee = '0x4c4b40'; // 5,000,000 wei
   const answer = (req: Req): Record<string, unknown> => {
@@ -81,6 +81,7 @@ function fakeBase(opts: { pending?: () => bigint; estimateReverts?: boolean; sen
       case 'eth_call': {
         const call = req.params[0] as { to: string; data: string };
         if (call.to.toLowerCase() === ORACLE) return ok('0x' + word('2f0d')); // 12045 wei L1 fee
+        if (opts.satoriLockRound !== undefined && call.data.startsWith('0x481d7b10')) return ok('0x' + word(opts.satoriLockRound.toString(16)));
         return err('execution reverted');
       }
       case 'eth_getTransactionCount':
@@ -324,5 +325,56 @@ describe('broadcastEvmPlan', () => {
     });
     expect(seen.some((r) => r.method === 'eth_sendRawTransaction')).toBe(false);
     expect(nonces.outstanding(8453, FROM)).toEqual([]);
+  });
+});
+
+describe('satoriLockText', () => {
+  const NOW = 20761 * 86_400_000;
+
+  it('says nothing for free, unread, or a lock that has run out', () => {
+    expect(satoriLockText({ kind: 'free' }, NOW)).toBe(null);
+    expect(satoriLockText(null, NOW)).toBe(null);
+    expect(satoriLockText({ kind: 'until', freeAtMs: NOW }, NOW)).toBe(null);
+  });
+
+  it('names the end, or the delegation', () => {
+    expect(satoriLockText({ kind: 'until', freeAtMs: NOW + 1 }, NOW)).toMatch(/^All SATORI on this address is locked until /);
+    expect(satoriLockText({ kind: 'delegated' }, NOW)).toMatch(/while it is delegated/);
+  });
+});
+
+describe('sending SATORI on Base', () => {
+  const SATORI = '0xd0a5bFF2789230b0fb1Bd989fc7CE7084c947E17';
+  const send = (provider: EvmWalletDataProvider, assetId = SATORI) =>
+    buildEvmSendPlan({
+      provider,
+      chain: BASE,
+      from: FROM,
+      assets: ASSETS,
+      input: { to: TO, amountText: '1', assetId },
+      extraTokens: [{ address: SATORI, symbol: 'SATORI', decimals: 18 }],
+    });
+  const today = () => BigInt(Math.floor(Date.now() / 86_400_000));
+
+  it('is refused in words while the token holds the address locked', async () => {
+    await expect(send(fakeBase({ satoriLockRound: today() }).provider)).rejects.toMatchObject({
+      code: 'locked',
+      message: expect.stringMatching(/locked until .* cannot be sent until the lock ends/),
+    });
+    await expect(send(fakeBase({ satoriLockRound: 0xffffffn }).provider)).rejects.toMatchObject({
+      code: 'locked',
+      message: expect.stringMatching(/while it is delegated/),
+    });
+  });
+
+  it('goes ahead when the lock has passed, or could not be read', async () => {
+    expect((await send(fakeBase({ satoriLockRound: today() - 1n }).provider)).amountBase).toBe(10n ** 18n);
+    expect((await send(fakeBase().provider)).amountBase).toBe(10n ** 18n);
+  });
+
+  it('other assets never ask about the lock', async () => {
+    const { provider, seen } = fakeBase({ satoriLockRound: today() });
+    await send(provider, USDC);
+    expect(seen.some((req) => JSON.stringify(req.params).includes('0x481d7b10'))).toBe(false);
   });
 });

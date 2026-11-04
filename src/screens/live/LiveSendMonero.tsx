@@ -171,6 +171,8 @@ export function LiveSendMonero({ onBack, onDone }: LiveSendMoneroProps) {
   const [password, setPassword] = useState('');
   const [passwordError, setPasswordError] = useState('');
   const [broadcasting, setBroadcasting] = useState(false);
+  // The button only turns busy after the password check: a double click is faster.
+  const broadcastStarted = useRef(false);
   const [broadcastError, setBroadcastError] = useState('');
   // After a relay that FAILED: the wallet is refreshed before the user may
   // build another transaction. A failed relay is not proof the node did not
@@ -296,7 +298,8 @@ export function LiveSendMonero({ onBack, onDone }: LiveSendMoneroProps) {
   };
 
   const handleBroadcast = async () => {
-    if (!plan) return;
+    if (!plan || broadcastStarted.current) return;
+    broadcastStarted.current = true;
     setBroadcastError('');
     setPasswordError('');
 
@@ -304,6 +307,7 @@ export function LiveSendMonero({ onBack, onDone }: LiveSendMoneroProps) {
       const ok = await verifyPassword(password);
       if (!ok) {
         setPasswordError('Incorrect password');
+        broadcastStarted.current = false;
         return;
       }
     }
@@ -324,6 +328,7 @@ export function LiveSendMonero({ onBack, onDone }: LiveSendMoneroProps) {
         .finally(() => setSettling(false));
     } finally {
       setBroadcasting(false);
+      broadcastStarted.current = false;
       arm(false);
       setArmed(false);
     }

@@ -233,7 +233,13 @@ export const EVM_CHAINS: readonly EvmChain[] = Object.freeze([
     indexer: { family: 'blockscout', baseUrl: 'https://base.blockscout.com/api' },
     // Circle's native USDC on Base: symbol USDC, 6 decimals, supply ~4.2e9
     // (read 2026-08-18 via eth_call symbol/decimals/totalSupply).
-    defaultTokens: [{ address: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', symbol: 'USDC', decimals: 6 }],
+    // SATORI, the official Satori token since the move from Evrmore: symbol
+    // SATORI, name Satori, 18 decimals (read 2026-11-04 via eth_call), and the
+    // address satori-lite's base_config and central's /api/v1/base/config name.
+    defaultTokens: [
+      { address: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', symbol: 'USDC', decimals: 6 },
+      { address: '0xd0a5bFF2789230b0fb1Bd989fc7CE7084c947E17', symbol: 'SATORI', decimals: 18 },
+    ],
   }),
   freezeChain({
     key: 'bsc',

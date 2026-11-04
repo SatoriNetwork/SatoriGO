@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assessRecipient, type RecipientKnowledge } from './recipientRisk';
+import { assessRecipient, type RecipientKnowledge, evmCodeIsContract } from './recipientRisk';
 
 // Real-shaped fixtures: 40 hex characters after 0x, and checksum-valid base58
 // on the UTXO side, so nothing here passes only because it is short.
@@ -139,5 +139,26 @@ describe('assessRecipient — empty and degenerate inputs', () => {
 
   it('a recipient too short to have two distinct ends is never a look-alike', () => {
     expect(assessRecipient('abc', utxo({ history: ['abcd1234'] })).lookalikeOf).toBeNull();
+  });
+});
+
+describe('evmCodeIsContract', () => {
+  it('no code is no contract, however the node writes it', () => {
+    for (const code of ['0x', '', '0x0', '0x00']) expect(evmCodeIsContract(code)).toBe(false);
+  });
+
+  it('deployed bytecode is a contract', () => {
+    expect(evmCodeIsContract('0x6080604052600436106101c657')).toBe(true);
+  });
+
+  it('an EIP-7702 delegation is a wallet, in either case', () => {
+    expect(evmCodeIsContract(`0xef0100${'63c0c19a282a1b52b07dd5a65b58948a07dae32b'}`)).toBe(false);
+    expect(evmCodeIsContract(`0xEF0100${'63C0C19A282A1B52B07DD5A65B58948A07DAE32B'}`)).toBe(false);
+  });
+
+  it('only that exact shape: a contract starting with the same bytes stays a contract', () => {
+    expect(evmCodeIsContract(`0xef0100${'ab'.repeat(19)}`)).toBe(true);
+    expect(evmCodeIsContract(`0xef0100${'ab'.repeat(21)}`)).toBe(true);
+    expect(evmCodeIsContract(`0xef0101${'ab'.repeat(20)}`)).toBe(true);
   });
 });

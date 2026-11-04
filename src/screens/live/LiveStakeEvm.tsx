@@ -13,7 +13,7 @@
 // build-flag-guarded directory): everything it needs already crossed into plain
 // data through the store, exactly as LiveSendEvm.tsx does.
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronLeft, AlertTriangle, CheckCircle, Landmark, RefreshCw, Info } from 'lucide-react';
 import { Button } from '../../components/Button';
 import { TextField, PasswordField } from '../../components/TextField';
@@ -210,6 +210,8 @@ export function LiveStakeEvm({ onBack }: LiveStakeEvmProps) {
   const [password, setPassword] = useState('');
   const [passwordError, setPasswordError] = useState('');
   const [confirming, setConfirming] = useState(false);
+  // The button only turns busy after the password check: a double click is faster.
+  const confirmStarted = useRef(false);
   const [confirmError, setConfirmError] = useState('');
   const [successResult, setSuccessResult] = useState<{ txid: string; explorerUrl: string; action: StakeAction } | null>(null);
 
@@ -337,6 +339,8 @@ export function LiveStakeEvm({ onBack }: LiveStakeEvmProps) {
     const blocked = !!plan.shortfall || !!plan.capRefusal;
 
     const handleConfirm = async () => {
+      if (confirmStarted.current) return;
+      confirmStarted.current = true;
       setConfirmError('');
       setPasswordError('');
       arm(true);
@@ -345,6 +349,7 @@ export function LiveStakeEvm({ onBack }: LiveStakeEvmProps) {
         if (!ok) {
           setPasswordError('Incorrect password');
           arm(false);
+          confirmStarted.current = false;
           return;
         }
       }
@@ -361,6 +366,7 @@ export function LiveStakeEvm({ onBack }: LiveStakeEvmProps) {
         arm(false);
       } finally {
         setConfirming(false);
+        confirmStarted.current = false;
       }
     };
 

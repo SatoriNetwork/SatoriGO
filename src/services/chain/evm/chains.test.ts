@@ -299,11 +299,12 @@ describe('9. default chain', () => {
 });
 
 describe('10. default tokens (phase 2)', () => {
-  it('each chain lists exactly one default token, checksummed, with the live-read decimals', () => {
+  it('each chain lists its default tokens, checksummed, with the live-read decimals', () => {
     const base = evmChainByKey('base')!;
     const bsc = evmChainByKey('bsc')!;
     expect(base.defaultTokens).toEqual([
       { address: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', symbol: 'USDC', decimals: 6 },
+      { address: '0xd0a5bFF2789230b0fb1Bd989fc7CE7084c947E17', symbol: 'SATORI', decimals: 18 },
     ]);
     expect(bsc.defaultTokens).toEqual([
       { address: '0x55d398326f99059fF775485246999027B3197955', symbol: 'USDT', decimals: 18 },

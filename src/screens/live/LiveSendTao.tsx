@@ -148,6 +148,8 @@ export function LiveSendTao({ onBack, onDone }: LiveSendTaoProps) {
   const [password, setPassword] = useState('');
   const [passwordError, setPasswordError] = useState('');
   const [broadcasting, setBroadcasting] = useState(false);
+  // The button only turns busy after the password check: a double click is faster.
+  const broadcastStarted = useRef(false);
   const [broadcastError, setBroadcastError] = useState('');
   const [successHash, setSuccessHash] = useState('');
   const [inclusion, setInclusion] = useState<'pending' | 'included' | 'expired' | null>(null);
@@ -241,7 +243,8 @@ export function LiveSendTao({ onBack, onDone }: LiveSendTaoProps) {
   };
 
   const handleBroadcast = async () => {
-    if (!plan) return;
+    if (!plan || broadcastStarted.current) return;
+    broadcastStarted.current = true;
     setBroadcastError('');
     setPasswordError('');
 
@@ -249,6 +252,7 @@ export function LiveSendTao({ onBack, onDone }: LiveSendTaoProps) {
       const ok = await verifyPassword(password);
       if (!ok) {
         setPasswordError('Incorrect password');
+        broadcastStarted.current = false;
         return;
       }
     }
@@ -263,6 +267,7 @@ export function LiveSendTao({ onBack, onDone }: LiveSendTaoProps) {
       setBroadcastError(friendlyTaoSendError(err));
     } finally {
       setBroadcasting(false);
+      broadcastStarted.current = false;
       arm(false);
       setArmed(false);
     }

@@ -15,7 +15,7 @@
 // importing `EvmFeeLevel`, and the tiny "max fee per gas / gas price" label
 // choice is reproduced inline instead of importing `feeSummary`.
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, useRef } from 'react';
 import { UntrustedTokenBanner } from '../../components/UntrustedTokenBadge';
 import { RecipientRiskBanners } from '../../components/RecipientRiskBanners';
 import { ChevronLeft, AlertTriangle, CheckCircle } from 'lucide-react';
@@ -107,6 +107,9 @@ export function LiveSendEvm({ onBack, onDone, asset }: LiveSendEvmProps) {
   const [password, setPassword] = useState('');
   const [passwordError, setPasswordError] = useState('');
   const [confirming, setConfirming] = useState(false);
+  // The button only turns busy after the password check: a double click would
+  // otherwise send the amount twice, under consecutive nonces.
+  const confirmStarted = useRef(false);
   const [confirmError, setConfirmError] = useState('');
   const [successResult, setSuccessResult] = useState<{ txid: string; explorerUrl: string } | null>(null);
 
@@ -259,6 +262,8 @@ export function LiveSendEvm({ onBack, onDone, asset }: LiveSendEvmProps) {
     };
 
     const handleConfirm = async () => {
+      if (confirmStarted.current) return;
+      confirmStarted.current = true;
       setConfirmError('');
       setPasswordError('');
       arm(true);
@@ -267,6 +272,7 @@ export function LiveSendEvm({ onBack, onDone, asset }: LiveSendEvmProps) {
         if (!ok) {
           setPasswordError('Incorrect password');
           arm(false);
+          confirmStarted.current = false;
           return;
         }
       }
@@ -280,6 +286,7 @@ export function LiveSendEvm({ onBack, onDone, asset }: LiveSendEvmProps) {
         arm(false);
       } finally {
         setConfirming(false);
+        confirmStarted.current = false;
       }
     };
 

@@ -112,7 +112,7 @@ offline while it is unreachable. You can add your own server for either in
 Settings > Network. `KNOWN_LIMITATIONS.md` records which networks are currently
 reaching the chain some other way and what that costs.
 
-Version **1.5.2**. (The canonical version lives in each target's manifest under
+Version **1.6.0**. (The canonical version lives in each target's manifest under
 `platforms/<target>/manifest.json`; this line is informational and can lag —
 check the manifest if in doubt.)
 
@@ -197,7 +197,8 @@ first**. See the in‑app note under **Settings → About**.
   your own wallets** by name; **address book**.
 - **Staking** — native staking where the network supports it, with what you have
   staked, what it has earned and a sortable validator list. Satori moved to Base:
-  SATORIEVR is marked as the old token and its pool staking on Evrmore has ended.
+  SATORIEVR is marked as the old token, pool staking registers your Base address
+  with the Satori server, and rewards are claimed on Base, with a history per day.
 - **Side panel** — on Chrome and Edge the wallet docks beside the page you are on and
   stays open while you browse. That is the default; the toolbar popup is one toggle
   away in Settings.

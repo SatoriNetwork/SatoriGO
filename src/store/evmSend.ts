@@ -16,8 +16,10 @@
 import { loadEvmModules } from '../services/chain/engine';
 import { formatAmount, parseAmount } from '../services/chain/amounts';
 import { displaySymbol } from '../services/displaySymbol';
+import { SATORI_BASE_TOKEN } from '../services/assetNotes';
 import type { EvmWalletDataProvider } from '../services/chain/evm/evmProvider';
 import type { EvmFeeLevel, EvmFeeQuote } from '../services/chain/evm/fees';
+import type { SatoriLock } from '../services/chain/evm/satoriRewards';
 import type { EvmTxRequest, SignedEvmTx } from '../services/chain/evm/tx';
 import type { EvmNonceTracker } from '../services/chain/evm/nonce';
 import type { EvmChainInfo } from './evmChains';
@@ -71,6 +73,7 @@ export class EvmSendError extends Error {
     | 'insufficient'
     | 'fee-cap'
     | 'gated'
+    | 'locked'
     | 'broadcast-failed';
   constructor(code: EvmSendError['code'], message: string) {
     super(message);
@@ -85,6 +88,33 @@ export class EvmSendError extends Error {
  *  maxTxAmount", its own per-transaction limit). */
 export function revertReason(detail: string): string {
   return detail.replace(/:?\s*0x[0-9a-fA-F]{8,}(\.\.\.)?(\s*\(\d+ chars\))?\s*$/, '').trim();
+}
+
+/** The SATORI token's lock on `address`, read from the contract now. */
+export async function readSatoriLock(provider: EvmWalletDataProvider, address: string): Promise<SatoriLock | null> {
+  const evm = await loadEvmModules();
+  if (!evm) return null;
+  const result = await provider.rpc.call<string>('eth_call', [
+    { to: SATORI_BASE_TOKEN, data: evm.encodeTransferLockedUntil(address) },
+    'latest',
+  ]);
+  return evm.satoriLockOf(evm.decodeUint256(result as string), Date.now());
+}
+
+/** The lock's words for a screen, or null when it no longer holds anything. */
+export function satoriLockText(lock: SatoriLock | null | undefined, nowMs = Date.now()): string | null {
+  if (!lock || lock.kind === 'free') return null;
+  if (lock.kind === 'delegated') return 'All SATORI on this address is locked while it is delegated on-chain.';
+  if (lock.freeAtMs <= nowMs) return null;
+  const when = new Date(lock.freeAtMs).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+  return `All SATORI on this address is locked until ${when}.`;
+}
+
+/** Refuse before quoting: left to the node, this is only an opaque revert.
+ *  A failed read refuses nothing, the simulation still stands behind it. */
+export async function refuseLockedSatori(provider: EvmWalletDataProvider, from: string): Promise<void> {
+  const text = satoriLockText(await readSatoriLock(provider, from).catch(() => null));
+  if (text) throw new EvmSendError('locked', `${text} It cannot be sent until the lock ends.`);
 }
 
 /** Resolve `assetId` against the chain and the balances on screen. */
@@ -152,6 +182,9 @@ export async function buildEvmSendPlan(args: {
     throw new EvmSendError('invalid-amount', err instanceof Error ? err.message : String(err));
   }
   if (amountBase <= 0n) throw new EvmSendError('invalid-amount', 'Enter an amount greater than zero.');
+  if (chain.key === 'base' && asset.kind === 'token' && asset.address.toLowerCase() === SATORI_BASE_TOKEN.toLowerCase()) {
+    await refuseLockedSatori(provider, from);
+  }
 
   // One model for both: an ERC-20 transfer is a zero-value call carrying data.
   const value = asset.kind === 'native' ? amountBase : 0n;

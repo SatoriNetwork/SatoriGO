@@ -1,6 +1,6 @@
 # Known limitations
 
-Current, honest limitations of the wallet (v1.5.2).
+Current, honest limitations of the wallet (v1.6.0).
 
 Satori GO is a non-custodial multi-chain wallet. Eight coin networks and four
 EVM networks ship in this version, and every one of them has had a funded send
@@ -16,12 +16,11 @@ confirmed by the owner on mainnet (item 7). Nothing below is marketing.
    a message worded for a *different* site and reuse the signature there. The
    approval window shows the exact message, so read it. This is inherent to the
    signmessage format, which must stay byte-compatible with Satori.
-3. **The Satori pool challenge is validated by shape, not by origin.** Staking
-   (ended on Evrmore, item 20) signed a nonce the pool server supplies. The wallet refuses anything that is
-   not a bare UUID, which excludes every human-readable or structured message,
-   but another service whose challenges are also bare UUIDs under the same
-   signing scheme could not be told apart. Only server-side domain binding can
-   close that, and it is outside the wallet.
+3. **The Satori pool login is a signature of a timestamp, bound to nothing else.**
+   Staking signs the current time with the EIP-191 prefix, as the neuron does. The
+   wallet makes that text itself and shows no prompt for it. The prefix keeps it
+   from being a transaction, but only the server can bind a login to itself and
+   limit how long it is good for.
 4. **Passwordless wallets** are a deliberate convenience trade-off: they
    auto-unlock, and sends and signatures require only click-throughs. Opt-in,
    behind an explicit acknowledgement. Their vault is AES-GCM under an **empty**
@@ -147,11 +146,25 @@ confirmed by the owner on mainnet (item 7). Nothing below is marketing.
 
 ## Satori Network features
 
-20. **Pool staking on Evrmore has ended, and the wallet has no pool staking on
-    Base yet.** Satori moved to Base and SATORIEVR is now the old token: the
-    Satori server only accepts Base addresses, so the wallet removed its Stake
-    action. Your SATORIEVR stays on your address and can still be sent and
-    received. Rewards on Base cannot be claimed from this version of the wallet.
+20. **Pool staking is an off-chain registration, on Base.** Joining or leaving
+    signs in to network.satorinet.io and registers your Base address as a lender.
+    **No funds move, no gas is paid and your SATORI never leaves your wallet.** The
+    wallet cannot verify the pool's behaviour or your rewards; it shows what that
+    server reports. Pool staking on Evrmore has ended and SATORIEVR is the old
+    token. Claiming rewards is a real Base transaction: it pays a network fee in ETH
+    from the claiming address, and the wallet shows the amount the contracts report.
+    Rewards history per day is worked out from Satori's public audit files, which
+    are downloaded whole (about 0.7 MB a day) when you open that screen; it is not
+    on-chain, and the screen says so when it differs from the contract's total. It
+    starts at 2 Nov 2026, the first day of the Base drop. Claims listed there come
+    from this address's Activity, so the old Evrmore key's claims are not listed.
+    SATORI held on-chain by a neuron's stake or delegation stays locked until that
+    ends: the wallet shows the lock and refuses to send, but it cannot end a
+    delegation. That is done in the neuron.
+    To show what is waiting, opening Base sends the account's address to that server,
+    whether or not it holds SATORI. A seed wallet also sends the Base address of its
+    Evrmore key, at the same index as the account, where rewards earned on Evrmore
+    may sit. Claims from that address and moves off it are not listed in Activity.
 21. **The Satori Network tab reports, it does not verify.** Its figures come from
     satorinet.io, are cached briefly, and a failing endpoint leaves its own tile
     showing "n/a" rather than blanking the screen. Nothing there is cross-checked

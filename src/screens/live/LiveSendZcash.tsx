@@ -125,6 +125,8 @@ export function LiveSendZcash({ onBack, onDone }: LiveSendZcashProps) {
   const [password, setPassword] = useState('');
   const [passwordError, setPasswordError] = useState('');
   const [broadcasting, setBroadcasting] = useState(false);
+  // The button only turns busy after the password check: a double click is faster.
+  const broadcastStarted = useRef(false);
   const [broadcastError, setBroadcastError] = useState('');
   const [successTxid, setSuccessTxid] = useState('');
   /** The gateway could not say whether the send was received (its 504, or
@@ -233,7 +235,8 @@ export function LiveSendZcash({ onBack, onDone }: LiveSendZcashProps) {
   };
 
   const handleBroadcast = async () => {
-    if (!plan) return;
+    if (!plan || broadcastStarted.current) return;
+    broadcastStarted.current = true;
     setBroadcastError('');
     setPasswordError('');
 
@@ -241,6 +244,7 @@ export function LiveSendZcash({ onBack, onDone }: LiveSendZcashProps) {
       const ok = await verifyPassword(password);
       if (!ok) {
         setPasswordError('Incorrect password');
+        broadcastStarted.current = false;
         return;
       }
     }
@@ -271,6 +275,7 @@ export function LiveSendZcash({ onBack, onDone }: LiveSendZcashProps) {
       }
     } finally {
       setBroadcasting(false);
+      broadcastStarted.current = false;
       arm(false);
       setArmed(false);
     }

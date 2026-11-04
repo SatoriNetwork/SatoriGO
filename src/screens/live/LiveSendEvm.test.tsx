@@ -364,6 +364,33 @@ describe('LiveSendEvm, review step', () => {
     expect(screen.queryByTestId('live-review-txid')).toBeNull();
   });
 
+  it('7c. a double click while the password is being checked sends once; a wrong password can be retried', async () => {
+    let release: (ok: boolean) => void = () => {};
+    const passwordChecked = new Promise<boolean>((resolve) => { release = resolve; });
+    const verifyPassword = vi.fn(() => passwordChecked);
+    const confirmEvmSend = vi.fn(async () => ({ txid: '0xabc', explorerUrl: 'x', chainKey: 'base' }));
+    useLiveStore.setState({
+      evmSend: makePlan(),
+      requirePasswordToSend: true,
+      wallets: [{ ...evmWallet('w1', WALLET_ADDRESS), passwordless: false }],
+      verifyPassword,
+      confirmEvmSend,
+    });
+    render(<LiveSendEvm onBack={() => {}} onDone={() => {}} />);
+    fireEvent.click(screen.getByTestId('live-arm-checkbox'));
+    fireEvent.change(screen.getByTestId('live-send-password'), { target: { value: 'wrong' } });
+    fireEvent.click(screen.getByTestId('live-broadcast'));
+    fireEvent.click(screen.getByTestId('live-broadcast'));
+    expect(verifyPassword).toHaveBeenCalledTimes(1);
+    release(false);
+    await waitFor(() => expect(screen.getByText('Incorrect password')).toBeTruthy());
+    expect(confirmEvmSend).not.toHaveBeenCalled();
+
+    verifyPassword.mockImplementation(async () => true);
+    fireEvent.click(screen.getByTestId('live-broadcast'));
+    await waitFor(() => expect(confirmEvmSend).toHaveBeenCalledTimes(1));
+  });
+
   it('7. wrong password blocks the send: verifyPassword false shows an error and confirmEvmSend is never called', async () => {
     const verifyPassword = vi.fn(async () => false);
     const confirmEvmSend = vi.fn(async () => ({ txid: 'x', explorerUrl: 'x', chainKey: 'base' }));

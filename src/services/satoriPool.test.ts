@@ -2,12 +2,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   SATORI_NETWORK_BASE,
   fetchOpenPools,
-  getChallenge,
   getLenderStatus,
   joinPool,
   leavePool,
-  joinPoolForKeys,
-  leavePoolForKeys,
   sortPoolsForDisplay,
   filterPools,
   paginatePools,
@@ -16,28 +13,10 @@ import {
   SatoriServerError,
   type PoolInfo,
 } from './satoriPool';
-import { privateKeyToDerived } from './chain/keys';
-import { verifyMessage } from './chain/message';
-import { EVRMORE_MAINNET } from './chain/chainParams';
-import { bytesToHex } from '@noble/hashes/utils';
-
-// A real signing key so we can VERIFY the signature the service produces recovers
-// back to this address via the shared message.ts verify path.
-const PRIV = new Uint8Array(32).fill(0x42);
-const derived = privateKeyToDerived(PRIV, EVRMORE_MAINNET, true);
-const KEY = {
-  privateKey: PRIV,
-  publicKey: derived.publicKey,
-  compressed: true,
-  address: derived.address,
-};
-
-/** Nonce-shaped (UUID) challenge fixture. getChallenge refuses anything that
- *  does not look like the server's real UUID nonce (the blind-signing guard),
- *  so every stubbed challenge in this file must be UUID-shaped. */
-function uuidChallenge(n: number): string {
-  return `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
-}
+const SIGNATURE = '0xsignature';
+const PUBKEY = '02abc';
+const signer = vi.fn((_message: string) => ({ aliasPubkey: PUBKEY, signature: SIGNATURE }));
+const TOKEN = 'access-token-1';
 
 /** Minimal Response-like stub. status/text drive parseJsonOk; ok mirrors status. */
 function res(status: number, body: string): Response {
@@ -126,62 +105,6 @@ describe('fetchOpenPools', () => {
   });
 });
 
-describe('getChallenge', () => {
-  it('GETs the cache-busted challenge endpoint with no-store headers and returns it', async () => {
-    // A realistic (random-looking) UUID, not the fixture helper, so this test
-    // also covers uppercase-free lowercase hex and mixed digit/letter groups.
-    const nonce = 'd5f2a9c1-4b3e-4f6a-9c0d-2e7b8a1f3c5d';
-    const spy = vi.fn(async (_url: unknown, _init?: RequestInit) =>
-      res(200, JSON.stringify({ challenge: nonce })),
-    );
-    vi.stubGlobal('fetch', spy);
-
-    const challenge = await getChallenge();
-    expect(challenge).toBe(nonce);
-    const [url, init] = spy.mock.calls[0];
-    expect(String(url)).toMatch(new RegExp(`^${SATORI_NETWORK_BASE}/api/v1/auth/challenge\\?t=\\d+$`));
-    const headers = init?.headers as Record<string, string>;
-    expect(headers['Cache-Control']).toMatch(/no-store/);
-    expect(headers.Pragma).toBe('no-cache');
-  });
-
-  it('throws SatoriServerError when the challenge field is missing', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => res(200, JSON.stringify({}))));
-    await expect(getChallenge()).rejects.toBeInstanceOf(SatoriServerError);
-  });
-
-  it('refuses any challenge that is not nonce-shaped (blind-signing guard)', async () => {
-    // Each of these is the kind of foreign message a compromised or MITM'd
-    // server could try to have signed for replay elsewhere: a human-readable
-    // authorization, a SIWE-style structured login prompt, a bare 64-hex txid,
-    // and a valid nonce smuggling a suffix.
-    const foreign = [
-      'I authorize the transfer of all funds',
-      'service.example wants you to sign in\nNonce: 12345',
-      'ab'.repeat(32),
-      `${uuidChallenge(1)} pays 10 EVR to E...`,
-      '',
-    ];
-    for (const challenge of foreign) {
-      vi.stubGlobal('fetch', vi.fn(async () => res(200, JSON.stringify({ challenge }))));
-      await expect(getChallenge()).rejects.toBeInstanceOf(SatoriServerError);
-    }
-  });
-
-  it('never signs a non-nonce challenge end to end: joinPool aborts before the lend POST', async () => {
-    const spy = vi.fn(async (url: unknown) =>
-      String(url).includes('/auth/challenge')
-        ? res(200, JSON.stringify({ challenge: 'Please sign to confirm your withdrawal' }))
-        : res(200, 'joined'),
-    );
-    vi.stubGlobal('fetch', spy);
-
-    await expect(joinPool('Epool', KEY)).rejects.toBeInstanceOf(SatoriServerError);
-    // Only the challenge GET happened — no signature was produced or sent.
-    expect(spy).toHaveBeenCalledTimes(1);
-  });
-});
-
 describe('getLenderStatus', () => {
   it('GETs status for the address and parses pool_address + is_pool', async () => {
     const spy = vi.fn(async (_url: unknown) =>
@@ -208,134 +131,73 @@ describe('getLenderStatus', () => {
   });
 });
 
+/** Login answers with a token; `lend` answers the lend call. */
+function server(lend: Response, login: Response = res(200, JSON.stringify({ access_token: TOKEN }))) {
+  return vi.fn(async (url: unknown, _init?: RequestInit) => (String(url).endsWith('/auth/login') ? login : lend));
+}
+
 describe('joinPool', () => {
-  it('fetches a fresh challenge then POSTs /lender/lend with a VERIFIABLE signature', async () => {
-    let capturedChallenge = '';
-    const spy = vi.fn(async (url: unknown, _init?: RequestInit) => {
-      if (String(url).includes('/auth/challenge')) {
-        capturedChallenge = uuidChallenge(777);
-        return res(200, JSON.stringify({ challenge: capturedChallenge }));
-      }
-      return res(200, 'joined');
-    });
+  it('logs in with a signed timestamp, then POSTs /lender/lend with the bearer token', async () => {
+    const spy = server(res(200, '{}'));
     vi.stubGlobal('fetch', spy);
+    const before = Date.now() / 1000;
 
-    await joinPool('EpoolTarget', KEY);
+    await joinPool('0xpool', signer);
 
-    // Two calls: challenge (GET) then lend (POST).
     expect(spy).toHaveBeenCalledTimes(2);
+    const [loginUrl, loginInit] = spy.mock.calls[0];
+    expect(loginUrl).toBe(`${SATORI_NETWORK_BASE}/api/v1/auth/login`);
+    expect(loginInit?.method).toBe('POST');
+    const loginHeaders = loginInit?.headers as Record<string, string>;
+    expect(loginHeaders['alias-pubkey']).toBe(PUBKEY);
+    expect(loginHeaders.signature).toBe(SIGNATURE);
+    expect(Number(loginHeaders.message)).toBeGreaterThanOrEqual(before);
+    expect(signer).toHaveBeenLastCalledWith(loginHeaders.message);
+
     const [lendUrl, lendInit] = spy.mock.calls[1];
     expect(lendUrl).toBe(`${SATORI_NETWORK_BASE}/api/v1/lender/lend`);
     expect(lendInit?.method).toBe('POST');
-
     const headers = lendInit?.headers as Record<string, string>;
-    // Exact header names the server expects.
-    expect(headers['wallet-pubkey']).toBe(bytesToHex(KEY.publicKey));
-    expect(headers.message).toBe(capturedChallenge);
+    expect(headers.Authorization).toBe(`Bearer ${TOKEN}`);
     expect(headers['Content-Type']).toBe('application/json');
-    expect(typeof headers.signature).toBe('string');
-
-    // The signature must recover to our signing address (uses the SAME verify
-    // path message.ts self-checks with — proves the format is Satori-compatible).
-    expect(verifyMessage(KEY.address, capturedChallenge, headers.signature, EVRMORE_MAINNET)).toBe(true);
-
-    // Body carries the pool address and our source tag.
-    const body = JSON.parse(lendInit?.body as string);
-    expect(body).toEqual({ pool_address: 'EpoolTarget', source: 'satori go' });
+    expect(JSON.parse(lendInit?.body as string)).toEqual({ pool_address: '0xpool', source: 'satori go' });
   });
 
-  it('never leaks the private key in the request', async () => {
-    const spy = vi.fn(async (url: unknown) =>
-      String(url).includes('/auth/challenge')
-        ? res(200, JSON.stringify({ challenge: uuidChallenge(1) }))
-        : res(200, 'ok'),
-    );
+  it('does not reach the lend call when the login is refused', async () => {
+    const spy = server(res(200, '{}'), res(401, '{"detail":"Invalid signature"}'));
     vi.stubGlobal('fetch', spy);
-    await joinPool('Epool', KEY);
-    const serialized = JSON.stringify(spy.mock.calls);
-    expect(serialized).not.toContain(bytesToHex(PRIV));
+    await expect(joinPool('0xpool', signer)).rejects.toThrow(/Invalid signature/);
+    expect(spy).toHaveBeenCalledTimes(1);
   });
 
-  it('throws SatoriServerError when the lend POST returns >= 400', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (url: unknown) =>
-        String(url).includes('/auth/challenge')
-          ? res(200, JSON.stringify({ challenge: uuidChallenge(1) }))
-          : res(403, 'forbidden'),
-      ),
-    );
-    await expect(joinPool('Epool', KEY)).rejects.toBeInstanceOf(SatoriServerError);
+  it('refuses a login answer without a token', async () => {
+    vi.stubGlobal('fetch', server(res(200, '{}'), res(200, '{}')));
+    await expect(joinPool('0xpool', signer)).rejects.toBeInstanceOf(SatoriServerError);
+  });
+
+  it('says why the server refused the join', async () => {
+    vi.stubGlobal('fetch', server(res(403, '{"detail":"Pool is not open"}')));
+    await expect(joinPool('0xpool', signer)).rejects.toThrow(/HTTP 403\)\. Pool is not open/);
+  });
+
+  it('throws SatoriServerError when the lend POST returns >= 400 without a reason', async () => {
+    vi.stubGlobal('fetch', server(res(500, 'oops')));
+    await expect(joinPool('0xpool', signer)).rejects.toBeInstanceOf(SatoriServerError);
   });
 });
 
 describe('leavePool', () => {
-  it('fetches a challenge then DELETEs /lender/lend with auth headers and no body', async () => {
-    const leaveNonce = uuidChallenge(42);
-    const spy = vi.fn(async (url: unknown, _init?: RequestInit) =>
-      String(url).includes('/auth/challenge')
-        ? res(200, JSON.stringify({ challenge: leaveNonce }))
-        : res(200, 'left'),
-    );
+  it('logs in, then DELETEs /lender/lend with the bearer token and no body', async () => {
+    const spy = server(res(200, '{}'));
     vi.stubGlobal('fetch', spy);
 
-    await leavePool(KEY);
+    await leavePool(signer);
+
     const [delUrl, delInit] = spy.mock.calls[1];
     expect(delUrl).toBe(`${SATORI_NETWORK_BASE}/api/v1/lender/lend`);
     expect(delInit?.method).toBe('DELETE');
     expect(delInit?.body).toBeUndefined();
-    const headers = delInit?.headers as Record<string, string>;
-    expect(headers['wallet-pubkey']).toBe(bytesToHex(KEY.publicKey));
-    expect(verifyMessage(KEY.address, leaveNonce, headers.signature, EVRMORE_MAINNET)).toBe(true);
-  });
-});
-
-describe('multi-address sequencing', () => {
-  // Three keys; the MIDDLE one's lend POST fails. Expect: sequential order,
-  // one fresh challenge per address, and per-address results reflecting the
-  // middle failure while the others succeed.
-  const KEYS = [0x11, 0x22, 0x33].map((b, i) => {
-    const pk = new Uint8Array(32).fill(b);
-    const d = privateKeyToDerived(pk, EVRMORE_MAINNET, true);
-    return { privateKey: pk, publicKey: d.publicKey, compressed: true, address: `addr-${i}` };
-  });
-
-  it('joinPoolForKeys continues past a middle failure and reports per-address', async () => {
-    let lendCall = 0;
-    const order: string[] = [];
-    const spy = vi.fn(async (url: unknown) => {
-      if (String(url).includes('/auth/challenge')) {
-        return res(200, JSON.stringify({ challenge: uuidChallenge(order.length) }));
-      }
-      // lend POST
-      lendCall += 1;
-      order.push(`lend${lendCall}`);
-      // The 2nd lend (middle address) fails.
-      return lendCall === 2 ? res(500, 'server error') : res(200, 'ok');
-    });
-    vi.stubGlobal('fetch', spy);
-
-    const results = await joinPoolForKeys('Epool', KEYS);
-    expect(results.map((r) => r.address)).toEqual(['addr-0', 'addr-1', 'addr-2']);
-    expect(results.map((r) => r.ok)).toEqual([true, false, true]);
-    expect(results[1].error).toBeTruthy();
-    // One challenge GET + one lend POST per address = 6 fetch calls.
-    expect(spy).toHaveBeenCalledTimes(6);
-    // Lends happened in order (sequential, not parallel).
-    expect(order).toEqual(['lend1', 'lend2', 'lend3']);
-  });
-
-  it('leavePoolForKeys reports per-address success/failure sequentially', async () => {
-    let lendCall = 0;
-    const spy = vi.fn(async (url: unknown) => {
-      if (String(url).includes('/auth/challenge')) return res(200, JSON.stringify({ challenge: uuidChallenge(9) }));
-      lendCall += 1;
-      return lendCall === 2 ? res(400, 'nope') : res(200, 'ok');
-    });
-    vi.stubGlobal('fetch', spy);
-
-    const results = await leavePoolForKeys(KEYS);
-    expect(results.map((r) => r.ok)).toEqual([true, false, true]);
+    expect((delInit?.headers as Record<string, string>).Authorization).toBe(`Bearer ${TOKEN}`);
   });
 });
 

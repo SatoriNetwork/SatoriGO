@@ -17,7 +17,14 @@
 import { HDKey } from '@scure/bip32';
 import * as secp256k1 from '@noble/secp256k1';
 import { keccak_256 } from '@noble/hashes/sha3';
-import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils';
+import { sha256 } from '@noble/hashes/sha256';
+import { hmac } from '@noble/hashes/hmac';
+import { bytesToHex, concatBytes, utf8ToBytes } from '@noble/hashes/utils';
+
+// personalSign below signs synchronously, which needs this hook for RFC6979: the
+// same one tx.ts, message.ts and txBuilder.ts wire, harmless to assign twice.
+secp256k1.etc.hmacSha256Sync = (key: Uint8Array, ...msgs: Uint8Array[]): Uint8Array =>
+  hmac(sha256, key, concatBytes(...msgs));
 
 /**
  * SLIP-44 coin type for Ethereum, used by every EVM chain without exception.
@@ -149,6 +156,22 @@ export function deriveEvmKey(seed: Uint8Array, index: number): EvmDerivedKey {
 }
 
 /**
+ * The key behind a seed's Evrmore address i, m/44'/175'/0'/0/{index}, as an EVM
+ * account. A neuron uses one key on Evrmore and Base, and the central server took
+ * "that key's Base address" for an Evrmore address, so rewards and airdrops earned
+ * on Evrmore sit here and not at m/44'/60'. Used for those claims only.
+ */
+export function deriveEvrmoreKeyAsEvm(seed: Uint8Array, index: number): EvmDerivedKey {
+  if (!Number.isInteger(index) || index < 0 || index >= HARDENED_OFFSET) {
+    throw new Error(`address index must be an integer in 0..${HARDENED_OFFSET - 1}, got ${index}`);
+  }
+  const path = `m/44'/175'/0'/0/${index}`;
+  const child = HDKey.fromMasterSeed(seed).derive(path);
+  if (!child.privateKey) throw new Error(`derivation produced no key material at ${path}`);
+  return buildEvmKey(child.privateKey, path, index);
+}
+
+/**
  * Build an EvmDerivedKey from a raw 32-byte private key, for imports. There is
  * no HD tree behind such a key, so `path` is the nominal 'imported' and `index`
  * is 0, matching privateKeyToDerived() on the UTXO side.
@@ -246,4 +269,24 @@ export function isSameEvmAddress(a: string, b: string): boolean {
   const left = parseEvmAddress(a);
   const right = parseEvmAddress(b);
   return left !== null && right !== null && left === right;
+}
+
+/** The compressed (33-byte) public key, the form the Satori server takes. */
+export function compressedPublicKey(privateKey: Uint8Array): Uint8Array {
+  return secp256k1.getPublicKey(privateKey, true);
+}
+
+/**
+ * EIP-191 personal_sign of `message`, as 0x + r || s || v with v 27 or 28 and a
+ * low s. The prefix is what keeps a signature from ever being a transaction.
+ * The caller owns `privateKey` and zeroes it.
+ */
+export function personalSign(message: string, privateKey: Uint8Array): string {
+  const body = utf8ToBytes(message);
+  const prefix = utf8ToBytes(`\x19Ethereum Signed Message:\n${body.length}`);
+  const joined = new Uint8Array(prefix.length + body.length);
+  joined.set(prefix);
+  joined.set(body, prefix.length);
+  const sig = secp256k1.sign(keccak_256(joined), privateKey, { lowS: true });
+  return `0x${bytesToHex(sig.toCompactRawBytes())}${(27 + sig.recovery).toString(16)}`;
 }

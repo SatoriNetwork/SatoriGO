@@ -35,6 +35,7 @@ import { addressToElectrumScripthash } from './keys';
 // reaches no bundle. LiveTransaction is the ONE Activity-row type both families
 // produce, which is why the EVM-only field below lives on it.
 import type { StakingCallInfo } from './evm/cosmosStaking';
+import type { SatoriClaimKind } from './evm/satoriRewards';
 import { ELECTRUM_METHODS, SATORI_ASSET } from './network';
 import { EVRMORE_MAINNET, supportsAssets, type EvrmoreNetwork } from './chainParams';
 
@@ -201,6 +202,9 @@ export interface LiveTransaction {
    *  exactly as it did before when it is missing. Nothing on the UTXO path
    *  reads, writes or is affected by this field. */
   staking?: StakingCallInfo;
+  /** EVM ONLY: where SATORI received on Base came from. A claim channel, or
+   *  'transfer' for anything else, which records that the node was asked. */
+  satoriSource?: SatoriClaimKind | 'transfer';
 }
 
 /**

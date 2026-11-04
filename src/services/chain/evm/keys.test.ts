@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import * as secp256k1 from '@noble/secp256k1';
 import { keccak_256 } from '@noble/hashes/sha3';
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
+import { deriveEvrmoreKeyAsEvm } from './keys';
 import { mnemonicToSeed } from '../keys';
 import {
   EVM_COIN_TYPE,
@@ -13,6 +14,8 @@ import {
   privateKeyToEvmKey,
   publicKeyToEvmAddress,
   toChecksumAddress,
+  personalSign,
+  compressedPublicKey,
 } from './keys';
 
 // The Trezor/BIP39 all-"abandon" mnemonic with an EMPTY passphrase. This is the
@@ -246,5 +249,50 @@ describe('address validation', () => {
     // Both sides must be valid: two typos are not "the same address".
     expect(isSameEvmAddress(WRONG_CHECKSUM, WRONG_CHECKSUM)).toBe(false);
     expect(isSameEvmAddress('', '')).toBe(false);
+  });
+});
+
+describe('personalSign (EIP-191)', () => {
+  // The worked example in the web3.js and eth-account docs.
+  const PRIV = hexToBytes('4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318');
+
+  it('matches the published vector byte for byte', () => {
+    expect(personalSign('Some data', PRIV)).toBe(
+      '0xb91467e570a6466aa9e9876cbcd013baba02900b8979d43fe208a4a4f339f5fd6007e74cd82e037b800186422fc2da167c747ef045e5d18a5f5d4300f8e1a0291c',
+    );
+  });
+
+  it('counts the message length in bytes, not characters', () => {
+    const message = 'ż'; // one character, two bytes
+    const bytes = new TextEncoder().encode(message);
+    const prefix = new TextEncoder().encode('\x19Ethereum Signed Message:\n2');
+    const joined = new Uint8Array([...prefix, ...bytes]);
+    const sig = secp256k1.sign(keccak_256(joined), PRIV, { lowS: true });
+    expect(personalSign(message, PRIV)).toBe(
+      `0x${bytesToHex(sig.toCompactRawBytes())}${(27 + sig.recovery).toString(16)}`,
+    );
+  });
+
+  it('gives a 33-byte compressed public key', () => {
+    expect(compressedPublicKey(PRIV)).toHaveLength(33);
+  });
+});
+
+describe('deriveEvrmoreKeyAsEvm', () => {
+  it('is the very key of the seed\'s Evrmore address, at each index', async () => {
+    const seed = await mnemonicToSeed(VECTOR_MNEMONIC, '');
+    const { deriveAddress } = await import('../keys');
+    const { EVRMORE_MAINNET } = await import('../chainParams');
+    for (const index of [0, 1, 7]) {
+      const evr = deriveAddress(seed, EVRMORE_MAINNET, 0, 0, index);
+      const key = deriveEvrmoreKeyAsEvm(seed, index);
+      expect(bytesToHex(key.privateKey)).toBe(bytesToHex(evr.privateKey));
+      expect(key.path).toBe(evr.path);
+    }
+  });
+
+  it('is not the account\'s own address', async () => {
+    const seed = await mnemonicToSeed(VECTOR_MNEMONIC, '');
+    expect(deriveEvrmoreKeyAsEvm(seed, 0).address).not.toBe(deriveEvmKey(seed, 0).address);
   });
 });

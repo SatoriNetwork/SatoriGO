@@ -221,6 +221,8 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
   const [password, setPassword] = useState('');
   const [passwordError, setPasswordError] = useState('');
   const [broadcasting, setBroadcasting] = useState(false);
+  // The button only turns busy after the password check: a double click is faster.
+  const broadcastStarted = useRef(false);
   const [broadcastError, setBroadcastError] = useState('');
   const [successTxid, setSuccessTxid] = useState('');
 
@@ -564,7 +566,8 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
   };
 
   const handleBroadcast = async () => {
-    if (!plan) return;
+    if (!plan || broadcastStarted.current) return;
+    broadcastStarted.current = true;
     setBroadcastError('');
     setPasswordError('');
 
@@ -574,6 +577,7 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
       const ok = await verifyPassword(password);
       if (!ok) {
         setPasswordError('Incorrect password');
+        broadcastStarted.current = false;
         return;
       }
     }
@@ -588,6 +592,7 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
       setBroadcastError(err instanceof Error ? err.message : String(err));
     } finally {
       setBroadcasting(false);
+      broadcastStarted.current = false;
       arm(false);
       setArmed(false);
     }

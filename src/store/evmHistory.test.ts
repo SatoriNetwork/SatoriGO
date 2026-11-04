@@ -708,3 +708,102 @@ describe('loadOlderEvmHistory', () => {
     expect(await loadOlderEvmHistory(BASE, ME, undefined)).toBe(null);
   });
 });
+
+describe('refreshEvmHistory: where received SATORI came from', () => {
+  const SATORI = '0xd0a5bFF2789230b0fb1Bd989fc7CE7084c947E17';
+  const ZERO = '0x0000000000000000000000000000000000000000';
+  const HASH = (n: number) => `0x${String(n).repeat(64)}`;
+  // Each mints from the zero address but one, so the sender cannot tell them apart.
+  const TX_TO: Record<string, string> = {
+    [HASH(1)]: '0x8d2ecabbdd72c427a62ece45e30a75b41eb71e9b', // merkle
+    [HASH(2)]: '0xd08c6bb90b3fc96484e51e4ba9a373e15c83c28e', // airdrop
+    [HASH(3)]: '0x195083ee270ad89459e8dbf2d40fdfc85fb21327', // hub
+    [HASH(4)]: SATORI.toLowerCase(), // a plain transfer
+  };
+
+  function fakeBaseWithClaims() {
+    const asked: string[] = [];
+    let nodeUp = true;
+    const answer = (req: { id: number; method: string; params: unknown[] }) => {
+      if (req.method === 'eth_chainId') return { jsonrpc: '2.0', id: req.id, result: '0x2105' };
+      if (req.method !== 'eth_getTransactionByHash') return { jsonrpc: '2.0', id: req.id, error: { code: -32601, message: 'no' } };
+      const hash = String(req.params[0]);
+      asked.push(hash);
+      return { jsonrpc: '2.0', id: req.id, result: { hash, to: TX_TO[hash] } };
+    };
+    const fetchImpl = async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      if (init?.method === 'POST') {
+        if (!nodeUp) throw new TypeError('fetch failed');
+        const body = JSON.parse(String(init.body));
+        return new Response(JSON.stringify(Array.isArray(body) ? body.map(answer) : answer(body)), { status: 200 });
+      }
+      if (new URL(String(url)).searchParams.get('action') !== 'tokentx') {
+        return new Response(JSON.stringify({ status: '0', message: 'No transactions found', result: [] }), { status: 200 });
+      }
+      const row = (n: number, from: string) => ({
+        hash: HASH(n),
+        blockNumber: String(50000000 + n),
+        timeStamp: String(1725000000 + n),
+        from,
+        to: ME.toLowerCase(),
+        contractAddress: SATORI.toLowerCase(),
+        value: '1000000000000000000',
+        tokenSymbol: 'SATORI',
+        tokenName: 'Satori',
+        tokenDecimal: '18',
+        gasUsed: '1',
+        gasPrice: '1',
+        confirmations: '5',
+      });
+      return new Response(
+        JSON.stringify({ status: '1', message: 'OK', result: [row(1, ZERO), row(2, ZERO), row(3, ZERO), row(4, OTHER)] }),
+        { status: 200 },
+      );
+    };
+    return { asked, fetchImpl, setNodeUp: (up: boolean) => { nodeUp = up; } };
+  }
+
+  // The real Base row lists the SATORI contract, which is what turns this on.
+  const WITH_SATORI: EvmChainInfo = { ...BASE, defaultTokens: [{ address: SATORI, symbol: 'SATORI', decimals: 18 }] };
+  const sources = (rows: { txid: string; satoriSource?: string }[]) =>
+    Object.fromEntries(rows.map((row) => [row.txid, row.satoriSource]));
+
+  it('tells each claim channel from a plain transfer, and asks once ever per transaction', async () => {
+    const fake = fakeBaseWithClaims();
+    vi.stubGlobal('fetch', fake.fetchImpl);
+    const r = await refreshEvmHistory(WITH_SATORI, ME);
+    expect(sources(r!.txs!)).toEqual({
+      [HASH(1)]: 'rewards',
+      [HASH(2)]: 'airdrop',
+      [HASH(3)]: 'prediction',
+      [HASH(4)]: 'transfer',
+    });
+    expect(fake.asked).toHaveLength(4);
+
+    // The answer survives the cache and a fresh indexer row without it.
+    const again = await refreshEvmHistory(WITH_SATORI, ME);
+    expect(sources(again!.txs!)[HASH(2)]).toBe('airdrop');
+    expect(fake.asked).toHaveLength(4);
+  });
+
+  it('a node that cannot answer leaves the rows listed as ordinary, and they are asked again', async () => {
+    const fake = fakeBaseWithClaims();
+    fake.setNodeUp(false);
+    vi.stubGlobal('fetch', fake.fetchImpl);
+    const r = await refreshEvmHistory(WITH_SATORI, ME);
+    expect(r!.txs!).toHaveLength(4);
+    expect(r!.txs!.every((row) => row.satoriSource === undefined)).toBe(true);
+
+    fake.setNodeUp(true);
+    const again = await refreshEvmHistory(WITH_SATORI, ME);
+    expect(sources(again!.txs!)[HASH(1)]).toBe('rewards');
+  });
+
+  it('asks nothing on a chain that does not list the SATORI contract', async () => {
+    const fake = fakeBaseWithClaims();
+    vi.stubGlobal('fetch', fake.fetchImpl);
+    const r = await refreshEvmHistory({ ...WITH_SATORI, key: 'optimism' }, ME);
+    expect(r!.txs!.every((row) => row.satoriSource === undefined)).toBe(true);
+    expect(fake.asked).toHaveLength(0);
+  });
+});

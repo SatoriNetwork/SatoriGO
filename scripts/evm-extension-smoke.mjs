@@ -243,6 +243,53 @@ try {
   );
   await shot('evm-home-base.png');
 
+  // Satori pool staking on Base: SATORI is listed by default and its detail opens
+  // the pool screen, read from the central server. Read only: joining would write
+  // to the server, and this unfunded wallet could not anyway.
+  check((await byId('live-home-claim').count()) === 0, 'no Claim SATORI status with nothing to claim');
+  await byId('live-asset-row-SATORI').click({ timeout: 10_000 });
+  await byId('live-stake-button').click({ timeout: 10_000 });
+  await byId('live-staking').waitFor({ timeout: 10_000 });
+  await page.locator('[data-testid^="staking-pool-row-"]').first().waitFor({ timeout: 20_000 });
+  check((await byId('staking-status').count()) === 1, 'Base pool screen shows the staking status');
+  check((await byId('staking-error').count()) === 0, 'Base pool screen loaded without an error');
+  check(
+    await page.locator('[data-testid^="staking-join-"]').first().isDisabled(),
+    'Join is disabled with no SATORI to stake',
+  );
+  await shot('evm-base-pools.png');
+  await page.locator('button[aria-label="Back"]').first().click({ timeout: 10_000 });
+  await byId('live-asset-detail').waitFor({ timeout: 10_000 });
+
+  // Reward claims: read from the contracts and the central server. Read only:
+  // this unfunded wallet has nothing to claim and no ETH to pay for it.
+  await byId('live-rewards-button').click({ timeout: 10_000 });
+  await byId('live-rewards').waitFor({ timeout: 10_000 });
+  await byId('live-rewards-row-rewards').waitFor({ timeout: 20_000 });
+  check((await byId('live-rewards-issue').count()) === 0, 'rewards were read from the contracts and the server');
+  check(
+    (await byId('live-rewards-amount-rewards').innerText()) === 'Nothing to claim' &&
+      (await byId('live-rewards-amount-airdrop').innerText()) === 'Nothing to claim' &&
+      (await byId('live-rewards-amount-prediction').innerText()) === 'Nothing to claim',
+    'an unfunded new wallet has nothing to claim',
+  );
+  check((await byId('live-rewards-button-dot').count()) === 0, 'no rewards dot with nothing to claim');
+  check((await byId('live-rewards-no-eth').count()) === 1, 'rewards say the address has no ETH for the fee');
+  check(await byId('live-rewards-claim-airdrop').isDisabled(), 'Claim is disabled with nothing to claim');
+  await shot('evm-base-rewards.png');
+  await byId('live-rewards-history-button').click();
+  await byId('live-rewards-history').waitFor({ timeout: 10_000 });
+  await byId('live-history-loading').waitFor({ state: 'detached', timeout: 60_000 });
+  check((await byId('live-history-failed').count()) === 0, 'rewards history read the audit files');
+  check((await byId('live-history-empty').count()) === 1, 'a new wallet has no daily rewards');
+  check((await byId('live-history-no-claims').count()) === 1, 'a new wallet has no claims');
+  await page.locator('button[aria-label="Back"]').first().click({ timeout: 10_000 });
+  await byId('live-rewards').waitFor({ timeout: 10_000 });
+  await page.locator('button[aria-label="Back"]').first().click({ timeout: 10_000 });
+  await byId('live-asset-detail').waitFor({ timeout: 10_000 });
+  await page.locator('button[aria-label="Back"]').first().click({ timeout: 10_000 });
+  await byId('live-home').waitFor({ timeout: 10_000 });
+
   // PRICES: one host. The wallet asks <gateway>/prices and nothing else — the
   // gateway talks to CoinGecko and SafeTrade server-side. A build with no
   // gateway configured is the dev shape and keeps the direct sources, so the

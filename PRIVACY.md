@@ -118,13 +118,22 @@ used the same way.
 - **The Network tab.** Opening it fetches the public Satori network statistics
   (predictions, holders, distribution). Nothing about you is sent, and nothing is
   fetched unless you open that tab.
-- **The Satori pool API (`network.satorinet.io`), if you hold SATORIEVR.** The
-  wallet asks which pool your addresses are lending to. This sends **your Evrmore
-  address**. An earlier version of this policy said this only happened if you opened
-  the staking screen; that is no longer true, and the check now runs as soon as the
-  wallet sees a SATORIEVR balance. Joining or leaving a pool additionally sends a
-  signature proving you control the address. It is not a blockchain transaction and
-  it moves no funds. If you hold no SATORIEVR, this endpoint is never contacted.
+- **Your Satori rewards (`network.satorinet.io`), whenever you open Base.** To show
+  whether you have rewards to claim, the wallet asks this server for your reward
+  proof each time you open an account on Base, whether or not you hold SATORI, and
+  again every five minutes while it stays open. This sends **your Base address**.
+  In a wallet made from a recovery phrase it also sends **the Base address of the
+  same phrase's Evrmore key**, because older rewards are kept for that address. The
+  two requests come from your device together, so the server can see that the two
+  addresses belong together. An earlier version of this policy said this server was
+  only contacted if you held SATORIEVR; that is no longer true.
+- **Satori pool staking (`network.satorinet.io`), if you hold SATORI on Base.** The
+  wallet asks which pool your Base address is lending to, as soon as it sees a
+  SATORI balance. Joining or leaving a pool additionally sends a signature proving
+  you control the address. It is not a blockchain transaction and it moves no funds.
+- **Rewards history (`network.satorinet.io`), only on that screen.** The wallet
+  downloads Satori's public audit files for each day and works out your figures on
+  your device. The request names a date, not your address.
 
 ### That is the whole list
 
@@ -158,7 +167,7 @@ You can revoke any site at any time in **Settings > Connected sites**.
 | `alarms` | To run the optional check for incoming funds. While it is on, the wallet contacts the blockchain bridge about once a minute even with the window closed. It is off-switchable. |
 | `notifications` | To show a desktop notification when funds arrive (opt-in, off-switchable). |
 | Access to `network.satorigo.app` | The gateway described above: prices, notices, the blockchain bridge, and, on an EVM network, everything the wallet reads and broadcasts. |
-| Access to `satorinet.io` and `network.satorinet.io` | The SATORIEVR price, the Satori network statistics on the Network tab, and the Satori pool API if you hold SATORIEVR. These sites do not send the headers a web page would need to read them, so an extension host permission is the only way. |
+| Access to `satorinet.io` and `network.satorinet.io` | The SATORIEVR price, the Satori network statistics on the Network tab, your Satori rewards and pool staking on Base, and the rewards history. These sites do not send the headers a web page would need to read them, so an extension host permission is the only way. |
 | Access to all websites (content script) | Required so the wallet can offer the `window.evrmore` provider to any page that wants to connect, the same mechanism every browser wallet uses. The injected script only relays connection requests; **it does not read page content, and it does not run any code on your behalf.** It also stamps each request with the site's true origin, so a malicious page cannot pretend to be another site. |
 
 ## Children

@@ -14,6 +14,7 @@ import { EmptyState } from '../../components/EmptyState';
 import { useLiveStore, nativeTickerFor, nativeDecimalsFor, isNativeAssetId, activeFamily, activeEvmChain } from '../../store/liveStore';
 import { LiveNav } from './LiveNav';
 import { stakingRowLabel, validatorName } from './stakingRowLabel';
+import { satoriClaimRowTitle } from '../../store/satoriRewards';
 import { displaySymbol } from '../../services/displaySymbol';
 
 interface LiveTxDetailProps {
@@ -76,6 +77,7 @@ export function LiveTxDetail({ txid, onBack }: LiveTxDetailProps) {
   const maxDecimals = tx && isNativeAssetId(tx.asset) ? nativeDecimalsFor() : 8;
   const isMonero = activeFamily() === 'monero';
   const stakingInfo = tx?.staking;
+  const claimTitle = tx ? satoriClaimRowTitle(tx) : null;
   const staking =
     stakingInfo && stakeChain
       ? stakingRowLabel(stakingInfo, {
@@ -165,9 +167,9 @@ export function LiveTxDetail({ txid, onBack }: LiveTxDetailProps) {
         <div className="card">
           <div className="summary-table">
             <div className="sum-row">
-              <span className="sum-key">{staking ? 'Action' : 'Direction'}</span>
+              <span className="sum-key">{staking || claimTitle ? 'Action' : 'Direction'}</span>
               <span className="sum-val" data-testid={staking ? `live-tx-staking-${tx.txid}` : undefined}>
-                {staking ? staking.title : incoming ? 'Received' : 'Sent'}
+                {staking ? staking.title : claimTitle ?? (incoming ? 'Received' : 'Sent')}
               </span>
             </div>
             <div className="sum-row">

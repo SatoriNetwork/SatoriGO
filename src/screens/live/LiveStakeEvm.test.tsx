@@ -407,6 +407,16 @@ describe('4. review: the words, the figures, and the arming gate', () => {
     expect(screen.getByTestId('live-stake-explorer-link')).toHaveAttribute('href', 'https://scan.epix.zone/tx/0xabc');
   });
 
+  it('a double click sends once', async () => {
+    const state = withPlan();
+    render(<LiveStakeEvm onBack={() => {}} />);
+    fireEvent.click(screen.getByTestId('live-stake-arm-checkbox'));
+    fireEvent.click(screen.getByTestId('live-stake-broadcast'));
+    fireEvent.click(screen.getByTestId('live-stake-broadcast'));
+    await waitFor(() => expect(screen.getByTestId('live-stake-txid')).toHaveTextContent('0xabc'));
+    expect(state.confirmEvmStake).toHaveBeenCalledTimes(1);
+  });
+
   it('Back off the review clears the plan and disarms', () => {
     const state = withPlan();
     render(<LiveStakeEvm onBack={() => {}} />);

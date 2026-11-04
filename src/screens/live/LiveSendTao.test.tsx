@@ -206,6 +206,30 @@ describe('LiveSendTao', () => {
     expect(screen.getByTestId('live-tao-broadcast')).not.toBeDisabled();
   });
 
+  it('a double click while the password is being checked sends once', async () => {
+    hoisted.state.requirePasswordToSend = true;
+    let release: (ok: boolean) => void = () => {};
+    const passwordChecked = new Promise<boolean>((resolve) => { release = resolve; });
+    hoisted.state.verifyPassword = vi.fn(() => passwordChecked);
+    hoisted.state.buildTaoSend.mockImplementation(async () => {
+      hoisted.state.taoSend = plan;
+    });
+    renderScreen();
+    fireEvent.change(screen.getByTestId('live-tao-send-to'), { target: { value: TO } });
+    fireEvent.change(screen.getByTestId('live-tao-send-amount'), { target: { value: '1' } });
+    fireEvent.click(screen.getByTestId('live-tao-send-submit'));
+    await waitFor(() => expect(screen.getByTestId('live-tao-send-password')).toBeTruthy());
+    fireEvent.click(screen.getByTestId('live-tao-arm-checkbox'));
+    fireEvent.change(screen.getByTestId('live-tao-send-password'), { target: { value: 'right' } });
+    fireEvent.click(screen.getByTestId('live-tao-broadcast'));
+    fireEvent.click(screen.getByTestId('live-tao-broadcast'));
+    release(true);
+    await waitFor(() => expect(hoisted.state.confirmTaoSend).toHaveBeenCalled());
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(hoisted.state.confirmTaoSend).toHaveBeenCalledTimes(1);
+    expect(hoisted.state.verifyPassword).toHaveBeenCalledTimes(1);
+  });
+
   it('asks for the wallet password before broadcasting when requirePasswordToSend is on', async () => {
     hoisted.state.requirePasswordToSend = true;
     hoisted.state.verifyPassword = vi.fn(async () => false);

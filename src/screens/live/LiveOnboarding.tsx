@@ -17,7 +17,7 @@ import {
   type QuizChoice,
 } from '../../services/mnemonicQuiz';
 import { networkFor, type EvrmoreNetwork } from '../../services/chain/chainParams';
-import { classifyPrivateKeyOrigin } from '../../services/chain/keys';
+import { classifyPrivateKeyOrigin, wifVersionByte } from '../../services/chain/keys';
 import { isEvmChainTarget } from '../../store/evmChains';
 import { ChainPicker, CHAIN_OPTIONS, type ChainChoice } from './ChainPicker';
 
@@ -104,12 +104,18 @@ function pkChainNotice(
   input: string,
   network: ChainChoice,
 ): { error?: string; warning?: string; notice?: string } {
-  // This whole check is about a WIF version byte, a UTXO-only encoding: an EVM
-  // account takes a raw secp256k1 key with no chain-tagged prefix at all (see
-  // importPrivateKeyWallet's EVM branch in the store), so there is nothing here
-  // to compare and nothing to say. Also guards the networkFor() call below,
-  // which does not know an `evm:<key>` target.
-  if (isEvmChainTarget(network)) return {};
+  // An EVM account has no chain-tagged key format, so there is no prefix to
+  // compare: any WIF is the same secp256k1 key, and the import takes it as such.
+  // Saying so matters, the address will look nothing like the one they know. Also
+  // guards the networkFor() call below, which does not know an `evm:<key>` target.
+  if (isEvmChainTarget(network)) {
+    return wifVersionByte(input) === null
+      ? {}
+      : {
+          notice:
+            'This key will be converted for the network you picked. It stays the same private key, but its address there starts with 0x and looks different.',
+        };
+  }
   const target = networkFor(network);
   const origin = classifyPrivateKeyOrigin(input, target, PICKABLE_NETWORKS);
   if (origin.kind === 'unknown-chain') {

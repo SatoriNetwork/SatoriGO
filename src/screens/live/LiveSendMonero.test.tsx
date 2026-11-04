@@ -175,6 +175,29 @@ describe('LiveSendMonero', () => {
     expect(screen.getByTestId('live-xmr-broadcast')).not.toBeDisabled();
   });
 
+  it('a double click while the password is being checked sends once', async () => {
+    hoisted.state.requirePasswordToSend = true;
+    let release: (ok: boolean) => void = () => {};
+    const passwordChecked = new Promise<boolean>((resolve) => { release = resolve; });
+    hoisted.state.verifyPassword = vi.fn(() => passwordChecked);
+    moneroSendMock.build.mockResolvedValue(plan);
+    moneroSendMock.broadcast.mockResolvedValue({ txid: 'the-real-txid' });
+    renderScreen();
+    fireEvent.change(screen.getByTestId('live-xmr-send-to'), { target: { value: ADDR } });
+    fireEvent.change(screen.getByTestId('live-xmr-send-amount'), { target: { value: '1' } });
+    fireEvent.click(screen.getByTestId('live-xmr-send-submit'));
+    await waitFor(() => expect(screen.getByTestId('live-xmr-send-password')).toBeTruthy());
+    fireEvent.click(screen.getByTestId('live-xmr-arm-checkbox'));
+    fireEvent.change(screen.getByTestId('live-xmr-send-password'), { target: { value: 'right' } });
+    fireEvent.click(screen.getByTestId('live-xmr-broadcast'));
+    fireEvent.click(screen.getByTestId('live-xmr-broadcast'));
+    release(true);
+    await waitFor(() => expect(moneroSendMock.broadcast).toHaveBeenCalled());
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(moneroSendMock.broadcast).toHaveBeenCalledTimes(1);
+    expect(hoisted.state.verifyPassword).toHaveBeenCalledTimes(1);
+  });
+
   it('asks for the wallet password before broadcasting when requirePasswordToSend is on', async () => {
     hoisted.state.requirePasswordToSend = true;
     hoisted.state.verifyPassword = vi.fn(async () => false);

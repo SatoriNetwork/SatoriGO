@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type React from 'react';
-import { AlertTriangle, ArrowDownLeft, ArrowUpRight, Check, ChevronDown, Copy, Eye, EyeOff, ExternalLink, GripVertical, Landmark, LogOut, Pencil, Plus, RefreshCw, Search, Trash2, Wifi, WifiOff, X, ListFilter } from 'lucide-react';
+import { AlertTriangle, ArrowDownLeft, ArrowUpRight, Check, ChevronDown, Copy, Eye, EyeOff, ExternalLink, Gift, GripVertical, Landmark, LogOut, Pencil, Plus, RefreshCw, Search, Trash2, Wifi, WifiOff, X, ListFilter } from 'lucide-react';
 import { AccountAvatar } from '../../components/AccountAvatar';
 import { ActivityPager } from '../../components/ActivityPager';
 import { SyncStatusPill } from '../../components/SyncStatusPill';
@@ -69,7 +69,8 @@ import { useSettingsStore } from '../../store/settingsStore';
 import { useUiStore } from '../../store/uiStore';
 import { useT } from '../../i18n/useT';
 import { getAppVersion } from '../../services/constants';
-import { isLegacyAsset, getAssetNote } from '../../services/assetNotes';
+import { isLegacyAsset, getAssetNote, pricedTickerFor } from '../../services/assetNotes';
+import { allPendingSatoriRewards, satoriClaimRowTitle, satoriRowIsOfficial, SATORI_REWARDS_MAX_AGE_MS } from '../../store/satoriRewards';
 import type { LiveAssetBalance, LiveTransaction } from '../../services/chain/electrumProvider';
 import {
   mergeActivity,
@@ -114,6 +115,8 @@ interface LiveHomeProps {
    *  screen decides for itself with evmStakingSupported() — the handler may be
    *  passed unconditionally. */
   onStake?(): void;
+  /** Opens the Satori reward claims. */
+  onRewards?(): void;
 }
 
 function shortenAddr(addr: string): string {
@@ -228,10 +231,13 @@ function fmtChange(percent: number): string {
  *  trustworthy answer to "is this the chain's coin". An issued asset or an
  *  ERC-20 must never be priced off a name collision: a token calling itself
  *  "BTC" is not Bitcoin, and pricing it as one would invent portfolio value. */
-function priceForAsset(asset: Pick<LiveAssetBalance, 'name' | 'isNative'>, prices: PriceMap): number | undefined {
-  const ticker = asset.name.trim().toUpperCase();
-  if (!asset.isNative && ticker !== 'SATORIEVR') return undefined;
-  return prices[ticker];
+function priceForAsset(
+  asset: Pick<LiveAssetBalance, 'name' | 'isNative'>,
+  prices: PriceMap,
+  officialSatori: boolean,
+): number | undefined {
+  const ticker = pricedTickerFor(asset.name, asset.isNative, officialSatori);
+  return ticker === null ? undefined : prices[ticker];
 }
 
 /** The full quote (every currency the source published) for one displayed row,
@@ -240,10 +246,10 @@ function priceForAsset(asset: Pick<LiveAssetBalance, 'name' | 'isNative'>, price
 function quoteForAsset(
   asset: Pick<LiveAssetBalance, 'name' | 'isNative'>,
   quoteFor: (ticker: string) => PriceQuote | undefined,
+  officialSatori: boolean,
 ): PriceQuote | undefined {
-  const ticker = asset.name.trim().toUpperCase();
-  if (!asset.isNative && ticker !== 'SATORIEVR') return undefined;
-  return quoteFor(ticker);
+  const ticker = pricedTickerFor(asset.name, asset.isNative, officialSatori);
+  return ticker === null ? undefined : quoteFor(ticker);
 }
 
 /** Compact activity timestamp with the exact time, e.g. "12 Jul, 14:30:05". */
@@ -339,7 +345,7 @@ function TxRow({
             style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
             {...(staking ? { 'data-testid': `live-tx-staking-${openId}` } : {})}
           >
-            {staking ? staking.title : `${isIn ? 'Received' : 'Sent'} ${shownAsset}`}
+            {staking ? staking.title : satoriClaimRowTitle(tx) ?? `${isIn ? 'Received' : 'Sent'} ${shownAsset}`}
           </span>
           {tx.status === 'pending' && (
             <span className="chip warning" style={{ fontSize: 9, padding: '1px 5px', flexShrink: 0 }}>pending</span>
@@ -483,7 +489,7 @@ function BalanceRow({
   onSelect?: (name: string) => void;
   /** Absent on every screen that does not offer the list's edit mode. */
   edit?: RowEditProps;
-  /** Present only for SATORIEVR when the wallet is registered with a pool. */
+  /** Present only for SATORI when the wallet is registered with a pool. */
   staked?: { poolAlias: string | null; poolAddress: string };
   /** Active chain's native ticker; gates the Evrmore-only "legacy SATORI" pill. */
   nativeTicker: string;
@@ -700,7 +706,7 @@ function BalanceRow({
   );
 }
 
-export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake }: LiveHomeProps) {
+export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake, onRewards }: LiveHomeProps) {
   const address = useLiveStore((s) => s.address);
   const assets = useLiveStore((s) => s.assets);
   const pinnedAssets = useLiveStore((s) => s.pinnedAssets);
@@ -751,6 +757,11 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
   // line under the hero follows the store's cache. Both are read on every
   // chain; what they render is gated below.
   const evm = useLiveStore((s) => s.evm);
+  const evmTokens = useLiveStore((s) => s.evmTokens);
+  const officialSatori = useMemo(
+    () => satoriRowIsOfficial(activeEvmChain({ evm })?.defaultTokens, evmTokens),
+    [evm, evmTokens],
+  );
   const evmStaking = useLiveStore((s) => s.evmStaking);
   const refreshEvmStaking = useLiveStore((s) => s.refreshEvmStaking);
   // Owner-authored notifications: the list (already order-sorted by the gateway),
@@ -900,19 +911,39 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
   }, [tab, unreadActivity, markActivitySeen]);
 
   // Lazily refresh Satori staking status when the home asset list loads AND the
-  // wallet actually holds SATORIEVR — never fired for wallets that don't, so we
+  // wallet actually holds SATORI — never fired for wallets that don't, so we
   // add no extra network calls for the common case. Fire-and-forget (like the
   // other background refreshes in the store): never blocks or slows the balances
   // refresh, and a stale-but-cached value is fine between refreshes (only kicks
   // once per mount/holding-change, not on every render).
-  const holdsSatori = assets.some((a) => a.name === 'SATORIEVR' && a.amountBase > 0n);
+  const holdsSatori = stakingSupported() && officialSatori && assets.some((a) => a.name === 'SATORI' && a.amountBase > 0n);
   useEffect(() => {
     if (holdsSatori && !staking.loading && !staking.loaded) {
       void refreshStaking();
     }
   }, [holdsSatori, staking.loading, staking.loaded, refreshStaking]);
 
-  // "Staked" pill next to SATORIEVR: true once any held address is registered
+  // Rewards can wait on an account holding no SATORI at all, so unlike the staking
+  // status above this reads on every open of Base, then when it has gone stale.
+  const refreshSatoriRewards = useLiveStore((s) => s.refreshSatoriRewards);
+  const satoriRewardsState = useLiveStore((s) => s.satoriRewards);
+  const rewardsChain = stakingSupported();
+  useEffect(() => {
+    if (!rewardsChain || !address) return undefined;
+    const readIfDue = () => {
+      const { loading, snapshot } = useLiveStore.getState().satoriRewards;
+      if (loading) return;
+      const due =
+        !snapshot || snapshot.address !== address || Date.now() - snapshot.readAt > SATORI_REWARDS_MAX_AGE_MS;
+      if (due) void refreshSatoriRewards();
+    };
+    readIfDue();
+    const timer = setInterval(readIfDue, 60_000);
+    return () => clearInterval(timer);
+  }, [rewardsChain, address, refreshSatoriRewards]);
+  const pendingRewards = rewardsChain && address ? allPendingSatoriRewards(satoriRewardsState, address) : null;
+
+  // "Staked" pill next to SATORI: true once any held address is registered
   // with a pool (server truth from the lazy refresh above, or from a prior visit
   // to the staking screen this session).
   const isStakedSatori = staking.addressStatuses.some((s) => s.poolAddress);
@@ -1223,7 +1254,7 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
       usdFor: (name) => {
         const row = byName.get(name);
         return row
-          ? usdValue(amountToNumber(row.amountBase, row.scale), priceForAsset(row, prices))
+          ? usdValue(amountToNumber(row.amountBase, row.scale), priceForAsset(row, prices, officialSatori))
           : null;
       },
       trustFor: (name) => tokenTrustFor(name),
@@ -1570,7 +1601,7 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
   // In the display currency (Settings, Appearance); sumFiat drops to USD, and
   // labels it USD, only when some priced row cannot be expressed in it.
   const totalFiat = sumFiat(
-    displayAssets.map((a) => ({ amount: amountToNumber(a.amountBase, a.scale), quote: quoteForAsset(a, fiatCtx.quoteFor) })),
+    displayAssets.map((a) => ({ amount: amountToNumber(a.amountBase, a.scale), quote: quoteForAsset(a, fiatCtx.quoteFor, officialSatori) })),
     fiatCtx.currency,
     fiatCtx.fx,
   );
@@ -2354,6 +2385,29 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
                   sizes its frame inline), so the compact figure lives here
                   beside the class that names the same state. 36 keeps the coin
                   recognisable while giving the list back 28px of its 74. */}
+              {pendingRewards && officialSatori && onRewards && (
+                <button
+                  type="button"
+                  className="reward-pulse"
+                  onClick={onRewards}
+                  data-testid="live-home-claim"
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 5,
+                    marginBottom: 6,
+                    padding: '3px 10px',
+                    borderRadius: 999,
+                    fontSize: 11.5,
+                    fontWeight: 600,
+                    color: 'var(--warning)',
+                    background: 'var(--warning-bg)',
+                  }}
+                >
+                  <Gift size={12} aria-hidden="true" />
+                  Claim SATORI
+                </button>
+              )}
               <div className="hero-mark" data-testid="live-hero-mark">
                 <TokenIcon assetId={nativeTicker} size={tightList ? 36 : 64} />
               </div>
@@ -2772,8 +2826,8 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
                       masked={hideBalances}
                       key={asset.name}
                       asset={asset}
-                      fiatPrice={quoteInCurrency(quoteForAsset(asset, fiatCtx.quoteFor), fiatCtx.currency, fiatCtx.fx)}
-                      change24h={priceChanges24h[asset.name]}
+                      fiatPrice={quoteInCurrency(quoteForAsset(asset, fiatCtx.quoteFor, officialSatori), fiatCtx.currency, fiatCtx.fx)}
+                      change24h={priceChanges24h[pricedTickerFor(asset.name, asset.isNative, officialSatori) ?? asset.name]}
                       onSelect={onSelectAsset}
                       nativeTicker={nativeTicker}
                       compact={tightList}
@@ -2800,7 +2854,7 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
                           : undefined
                       }
                       staked={
-                        asset.name === 'SATORIEVR' && isStakedSatori && stakedPoolAddress
+                        asset.name === 'SATORI' && officialSatori && isStakedSatori && stakedPoolAddress
                           ? { poolAlias: stakedPoolAlias, poolAddress: stakedPoolAddress }
                           : undefined
                       }
