@@ -57,6 +57,9 @@ export interface EvmCallInput {
    *  this sentence; nothing here inspects the calldata to invent one. */
   description: string;
   level?: EvmFeeLevel;
+  /** A site's eth_sendTransaction may be a plain value transfer with no
+   *  calldata. Every other caller (staking) must carry calldata. */
+  allowEmptyData?: boolean;
 }
 
 /**
@@ -134,7 +137,7 @@ export async function planEvmCall(args: {
   if (!evm.isEvmAddress(input.to)) {
     throw new EvmSendError('invalid-address', `Not a valid contract address on ${chain.displayName}: ${input.to}`);
   }
-  if (!(input.data instanceof Uint8Array) || input.data.length === 0) {
+  if (!(input.data instanceof Uint8Array) || (input.data.length === 0 && !input.allowEmptyData)) {
     throw new EvmSendError('unknown-asset', 'A contract call must carry calldata.');
   }
   if (typeof input.value !== 'bigint' || input.value < 0n) {

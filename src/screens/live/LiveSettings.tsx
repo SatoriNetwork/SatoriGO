@@ -420,6 +420,8 @@ export function LiveSettings({ onBack, onOpenAddressBook, onImportMonero }: Live
   const setAutoLockMinutes = useLiveStore((s) => s.setAutoLockMinutes);
   const notifyDeposits = useLiveStore((s) => s.notifyDeposits);
   const setNotifyDeposits = useLiveStore((s) => s.setNotifyDeposits);
+  const evmDefaultWallet = useLiveStore((s) => s.evmDefaultWallet);
+  const setEvmDefaultWallet = useLiveStore((s) => s.setEvmDefaultWallet);
   const explorerUrlTemplate = useLiveStore((s) => s.explorerUrlTemplate);
   const setExplorerUrlTemplate = useLiveStore((s) => s.setExplorerUrlTemplate);
   const electrumServers = useLiveStore((s) => s.electrumServers);
@@ -1081,7 +1083,7 @@ export function LiveSettings({ onBack, onOpenAddressBook, onImportMonero }: Live
         title: 'Connected sites',
         desc:
           connectedSites.length === 0
-            ? 'No dApps connected via window.evrmore'
+            ? 'No dApps connected'
             : `${connectedSites.length} site${connectedSites.length === 1 ? '' : 's'} can read your address`,
         onClick: () => setSection('sites'),
       },
@@ -2513,12 +2515,28 @@ export function LiveSettings({ onBack, onOpenAddressBook, onImportMonero }: Live
 
       {section === 'sites' && (
         <div data-testid="live-connected-sites">
+          <div className="list-row" style={{ marginBottom: 6 }}>
+            <span className="row-main">
+              <span className="row-title">Default browser wallet</span>
+              <span className="row-desc">
+                Use Satori GO for Base and Ethereum sites even when MetaMask or another wallet is
+                installed. Off: the other wallet stays the default and sites that list wallets
+                still offer Satori GO. Applies when a page is reloaded.
+              </span>
+            </span>
+            <Toggle
+              checked={evmDefaultWallet}
+              onChange={setEvmDefaultWallet}
+              label="Default browser wallet"
+              testId="live-set-evm-default-wallet"
+            />
+          </div>
           {connectedSites.length === 0 ? (
             <div data-testid="live-sites-empty">
               <EmptyState
                 icon={<Link2 size={22} />}
                 title="No connected sites"
-                description="Sites you approve via window.evrmore will appear here."
+                description="Sites you connect to Satori GO (Evrmore or Base/Ethereum) will appear here."
               />
             </div>
           ) : (
@@ -2532,7 +2550,7 @@ export function LiveSettings({ onBack, onOpenAddressBook, onImportMonero }: Live
                     bound?.name ?? `wallet ${site.walletId.slice(0, 6)}…`;
                   return (
                     <div
-                      key={`${site.origin}|${site.walletId}`}
+                      key={`${site.family ?? 'evr'}|${site.origin}|${site.walletId}`}
                       className="list-row"
                       data-testid={`live-site-${i}`}
                       style={{ alignItems: 'center', gap: 8 }}
@@ -2546,6 +2564,7 @@ export function LiveSettings({ onBack, onOpenAddressBook, onImportMonero }: Live
                         </span>
                         <span className="row-desc" data-testid={`live-site-wallet-${i}`}>
                           {walletLabel}
+                          {site.family === 'evm' ? ' · Base/Ethereum' : ' · Evrmore'}
                         </span>
                       </span>
                       <Button

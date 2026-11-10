@@ -1169,6 +1169,13 @@ const ADDRESS_BOOK_KEY = 'addressBook';
  *  writes this list on approval and re-reads it on every dApp request, so
  *  removing an origin here revokes its access immediately. */
 const DAPP_APPROVED_ORIGINS_KEY = 'dappApprovedOrigins';
+/** window.ethereum connections, [{origin, walletId, chainKey}]. MUST mirror
+ *  EVM_APPROVED_ORIGINS_KEY in src/background/evmApprovals.ts. */
+const DAPP_EVM_APPROVED_ORIGINS_KEY = 'dappEvmApprovedOrigins';
+/** "Default browser wallet": Satori GO takes window.ethereum even when another
+ *  wallet is installed. Read by public/content.js as 'evrdemo:evmDefaultWallet'
+ *  (the storage namespace + this key), so the two MUST stay in step. */
+const EVM_DEFAULT_WALLET_KEY = 'evmDefaultWallet';
 
 /** A saved recipient in the address book. */
 export interface Contact {
@@ -1181,6 +1188,8 @@ export interface Contact {
 export interface ConnectedSite {
   origin: string;
   walletId: string;
+  /** 'evm' for a window.ethereum connection; absent for window.evrmore. */
+  family?: 'evm';
 }
 
 /** One derived receive address of the active wallet ([0] = primary). */
@@ -1454,6 +1463,21 @@ async function readApprovalsRaw(): Promise<unknown> {
     return await getStorage().get<unknown>(DAPP_APPROVED_ORIGINS_KEY);
   } catch {
     return undefined;
+  }
+}
+
+/** The window.ethereum connections, minus any for a wallet that is gone. The
+ *  worker owns chain-key repair; this only reads and revokes. */
+async function readEvmApprovals(validIds: ReadonlySet<string>): Promise<{ origin: string; walletId: string; chainKey: string }[]> {
+  try {
+    const raw = await getStorage().get<unknown>(DAPP_EVM_APPROVED_ORIGINS_KEY);
+    if (!Array.isArray(raw)) return [];
+    return raw.filter(
+      (e): e is { origin: string; walletId: string; chainKey: string } =>
+        !!e && typeof e.origin === 'string' && typeof e.walletId === 'string' && validIds.has(e.walletId),
+    );
+  } catch {
+    return [];
   }
 }
 
@@ -2059,6 +2083,8 @@ interface LiveState {
   hiddenChains: string[];
   /** When true, the background worker notifies on incoming funds to any wallet. */
   notifyDeposits: boolean;
+  /** Satori GO takes window.ethereum even when another wallet is installed. */
+  evmDefaultWallet: boolean;
   /** User-managed Electrum server pool as `wss://host:port` URLs (persisted). */
   electrumServers: string[];
   /** Live reachability of each server (keyed by URL) for the online/offline dots. */
@@ -2517,6 +2543,7 @@ interface LiveState {
    *  (see chainHideBlockedReason), so a stale UI cannot force a bad state. */
   setChainHidden(chainId: string, hidden: boolean): void;
   setNotifyDeposits(on: boolean): void;
+  setEvmDefaultWallet(on: boolean): void;
   // --- Electrum server pool (user-managed) ----------------------------------
   addElectrumServer(url: string): { ok: true } | { ok: false; error: string };
   removeElectrumServer(url: string): void;
@@ -2788,6 +2815,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   hideBalances: false,
   hiddenChains: [],
   notifyDeposits: true,
+  evmDefaultWallet: false,
   electrumServers: [...DEFAULT_ELECTRUM_SERVER_URLS],
   serverStatus: {},
   addressBook: [],
@@ -2863,6 +2891,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       storedHideZeroBalances,
       storedHideBalances,
       storedDismissedNotifs,
+      storedEvmDefault,
     ] = await Promise.all([
       readValue<boolean>(REQUIRE_PW_KEY),
       readValue<string>(EXPLORER_URL_KEY),
@@ -2875,9 +2904,13 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       readValue<boolean>(HIDE_ZERO_BALANCES_KEY),
       readValue<boolean>(HIDE_BALANCES_KEY),
       readList(NOTIF_DISMISSED_KEY),
+      readValue<boolean>(EVM_DEFAULT_WALLET_KEY),
     ]);
     set({
       addressBook,
+      // Default FALSE: another installed wallet keeps window.ethereum unless the
+      // user makes Satori GO the default.
+      evmDefaultWallet: storedEvmDefault === true,
       // Default TRUE — require the password before sending unless explicitly disabled.
       requirePasswordToSend: typeof storedRequirePw === 'boolean' ? storedRequirePw : true,
       // Default BASIC: the expert sections (servers, diagnostics, raw addresses)
@@ -3147,7 +3180,13 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     const { entries, changed } = normalizeApprovals(raw, activeId, validIds);
     // Persist the migrated form so the store converges to the new shape.
     if (changed) persistValue(DAPP_APPROVED_ORIGINS_KEY, entries);
-    set({ connectedSites: entries });
+    const evmEntries = await readEvmApprovals(validIds);
+    set({
+      connectedSites: [
+        ...entries,
+        ...evmEntries.map((e) => ({ origin: e.origin, walletId: e.walletId, family: 'evm' as const })),
+      ],
+    });
   },
 
   async disconnectSite(origin: string, walletId: string) {
@@ -3160,17 +3199,26 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     const activeId = get().activeWalletId ?? '';
     const { entries } = normalizeApprovals(raw, activeId, validIds);
     const next = entries.filter((e) => !(e.origin === origin && e.walletId === walletId));
+    const evmEntries = await readEvmApprovals(validIds);
+    const evmNext = evmEntries.filter((e) => !(e.origin === origin && e.walletId === walletId));
     try {
       await getStorage().set(DAPP_APPROVED_ORIGINS_KEY, next);
+      if (evmNext.length !== evmEntries.length) await getStorage().set(DAPP_EVM_APPROVED_ORIGINS_KEY, evmNext);
     } catch {
       // ignore — storage unavailable
     }
-    set({ connectedSites: next });
+    set({
+      connectedSites: [
+        ...next,
+        ...evmNext.map((e) => ({ origin: e.origin, walletId: e.walletId, family: 'evm' as const })),
+      ],
+    });
   },
 
   async disconnectAllSites() {
     try {
       await getStorage().set(DAPP_APPROVED_ORIGINS_KEY, []);
+      await getStorage().set(DAPP_EVM_APPROVED_ORIGINS_KEY, []);
     } catch {
       // ignore — storage unavailable
     }
@@ -6920,6 +6968,12 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     const normalized = Number.isFinite(minutes) && minutes > 0 ? Math.floor(minutes) : 0;
     persistValue(AUTO_LOCK_MINUTES_KEY, normalized);
     set({ autoLockMinutes: normalized });
+  },
+
+  setEvmDefaultWallet(on: boolean) {
+    // Read by content.js on each page load (see EVM_DEFAULT_WALLET_KEY).
+    persistValue(EVM_DEFAULT_WALLET_KEY, on);
+    set({ evmDefaultWallet: on });
   },
 
   setNotifyDeposits(on: boolean) {

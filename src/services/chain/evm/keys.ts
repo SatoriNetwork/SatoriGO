@@ -282,7 +282,12 @@ export function compressedPublicKey(privateKey: Uint8Array): Uint8Array {
  * The caller owns `privateKey` and zeroes it.
  */
 export function personalSign(message: string, privateKey: Uint8Array): string {
-  const body = utf8ToBytes(message);
+  return personalSignBytes(utf8ToBytes(message), privateKey);
+}
+
+/** personalSign over raw bytes: what a site's `personal_sign` sends as 0x hex.
+ *  Same prefix, same output form. The caller owns `privateKey` and zeroes it. */
+export function personalSignBytes(body: Uint8Array, privateKey: Uint8Array): string {
   const prefix = utf8ToBytes(`\x19Ethereum Signed Message:\n${body.length}`);
   const joined = new Uint8Array(prefix.length + body.length);
   joined.set(prefix);

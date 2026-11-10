@@ -665,3 +665,35 @@ describe('side panel mode: a site request opens the wallet in the side panel', (
     expect(windowsCreate).toHaveBeenCalledTimes(1);
   }, 15_000);
 });
+
+describe('window.ethereum results', () => {
+  it('reach the tab as evm-dapp-result, with EIP-1193 errors', async () => {
+    sessionData.set('dappPending:evm-1', {
+      id: 'evm-1', tabId: 7, origin: 'https://dapp.example', method: 'personal_sign', family: 'evm', chainKey: 'base',
+    });
+    tabsGet.mockResolvedValue({ url: 'https://dapp.example/' });
+
+    await settleFromApprovalPage({ id: 'evm-1', error: 'user-rejected' });
+
+    expect(tabsSendMessage).toHaveBeenCalledWith(7, {
+      type: 'evm-dapp-result',
+      id: 'evm-1',
+      origin: 'https://dapp.example',
+      result: undefined,
+      error: { code: 4001, message: 'User rejected the request.' },
+    });
+  });
+
+  it('never put an EVM connect into the Evrmore approval list', async () => {
+    sessionData.set('dappPending:evm-2', {
+      id: 'evm-2', tabId: 7, origin: 'https://dapp.example', method: 'eth_requestAccounts', family: 'evm', chainKey: 'base',
+    });
+    localData.set('evrdemo:liveWallets', { version: 1, activeId: 'w1', wallets: [{ id: 'w1', address: 'Eaddr' }] });
+    tabsGet.mockResolvedValue({ url: 'https://dapp.example/' });
+
+    await settleFromApprovalPage({ id: 'evm-2', result: ['0x1111111111111111111111111111111111111111'], approveOrigin: 'https://dapp.example', walletId: 'w1' });
+
+    expect(localData.get('evrdemo:dappApprovedOrigins')).toBeUndefined();
+    expect(tabsSendMessage).toHaveBeenCalledWith(7, expect.objectContaining({ type: 'evm-dapp-result', id: 'evm-2' }));
+  });
+});

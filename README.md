@@ -209,6 +209,11 @@ first**. See the in‑app note under **Settings → About**.
 - **dApp connect** — `window.evrmore` provider so websites (e.g. the Satori neuron UI)
   can connect, request sends and **request message signatures** (`signMessage`, for
   Satori login / proof‑of‑address), each behind an explicit approval window.
+- **Base / Ethereum dApps**: an EIP-1193 provider (`window.ethereum`, announced via
+  EIP-6963) so websites can connect an EVM account, switch chain, sign
+  (`personal_sign`, `eth_signTypedData_v4`) and request transactions, each behind an
+  approval. Whether Satori GO or another installed wallet (MetaMask) owns
+  `window.ethereum` is your choice (Settings → Connected sites → Default browser wallet).
 - **Incoming‑funds notifications** — an opt‑in background poll shows a desktop
   notification when a coin, asset or token arrives in any of your wallets
   (Settings → Notifications).
@@ -417,6 +422,42 @@ interface EvrmoreProvider {
 
 ---
 
+## Integrating a Base / Ethereum website (`window.ethereum`)
+
+Satori GO also injects a standard **EIP-1193** provider for its EVM accounts (Base by
+default; also Ethereum, BNB Chain, Avalanche, Robinhood Chain and Epix). Code written
+for MetaMask works unchanged: ethers `BrowserProvider`, viem `custom(window.ethereum)`,
+wagmi and RainbowKit.
+
+- **Discovery.** The provider is always announced through **EIP-6963**
+  (`rdns: io.satorinet.go`, name "Satori GO"), so wallet pickers list it beside
+  MetaMask. It becomes `window.ethereum` when no other wallet has taken it, or always
+  when the user turns on **Default browser wallet**. `window.ethereum.isSatoriGO === true`
+  identifies it (it never claims `isMetaMask`).
+- **Approvals.** `eth_requestAccounts`, `personal_sign`, `eth_signTypedData_v4` and
+  `eth_sendTransaction` each open an approval. A transaction is simulated and priced
+  by the wallet before the user can confirm; the site's own `gas` / fee fields are
+  ignored.
+- **Chains.** Each site has its own chain (Base until it switches).
+  `wallet_switchEthereumChain` works for every chain above and answers `4902` for any
+  other; `wallet_addEthereumChain` only switches to a chain the wallet already has.
+- **Tokens.** `wallet_watchAsset` answers `true` for a token the wallet already shows
+  (SATORI and USDC on Base are defaults). A site cannot add a token; the user adds it
+  under Add token, where the wallet reads its symbol and decimals from the chain.
+- **Reads.** `eth_call`, `eth_getBalance`, `eth_blockNumber`, `eth_estimateGas`,
+  `eth_getTransactionReceipt` and the other read-only methods are forwarded to the
+  chain's RPC. Nothing that writes is forwarded.
+- **Not supported.** `eth_sign` (it signs a raw hash, which can be a transaction) and
+  contract deployment. Errors use the EIP-1193 codes (`4001` rejected, `4100` not
+  connected, `4200` unsupported, `4902` unknown chain).
+
+```js
+const [address] = await window.ethereum.request({ method: 'eth_requestAccounts' });
+await window.ethereum.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: '0x2105' }] });
+const sig = await window.ethereum.request({ method: 'personal_sign', params: ['0x' + [...new TextEncoder().encode('hello')].map((b) => b.toString(16).padStart(2, '0')).join(''), address] });
+window.ethereum.on('chainChanged', (chainId) => console.log('now on', chainId));
+```
+
 ## Architecture (short)
 
 - **`src/services/chain/`** — the crypto engine: `chainParams` (per-network
@@ -436,8 +477,10 @@ interface EvrmoreProvider {
 - **`src/store/liveStore.ts`** — zustand state for the wallet UI.
 - **`src/screens/live/`** — the wallet UI; **`src/screens/dapp/DappApproval.tsx`** —
   the approval window.
-- **`public/inpage.js`** (injected `window.evrmore`), **`public/content.js`** (relay),
-  **`src/background/index.ts`** (built module service worker / dApp broker).
+- **`public/inpage.js`** (injected `window.evrmore`), **`public/inpage-evm.js`**
+  (injected EIP-1193 / EIP-6963 provider), **`public/content.js`** (relay),
+  **`src/background/index.ts`** (built module service worker / dApp broker) with
+  **`src/background/evmDapp.ts`** (what each `window.ethereum` method does).
 - **`platforms/{chrome,edge,firefox}/manifest.json`** — one manifest per browser
   target (manifest.json no longer lives in `public/`); **`scripts/build.mjs`**
   builds shared `src/`/`public/` per target and copies in the right manifest,

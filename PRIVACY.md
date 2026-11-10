@@ -146,7 +146,11 @@ normal browser tab, where that site sees you as any visitor.
 
 ## What websites can see
 
-Websites can request a connection through the `window.evrmore` provider. A site gets
+Websites can request a connection through the `window.evrmore` provider, or, for an
+EVM account on Base, Ethereum and the other EVM networks, through the standard
+`window.ethereum` provider. Read-only requests such a site makes (a balance, a
+contract read) are forwarded to that network's RPC, the same servers the wallet
+itself reads through. A site gets
 **nothing** until you explicitly approve it in a wallet window, and:
 
 - an approval is bound to **one specific wallet**: switching to a different wallet
@@ -168,7 +172,7 @@ You can revoke any site at any time in **Settings > Connected sites**.
 | `notifications` | To show a desktop notification when funds arrive (opt-in, off-switchable). |
 | Access to `network.satorigo.app` | The gateway described above: prices, notices, the blockchain bridge, and, on an EVM network, everything the wallet reads and broadcasts. |
 | Access to `satorinet.io` and `network.satorinet.io` | The SATORIEVR price, the Satori network statistics on the Network tab, your Satori rewards and pool staking on Base, and the rewards history. These sites do not send the headers a web page would need to read them, so an extension host permission is the only way. |
-| Access to all websites (content script) | Required so the wallet can offer the `window.evrmore` provider to any page that wants to connect, the same mechanism every browser wallet uses. The injected script only relays connection requests; **it does not read page content, and it does not run any code on your behalf.** It also stamps each request with the site's true origin, so a malicious page cannot pretend to be another site. |
+| Access to all websites (content script) | Required so the wallet can offer the `window.evrmore` and `window.ethereum` providers to any page that wants to connect, the same mechanism every browser wallet uses. The injected script only relays connection requests; **it does not read page content, and it does not run any code on your behalf.** It also stamps each request with the site's true origin, so a malicious page cannot pretend to be another site. |
 
 ## Children
 

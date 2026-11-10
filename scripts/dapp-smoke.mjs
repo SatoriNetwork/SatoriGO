@@ -184,7 +184,11 @@ async function awaitApproval(trigger, { timeout = 20_000 } = {}) {
   const seen = new Set();
   for (const page of walletPages) {
     if (page.isClosed()) continue;
-    for (const el of await page.getByTestId('dapp-host-overlay').all()) seen.add(await el.getAttribute('data-request-id'));
+    // A decided request's overlay can vanish between all() and the read; that
+    // one is gone, not something to wait 30 s for.
+    for (const el of await page.getByTestId('dapp-host-overlay').all()) {
+      seen.add(await el.getAttribute('data-request-id', { timeout: 1000 }).catch(() => null));
+    }
   }
   const asWindow = context
     .waitForEvent('page', { timeout })

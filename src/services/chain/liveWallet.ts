@@ -4381,6 +4381,33 @@ export class LiveWalletService implements WalletEngine {
     };
   }
 
+  /** For a site's `personal_sign` (window.ethereum): EIP-191 over the raw bytes
+   *  the site sent, with the ACTIVE EVM account. Key derived per call and zeroed.
+   *  Requires an unlocked EVM wallet. */
+  personalSignEvm(message: Uint8Array): { address: string; signature: string } {
+    if (this.activeFamily !== 'evm') throw new Error('not-an-evm-wallet');
+    const evm = this.evmModules();
+    const priv = this.evmPrivateKey();
+    try {
+      return { address: this.evmAddress(), signature: evm.personalSignBytes(message, priv) };
+    } finally {
+      priv.fill(0);
+    }
+  }
+
+  /** For a site's `eth_signTypedData_v4`: EIP-712 with the ACTIVE EVM account.
+   *  Key derived per call and zeroed. Requires an unlocked EVM wallet. */
+  signTypedDataEvm(data: import('./evm').TypedData): { address: string; signature: string } {
+    if (this.activeFamily !== 'evm') throw new Error('not-an-evm-wallet');
+    const evm = this.evmModules();
+    const priv = this.evmPrivateKey();
+    try {
+      return { address: this.evmAddress(), signature: evm.signTypedData(data, priv) };
+    } finally {
+      priv.fill(0);
+    }
+  }
+
   /** Sign an arbitrary message with the ACTIVE wallet's PRIMARY key (index 0) in
    *  the Evrmore `signmessage` format (base64 recoverable sig), so it verifies
    *  with `evrmore-cli verifymessage` and Satori's backend — enabling

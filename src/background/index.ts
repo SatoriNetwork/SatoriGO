@@ -38,6 +38,13 @@ import {
   collapseToOnePerOrigin,
   setApproval,
 } from './approvals';
+import {
+  EVM_APPROVAL_METHODS,
+  bindEvmOrigin,
+  handleEvmDappRequest,
+  toEvmProviderError,
+  type EvmDappRequestMessage,
+} from './evmDapp';
 
 // Best-effort: adopt the user's configured Electrum server pools so the dApp
 // worker's watch-only reads (getBalances) and the deposit poll use the SAME
@@ -106,7 +113,12 @@ export interface PendingDappRequest {
   tabId: number;
   origin: string;
   method: string;
-  params?: Record<string, unknown>;
+  /** Record for window.evrmore; an EIP-1193 params array for window.ethereum. */
+  params?: unknown;
+  /** 'evm' for a window.ethereum request; absent for window.evrmore. */
+  family?: 'evm';
+  /** EVM only: the chain (evm/chains.ts key) the site is on. */
+  chainKey?: string;
 }
 
 /** Public (secret-free) subset of the persisted wallet entries we read. */
@@ -551,11 +563,12 @@ async function approvalStillShown(pending: PendingDappRequest): Promise<boolean>
 }
 
 /** Deliver a settled outcome to the tab that asked, if it still hosts the origin. */
-async function deliverToTab(pending: PendingDappRequest, payload: { result?: unknown; error?: string }): Promise<void> {
+async function deliverToTab(pending: PendingDappRequest, payload: { result?: unknown; error?: unknown }): Promise<void> {
   if (!(await tabMayReceive(pending.tabId, pending.origin))) return;
+  const evm = pending.family === 'evm';
   try {
     await chrome.tabs.sendMessage(pending.tabId, {
-      type: 'evr-dapp-result',
+      type: evm ? 'evm-dapp-result' : 'evr-dapp-result',
       id: pending.id,
       // Echo the requesting origin so the content script can refuse to relay
       // the result into a document with a different location.origin (the tab
@@ -563,7 +576,8 @@ async function deliverToTab(pending: PendingDappRequest, payload: { result?: unk
       // solely on this side).
       origin: pending.origin,
       result: payload.result,
-      error: payload.error,
+      // window.ethereum sites expect EIP-1193 errors ({code, message}).
+      error: evm ? toEvmProviderError(payload.error) : payload.error,
     });
   } catch {
     // The requesting tab is gone — nothing to deliver to.
@@ -690,14 +704,14 @@ if (typeof chrome.storage?.onChanged?.addListener === 'function') {
 
 /** How long the panel gets to boot and claim the request before the popup. */
 const SIDE_PANEL_BOOT_MS = 4000;
-const APPROVAL_METHODS = new Set(['connect', 'signMessage', 'sendEvr', 'sendAsset']);
+const APPROVAL_METHODS = new Set(['connect', 'signMessage', 'sendEvr', 'sendAsset', ...EVM_APPROVAL_METHODS]);
 
 /**
  * Called synchronously from the message listener. Returns a promise of whether
  * the side panel was opened for the requesting tab (null when not attempted).
  * Never throws; the rejection of open() is the "no gesture" case.
  */
-function openSidePanelForRequest(msg: DappRequestMessage, sender: chrome.runtime.MessageSender): Promise<boolean> | null {
+function openSidePanelForRequest(msg: { method: string }, sender: chrome.runtime.MessageSender): Promise<boolean> | null {
   const sp = (chrome as unknown as { sidePanel?: { open?: (o: { tabId: number }) => Promise<void> } }).sidePanel;
   const tabId = sender.tab?.id;
   if (typeof sp?.open !== 'function' || typeof tabId !== 'number') return null;
@@ -714,10 +728,11 @@ function openSidePanelForRequest(msg: DappRequestMessage, sender: chrome.runtime
 }
 
 async function deferToApproval(
-  msg: DappRequestMessage,
+  msg: { id: string; origin: string; method: string; params?: unknown },
   sender: chrome.runtime.MessageSender,
   walletId?: string,
   panelOpening: Promise<boolean> | null = null,
+  extra: Pick<PendingDappRequest, 'family' | 'chainKey'> = {},
 ): Promise<DappResponse> {
   const tabId = sender.tab?.id;
   if (typeof tabId !== 'number') return { error: 'no-tab' };
@@ -743,6 +758,7 @@ async function deferToApproval(
     params: msg.params,
     createdAt: Date.now(),
     ...(walletId ? { walletId } : {}),
+    ...extra,
   });
   // The user's window mode first: a wallet that is already open shows the
   // request where the user is looking. Only when nothing is open does an OS
@@ -883,7 +899,17 @@ async function tabMayReceive(tabId: number, origin: string): Promise<boolean> {
 
 /** Outcome from the approval page -> persist the approval, route to the tab. */
 async function handleApproveResult(msg: DappApproveResultMessage): Promise<void> {
-  if (msg.approveOrigin && !msg.error) await bindOriginToWallet(msg.approveOrigin, msg.walletId);
+  if (msg.approveOrigin && !msg.error) {
+    // Which provider asked decides which list the connection goes in.
+    const parked = (await chrome.storage.session.get(PENDING_PREFIX + msg.id))[PENDING_PREFIX + msg.id] as
+      | PendingDappRequest
+      | undefined;
+    if (parked?.family === 'evm') {
+      if (parked.origin === msg.approveOrigin) await bindEvmOrigin(msg.approveOrigin, msg.walletId, parked.chainKey);
+    } else {
+      await bindOriginToWallet(msg.approveOrigin, msg.walletId);
+    }
+  }
   const pending = await takePending(msg.id);
   if (!pending) return; // already settled (double-send guard) or unknown id
   await deliverToTab(pending, { result: msg.result, error: msg.error });
@@ -905,6 +931,27 @@ chrome.runtime.onMessage.addListener(
         .then(sendResponse)
         .catch((err: unknown) =>
           sendResponse({ error: err instanceof Error ? err.message : String(err) }),
+        );
+      return true; // async sendResponse
+    }
+    if (msg?.type === 'evm-dapp') {
+      // window.ethereum: same gesture rule, same approval machinery.
+      const evmMsg = msg as EvmDappRequestMessage;
+      const panelOpening = openSidePanelForRequest(evmMsg, sender);
+      const tabId = sender.tab?.id;
+      handleEvmDappRequest(evmMsg, {
+        defer: (walletId, extra) =>
+          deferToApproval(evmMsg, sender, walletId, panelOpening, { family: 'evm', chainKey: extra.chainKey }),
+        pushEvent: (event, data) => {
+          if (typeof tabId !== 'number') return;
+          void Promise.resolve(
+            chrome.tabs.sendMessage(tabId, { type: 'evm-dapp-event', origin: evmMsg.origin, event, data }),
+          ).catch(() => undefined);
+        },
+      })
+        .then(sendResponse)
+        .catch((err: unknown) =>
+          sendResponse({ error: { code: -32603, message: err instanceof Error ? err.message : String(err) } }),
         );
       return true; // async sendResponse
     }

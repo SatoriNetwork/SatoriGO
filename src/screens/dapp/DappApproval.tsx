@@ -28,6 +28,7 @@ import { toBaseUnits, formatAmount } from '../../services/chain/amounts';
 import { displaySymbol } from '../../services/displaySymbol';
 import { networkFor } from '../../services/chain/chainParams';
 import type { NativeTicker } from '../../services/chain/chainParams';
+import { DappApprovalEvm } from './DappApprovalEvm';
 
 /** Base units -> display text at the chain's own scale. Exact: the digits come
  *  from the bigint, not from a division through a double. */
@@ -47,6 +48,9 @@ interface PendingDappRequest {
    *  the page acts on that wallet, not on whichever one the wallet UI shows.
    *  For connect: the currently connected wallet, preselected in the picker. */
   walletId?: string;
+  /** 'evm' for a window.ethereum request (rendered by DappApprovalEvm). */
+  family?: 'evm';
+  chainKey?: string;
 }
 
 interface PublicWalletInfo {
@@ -684,6 +688,12 @@ export function DappApproval({ requestId, hosted = false, onDone, session }: Dap
         </div>
       </div>,
     );
+  }
+
+  // window.ethereum: everything EVM lives in its own screen; the lifecycle
+  // above (settle once, ping, port, closed = rejected) is shared.
+  if (pending.family === 'evm') {
+    return <DappApprovalEvm pending={pending} hosted={hosted} session={session} settle={settle} frame={frame} />;
   }
 
   // The connected wallet's chain ticker: drives every chain-aware label below

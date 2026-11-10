@@ -51,7 +51,8 @@
   "web_accessible_resources": [
     {
       "resources": [
-        "inpage.js"
+        "inpage.js",
+        "inpage-evm.js"
       ],
       "matches": [
         "http://*/*",

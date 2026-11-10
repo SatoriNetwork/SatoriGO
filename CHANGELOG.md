@@ -9,6 +9,22 @@ and release commits.
 
 ---
 
+## Unreleased
+
+### Base and Ethereum websites
+
+- Websites built for MetaMask can now connect to your Satori GO account on Base,
+  Ethereum and the other EVM networks: connect, switch network, sign a message or
+  structured data, and request a transaction. Each one asks for your approval, and
+  a transaction is simulated and priced by the wallet before you confirm it.
+- Satori GO shows up in a site's wallet list next to MetaMask. A new setting,
+  Default browser wallet (Settings, Connected sites), decides whether Satori GO or
+  your other wallet answers sites that only look for one.
+- Connected sites lists Base and Ethereum connections too, and Disconnect works for
+  them the same way.
+
+---
+
 ## 1.6.0
 
 ### Satori on Base

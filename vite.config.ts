@@ -155,15 +155,24 @@ export default defineConfig({
     // page never runs WASM, every wallet call goes to the worker, so the page
     // bundle gets a stub instead (proven live by Set B: 536 KB instead of
     // 2.96 MB, and nothing ever reaches the stub). A flagless build has no
-    // alias at all, so its module graph is byte for byte what it was.
-    alias: moneroEnabled
-      ? [
-          { find: /^assert$/, replacement: shim('assert.js') },
-          { find: /^https?$/, replacement: shim('http.js') },
-          { find: /^(fs|path|child_process|web-worker|socks-proxy-agent|net|tls)$/, replacement: shim('empty.js') },
-          { find: /^#monero-ts\/monero\.js$/, replacement: shim('monero-wasm-stub.js') },
-        ]
-      : [],
+    // alias for monero at all, so its module graph is byte for byte what it was.
+    alias: [
+      // The background worker's EVM engine, imported statically because an MV3
+      // service worker cannot import(). Without --evm it is a stub that loads
+      // nothing, so evmGuard() still finds no EVM module (src/background/workerEvm.ts).
+      {
+        find: /^#worker-evm$/,
+        replacement: resolve(rootDir, evmEnabled ? 'src/background/workerEvm.ts' : 'src/background/workerEvm.off.ts'),
+      },
+      ...(moneroEnabled
+        ? [
+            { find: /^assert$/, replacement: shim('assert.js') },
+            { find: /^https?$/, replacement: shim('http.js') },
+            { find: /^(fs|path|child_process|web-worker|socks-proxy-agent|net|tls)$/, replacement: shim('empty.js') },
+            { find: /^#monero-ts\/monero\.js$/, replacement: shim('monero-wasm-stub.js') },
+          ]
+        : []),
+    ],
   },
   define: {
     __EVM_ENABLED__: JSON.stringify(evmEnabled),

@@ -397,6 +397,17 @@ confirmed by the owner on mainnet (item 7). Nothing below is marketing.
     changes its transaction format before the wallet is updated; balance and
     receive keep working. There are no desktop notifications for incoming TAO.
 
+42. **window.ethereum is new and has had no funded test on mainnet yet.**
+    A transaction a site requests is simulated before it can be confirmed, but the
+    wallet cannot tell what a contract call does: the approval shows the
+    recipient, the amount, the size of the calldata and its first four bytes, not
+    a decoded description. Typed data is shown as raw JSON with a warning when it
+    looks like a token permit. A chain switch reaches only the tab that asked
+    (other open tabs of the same site learn it on their next request), and
+    turning Default browser wallet on or off applies when a page is reloaded.
+    `eth_sign`, contract deployment and adding networks the wallet does not know
+    are refused.
+
 Real P2SH output support, taproot key ownership, inscription and BGC-20
 awareness, gap-limit address discovery, BIP39 passphrases at wallet creation,
 QR-code scanning, 24 h price change, an in-wallet asset explorer,

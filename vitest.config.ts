@@ -3,6 +3,8 @@ import react from '@vitejs/plugin-react';
 
 export default defineConfig({
   plugins: [react()],
+  // Same alias as vite.config.ts; tests get the real engine and mock what they must.
+  resolve: { alias: [{ find: /^#worker-evm$/, replacement: new URL('./src/background/workerEvm.ts', import.meta.url).pathname }] },
   // Mirror vite.config.ts: the EVM build flag defaults to OFF in tests too, so a
   // test that reaches the flag sees exactly what a shipped package sees. The
   // EVM modules' own tests import them directly and are unaffected.

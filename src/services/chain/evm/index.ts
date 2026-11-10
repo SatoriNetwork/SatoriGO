@@ -24,3 +24,4 @@ export * from './tokenTrust';
 export * from './accountDiscovery';
 export * from './cosmosStaking';
 export * from './satoriRewards';
+export * from './typedData';
