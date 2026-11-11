@@ -406,6 +406,13 @@ export function DappApprovalEvm({ pending, hosted, session, settle, frame }: Dap
       });
       if (review.owned) review.service.lockApp();
       setReview(null);
+      // Hosted in the open wallet: refresh its balances as soon as the chain
+      // includes this transaction, the way the site itself does.
+      // An event, not an import: this screen also runs alone in an approval
+      // window, where no wallet store is open and nothing listens.
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('satorigo:evm-broadcast', { detail: { chainKey: chain.key, txid: result.txid } }));
+      }
       await settle({ result: result.txid });
     } catch (err) {
       setActionError(err instanceof Error ? err.message : String(err));

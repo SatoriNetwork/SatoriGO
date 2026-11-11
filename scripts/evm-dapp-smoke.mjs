@@ -221,6 +221,25 @@ try {
   check(!!info && info.name === 'Satori GO' && info.icon.startsWith('data:image/png;base64,'), `EIP-6963 announce: ${info ? `${info.name}, ${info.rdns}, icon data URI` : 'none'}`);
   check(await site.evaluate(() => window.ethereum && window.ethereum.isSatoriGO === true), 'window.ethereum is Satori GO (no other wallet installed)');
   check(await site.evaluate(() => window.ethereum.isMetaMask !== true), 'does not claim isMetaMask');
+  // 1.7.1: MetaMask-era sites write a field onto window.ethereum at startup, in
+  // strict mode. That must not throw (1.7.0 froze the provider and Uniswap stayed
+  // blank), and it must not let a page replace or delete the wallet's own methods.
+  const ext = await site.evaluate(() => {
+    'use strict';
+    const p = window.ethereum;
+    const out = { add: null, replaced: null, deleted: null, redefined: null };
+    try { p.autoRefreshOnNetworkChange = false; out.add = p.autoRefreshOnNetworkChange === false; } catch (e) { out.add = String(e); }
+    const original = p.request;
+    try { p.request = () => 'hijacked'; } catch { /* expected: read-only */ }
+    out.replaced = p.request !== original;
+    try { delete p.request; } catch { /* expected */ }
+    out.deleted = p.request !== original;
+    try { Object.defineProperty(p, 'request', { value: () => 'hijacked' }); out.redefined = true; } catch { out.redefined = false; }
+    out.sameAsAnnounced = (window.__announced.find((d) => d.info.rdns === 'io.satorinet.go') || {}).provider === p;
+    return out;
+  });
+  check(ext.add === true, `a site can add its own field to window.ethereum without an error (${ext.add})`);
+  check(ext.replaced === false && ext.deleted === false && ext.redefined === false, `a site cannot replace, delete or redefine provider.request (${JSON.stringify(ext)})`);
   await site.evaluate(() => window.__hook());
 
   // --- 2. Before connecting ----------------------------------------------------

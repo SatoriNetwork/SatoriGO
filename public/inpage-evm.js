@@ -179,7 +179,18 @@
     get: () => (state.chainId ? String(parseInt(state.chainId, 16)) : null),
     enumerable: true,
   });
-  Object.freeze(provider);
+  // Lock what the wallet put on the provider, but leave the object extensible.
+  // Sites built for MetaMask write their own fields onto window.ethereum at
+  // startup (Uniswap: `window.ethereum.autoRefreshOnNetworkChange = false`, in
+  // strict mode). On a frozen object that assignment throws and the whole site
+  // stays blank whenever the wallet injects before the site's bundle runs
+  // (1.7.0). So: every property of ours is non-writable and non-configurable,
+  // a page can add a field of its own, and it cannot replace or delete ours.
+  for (const key of Reflect.ownKeys(provider)) {
+    const desc = Object.getOwnPropertyDescriptor(provider, key);
+    if (desc && 'value' in desc) Object.defineProperty(provider, key, { writable: false, configurable: false });
+    else Object.defineProperty(provider, key, { configurable: false });
+  }
   Object.defineProperty(window, '__satoriGoEvmProvider', { value: provider, configurable: false, writable: false });
 
   // --- window.ethereum, as the user chose ----------------------------------

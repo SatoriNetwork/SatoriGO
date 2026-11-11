@@ -9,6 +9,14 @@ and release commits.
 
 ---
 
+## 1.7.1
+
+- Fixed: some websites, Uniswap among them, could stay blank the first time you
+  opened them with Satori GO installed, and only loaded after a refresh. They
+  now load the first time.
+- After a transaction you approve for a website, such as a swap, your balances
+  update as soon as the network confirms it, without waiting for the next refresh.
+
 ## 1.7.0
 
 ### Base and Ethereum websites

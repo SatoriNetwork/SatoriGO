@@ -6007,6 +6007,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       setTimeout(() => void get().refresh({ silent: true }), 4000);
       setTimeout(() => void get().refresh({ silent: true }), 12000);
     }
+    followEvmBroadcast(chain.key, result.txid);
     return { txid: result.txid, explorerUrl: evmExplorerTxUrl(chain, result.txid), chainKey: chain.key };
   },
 
@@ -7131,7 +7132,64 @@ export const useLiveStore = create<LiveState>((set, get) => ({
 // being torn down may not finish the save, which the checkpoints cover.
 // `pagehide` rather than `beforeunload`: it fires for the popup, the side
 // panel and a tab alike, and it is the one the bfcache respects.
+/** How often, and for how long, a just-broadcast EVM transaction is watched. */
+const EVM_FOLLOW_POLL_MS = 1_500;
+const EVM_FOLLOW_MAX_MS = 60_000;
+const evmFollowing = new Set<string>();
+
+/**
+ * Watch a transaction this wallet just broadcast and refresh the balances the
+ * moment the chain includes it, instead of waiting for the 20 s poll (owner,
+ * 2026-11-11: after a swap the site showed the new balance long before the
+ * wallet did). Reads only: one eth_getTransactionReceipt per tick until the
+ * receipt exists or the time runs out, then silent refreshes. The later two
+ * refreshes are for a node or indexer that answers a beat behind the receipt.
+ * A page with no open wallet (a standalone approval window) does nothing.
+ */
+export function followEvmBroadcast(chainKey: string, txid: string): void {
+  if (typeof setTimeout === 'undefined' || !txid || evmFollowing.has(txid)) return;
+  if (!useLiveStore.getState().address) return;
+  evmFollowing.add(txid);
+  const startedAt = Date.now();
+  const refreshNow = () => {
+    const state = useLiveStore.getState();
+    const chain = activeEvmChain(state);
+    if (!state.address || !chain || chain.key !== chainKey) return;
+    // Activity is throttled to once a minute on silent refreshes; this one is due.
+    evmHistoryAskedAt.delete(`${chain.key}:${state.address.toLowerCase()}`);
+    void state.refresh({ silent: true });
+  };
+  const finish = () => {
+    evmFollowing.delete(txid);
+    refreshNow();
+    setTimeout(refreshNow, 3_000);
+    setTimeout(refreshNow, 9_000);
+  };
+  const tick = async () => {
+    let mined = false;
+    try {
+      const provider = await evmProviderFor(chainKey);
+      if (provider) {
+        const [answer] = await provider.rpc.batch([{ method: 'eth_getTransactionReceipt', params: [txid] }]);
+        mined = Boolean(answer && answer.ok && answer.result && typeof answer.result === 'object');
+      }
+    } catch {
+      // An unreachable node is not a reason to stop watching.
+    }
+    if (mined || Date.now() - startedAt >= EVM_FOLLOW_MAX_MS) finish();
+    else setTimeout(() => void tick(), EVM_FOLLOW_POLL_MS);
+  };
+  setTimeout(() => void tick(), EVM_FOLLOW_POLL_MS);
+}
+
 if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+  // A transaction the hosted approval screen broadcast for a website.
+  window.addEventListener('satorigo:evm-broadcast', (event) => {
+    const detail = (event as CustomEvent<{ chainKey?: unknown; txid?: unknown }>).detail;
+    if (detail && typeof detail.chainKey === 'string' && typeof detail.txid === 'string') {
+      followEvmBroadcast(detail.chainKey, detail.txid);
+    }
+  });
   window.addEventListener('pagehide', () => {
     void useLiveStore.getState().closeMoneroHost();
   });
