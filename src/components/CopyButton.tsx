@@ -14,9 +14,12 @@ interface CopyButtonProps {
    *  an auto-clear within SECRET_CLIPBOARD_CLEAR_SECONDS and shows a stronger
    *  warning toast, regardless of the user's clipboard-clear setting. */
   secret?: boolean;
+  /** Render a full-width worded button instead of the bare icon: for a screen
+   *  whose main action IS this copy (Receive). */
+  text?: string;
 }
 
-export function CopyButton({ value, label, size = 14, testId, secret }: CopyButtonProps) {
+export function CopyButton({ value, label, size = 14, testId, secret, text }: CopyButtonProps) {
   const [copied, setCopied] = useState(false);
   const clearAfter = useSettingsStore((s) => s.settings.clipboardClearSeconds);
   const toast = useUiStore((s) => s.toast);
@@ -33,6 +36,22 @@ export function CopyButton({ value, label, size = 14, testId, secret }: CopyButt
       toast(t('toast.copyFailed'), 'error');
     }
   };
+
+  if (text) {
+    return (
+      <button
+        type="button"
+        className="btn btn-secondary"
+        style={{ width: '100%' }}
+        aria-label={label}
+        data-testid={testId}
+        onClick={handleCopy}
+      >
+        {copied ? <Check size={size} className="text-success" /> : <Copy size={size} />}
+        {copied ? 'Copied' : text}
+      </button>
+    );
+  }
 
   return (
     <button

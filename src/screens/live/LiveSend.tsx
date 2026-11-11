@@ -6,6 +6,8 @@ import { SyncStatusPill } from '../../components/SyncStatusPill';
 import { TextField, PasswordField } from '../../components/TextField';
 import { TokenIcon } from '../../components/BrandLogo';
 import { useLiveStore, computeDisplayedAssets, walletsOnChain } from '../../store/liveStore';
+import { useAssetFiat, typedAmountFiat } from './useFiat';
+import { formatFiatValue } from '../../services/fiat';
 import { isValidAddress, isSpendableAddress } from '../../services/chain/keys';
 import { assessRecipient, type RecipientRisk } from '../../services/recipientRisk';
 import {
@@ -172,6 +174,7 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
   // `assetId` is the IDENTITY (it is what buildSend is given and what the
   // balance is looked up by); `shownAsset` is the same name made safe to draw.
   const shownAsset = displaySymbol(assetId);
+  const assetUnitFiat = useAssetFiat(assetId, !isAsset).unit;
 
   // Displayed (spendable) balance for the selected asset — the same list the
   // home screen shows. The native coin is always present; an asset falls back to
@@ -867,17 +870,20 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
           {/* Available balance for the selected asset. A small positive top margin
               keeps a clear gap under the amount field (its focus ring extends a few
               px); a negative margin here made "Available" touch the input. */}
-          <div
-            className="text-dim"
-            data-testid="live-send-available"
-            style={{ fontSize: 11.5, margin: '6px 2px 8px' }}
-          >
-            Available:{' '}
-            {formatAmount(availableBase, balanceScale, {
-              grouping: true,
-              maxFractionDigits: Math.max(0, Math.min(assetDecimals, balanceScale)),
-            })}{' '}
-            {shownAsset}
+          <div className="send-amount-meta">
+            <span className="text-dim" data-testid="live-send-available">
+              Available:{' '}
+              {formatAmount(availableBase, balanceScale, {
+                grouping: true,
+                maxFractionDigits: Math.max(0, Math.min(assetDecimals, balanceScale)),
+              })}{' '}
+              {shownAsset}
+            </span>
+            {typedAmountFiat(amount, assetUnitFiat) && (
+              <span className="text-dim" data-testid="live-send-fiat" style={{ fontVariantNumeric: 'tabular-nums' }}>
+                {formatFiatValue(typedAmountFiat(amount, assetUnitFiat)!)}
+              </span>
+            )}
           </div>
 
           {/* Quick-amount chips (25 / 50 / 75 / Max), MetaMask-style. */}

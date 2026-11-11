@@ -17,6 +17,7 @@
 // failure copy as LiveLock rather than inventing a second visual language for
 // the same act.
 
+import { getAppVersion } from '../../services/constants';
 import { useState, useCallback } from 'react';
 import { Button } from '../../components/Button';
 import { PasswordField } from '../../components/TextField';
@@ -80,6 +81,8 @@ export function LiveAppLock() {
 
   return (
     <div className="app-frame screen-enter" data-testid="live-app-lock">
+      {/* Which build this is, readable before unlocking (owner, 2026-11-11). */}
+      <span className="lock-version" data-testid="live-lock-version">v{getAppVersion()}</span>
       <ConstellationField variant="calm" />
       <div className="lock-screen">
         <div className="lock-brand">

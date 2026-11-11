@@ -2132,6 +2132,10 @@ interface LiveState {
   error: string | null;
   /** Transient sync feedback (never persisted) — see LiveSyncing. */
   syncing: LiveSyncing;
+  /** The wallet a switch in progress is opening: its public identity from the
+   *  wallet list, so the switching screen can already show WHO is being opened.
+   *  Null whenever no switch is running. */
+  switchingTo: { id: string; name: string; address: string } | null;
   /** Progress of the background tx-history classification for the active wallet.
    *  Non-null (with total > 0) while a sync has txs left to classify this run;
    *  null when idle / complete. Session-only, never persisted. */
@@ -2839,6 +2843,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   offline: false,
   error: null,
   syncing: 'idle',
+  switchingTo: null,
   syncProgress: null,
   lastSyncAt: null,
 
@@ -3454,7 +3459,14 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     // 'switching' drives a full-frame loading screen until the target wallet is
     // ready (passwordless auto-unlock) or locked (needs its own password). The
     // finally below guarantees it can never get stuck on errors.
-    set({ error: null, syncing: 'switching' });
+    // WHO is being opened, from the public wallet list: a name and an address,
+    // nothing that needs a key. The switching screen draws its header from it.
+    const target = get().wallets.find((w) => w.id === id);
+    set({
+      error: null,
+      syncing: 'switching',
+      switchingTo: target ? { id: target.id, name: target.name, address: target.address ?? '' } : null,
+    });
     try {
       try {
         await svc.switchWallet(id);
@@ -3560,6 +3572,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       // Only clear our own marker — unlock() may already have started an
       // 'initial' first-sync for the freshly switched wallet.
       if (get().syncing === 'switching') set({ syncing: 'idle' });
+      set({ switchingTo: null });
     }
   },
 

@@ -17,7 +17,7 @@
  */
 
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, cleanup } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent } from '@testing-library/react';
 
 vi.mock('../../services/chain/engine', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../services/chain/engine')>();
@@ -225,7 +225,8 @@ describe('Activity rows for a native staking transaction', () => {
     const first = renderActivity();
     expect(screen.getByText('Received EPIX')).toBeInTheDocument();
     expect(screen.getByText('+2.25 EPIX')).toBeInTheDocument();
-    expect(screen.getByText(`${H('e5').slice(0, 10)}...`)).toBeInTheDocument();
+    // Since 1.6.3 the second line says WHO (From / To), not the txid.
+    expect(screen.getByText('From 0x353535…353535')).toBeInTheDocument();
     expect(screen.queryByTestId(`live-tx-staking-${H('e5')}`)).toBeNull();
     first.unmount();
     cleanup();
@@ -256,5 +257,104 @@ describe('Activity rows for a native staking transaction', () => {
     expect(screen.getByText('Sent EVR')).toBeInTheDocument();
     expect(screen.getByText('-10 EVR')).toBeInTheDocument();
     expect(document.querySelectorAll('[data-testid^="live-tx-staking-"]')).toHaveLength(0);
+  }, 60_000);
+});
+
+/**
+ * 1.6.3: what the Activity list does with arrivals of tokens the wallet checked
+ * and does not vouch for (users: airdropped spam read as green income), and
+ * what a row's second line says.
+ */
+describe('Activity: unlisted arrivals and the counterparty line (1.6.3)', () => {
+  const ME = '0x9858EfFD232B4033E47d90003D41EC34EcaEda94';
+  const row = (over: Partial<LiveTransaction>): LiveTransaction => ({
+    txid: H('b1'),
+    asset: 'EPIX',
+    direction: 'in',
+    amount: 1,
+    feeEvr: 0,
+    status: 'confirmed',
+    blockHeight: 900_000,
+    timestamp: 1_725_100_000_000,
+    counterparty: '0x3535353535353535353535353535353535353535',
+    ...over,
+  });
+  const token = (symbol: string, trusted: boolean | undefined, n: string) => ({
+    address: `0x${n.repeat(40)}`,
+    symbol,
+    decimals: 18,
+    ...(trusted === undefined ? {} : { trusted }),
+  });
+
+  it('folds incoming transfers of a checked-and-unlisted token under one line that puts them back', async () => {
+    await onEpix();
+    storeMod.useLiveStore.setState({
+      historyLoading: false,
+      evmTokens: { tracked: [], discovered: [token('SPAM', false, 'a'), token('NEWCOIN', undefined, 'b')] },
+      txs: [
+        row({ txid: H('c1'), asset: 'SPAM', amount: 9999 }),
+        // Sent by the user: their own action, never folded.
+        row({ txid: H('c2'), asset: 'SPAM', direction: 'out', amount: 5, timestamp: 1_725_100_001_000 }),
+        // Never checked: no claim either way, so it stays.
+        row({ txid: H('c3'), asset: 'NEWCOIN', amount: 3, timestamp: 1_725_100_002_000 }),
+        row({ txid: H('c4'), asset: 'EPIX', amount: 2.25, timestamp: 1_725_100_003_000 }),
+      ],
+    });
+    renderActivity();
+
+    const note = screen.getByTestId('live-activity-unlisted-note');
+    expect(note).toHaveTextContent('1 incoming transfer of unlisted tokens hidden. Show');
+    expect(screen.queryByText('Received SPAM')).toBeNull();
+    expect(screen.getByText('Sent SPAM')).toBeInTheDocument();
+    expect(screen.getByText('Received NEWCOIN')).toBeInTheDocument();
+    expect(screen.getByText('Received EPIX')).toBeInTheDocument();
+
+    fireEvent.click(note);
+    expect(screen.getByText('Received SPAM')).toBeInTheDocument();
+    const spamRow = screen.getByTestId(`live-tx-row-${H('c1').slice(0, 8)}`);
+    expect(spamRow).toHaveAttribute('data-unlisted', 'true');
+    expect(screen.getByTestId('live-activity-unlisted-note')).toHaveTextContent('Hide');
+    // The ordinary arrival is not marked.
+    expect(screen.getByTestId(`live-tx-row-${H('c4').slice(0, 8)}`)).not.toHaveAttribute('data-unlisted');
+  }, 60_000);
+
+  it('a listed token sharing the symbol wins, and a search looks through folded rows', async () => {
+    await onEpix();
+    storeMod.useLiveStore.setState({
+      historyLoading: false,
+      evmTokens: {
+        tracked: [token('USDC', true, 'a')],
+        discovered: [token('USDC', false, 'b'), token('SPAM', false, 'c')],
+      },
+      txs: [row({ txid: H('d1'), asset: 'USDC', amount: 10 }), row({ txid: H('d2'), asset: 'SPAM', amount: 9999, timestamp: 1_725_100_001_000 })],
+    });
+    renderActivity();
+    expect(screen.getByText('Received USDC')).toBeInTheDocument();
+    expect(screen.queryByText('Received SPAM')).toBeNull();
+
+    fireEvent.change(screen.getByTestId('activity-search'), { target: { value: H('d2').slice(0, 12) } });
+    expect(screen.getByText('Received SPAM')).toBeInTheDocument();
+    expect(screen.queryByTestId('live-activity-unlisted-note')).toBeNull();
+  }, 60_000);
+
+  it('names the counterparty: an address-book label, one of their own wallets, else the short address', async () => {
+    await onEpix();
+    const friend = '0x1111111111111111111111111111111111111111';
+    storeMod.useLiveStore.setState({
+      historyLoading: false,
+      addressBook: [{ label: 'Alice', address: friend }],
+      txs: [
+        row({ txid: H('e1'), direction: 'out', counterparty: friend, timestamp: 1_725_100_003_000 }),
+        row({ txid: H('e2'), direction: 'in', counterparty: ME.toLowerCase(), timestamp: 1_725_100_002_000 }),
+        row({ txid: H('e3'), direction: 'in', timestamp: 1_725_100_001_000 }),
+        row({ txid: H('e4'), direction: 'in', counterparty: '', timestamp: 1_725_100_000_000 }),
+      ],
+    });
+    renderActivity();
+    expect(screen.getByTestId(`live-tx-party-${H('e1').slice(0, 8)}`)).toHaveTextContent('To Alice');
+    expect(screen.getByTestId(`live-tx-party-${H('e2').slice(0, 8)}`)).toHaveTextContent(`From ${state().wallets[0].name}`);
+    expect(screen.getByTestId(`live-tx-party-${H('e3').slice(0, 8)}`)).toHaveTextContent('From 0x353535…353535');
+    // No counterparty (a chain that shows none): the txid, as before.
+    expect(screen.getByTestId(`live-tx-party-${H('e4').slice(0, 8)}`)).toHaveTextContent(`${H('e4').slice(0, 10)}...`);
   }, 60_000);
 });

@@ -106,10 +106,10 @@ describe('window.ethereum: connected', () => {
     expect(defer).not.toHaveBeenCalled();
   });
 
-  it('opens the picker when there are several EVM accounts', async () => {
+  it('answers a connected site at once with several EVM accounts too, without an approval', async () => {
     wallets({ id: 'evm1', address: ADDR, family: 'evm' }, { id: 'evm2', address: ADDR2, family: 'evm' });
-    await ask('eth_requestAccounts');
-    expect(defer).toHaveBeenCalledWith('evm1', { chainKey: 'base' });
+    expect(await ask('eth_requestAccounts')).toEqual({ result: [ADDR] });
+    expect(defer).not.toHaveBeenCalled();
   });
 
   it('treats a binding to a deleted account as not connected', async () => {
@@ -144,15 +144,84 @@ describe('window.ethereum: connected', () => {
     expect(defer).toHaveBeenCalledWith('evm1', { chainKey: 'base' });
   });
 
-  it('remembers a chain switch on the connection', async () => {
-    await ask('wallet_switchEthereumChain', [{ chainId: '0x1' }]);
+  it('asks the user before moving a connected site to another chain', async () => {
+    expect(await ask('wallet_switchEthereumChain', [{ chainId: '0x1' }])).toMatchObject({ deferred: true });
+    expect(defer).toHaveBeenCalledWith('evm1', { chainKey: 'ethereum' });
+    // Nothing moves until the approval is applied.
+    expect(localData.get('evrdemo:dappEvmApprovedOrigins')).toEqual([{ origin: ORIGIN, walletId: 'evm1', chainKey: 'base' }]);
+    expect(pushEvent).not.toHaveBeenCalled();
+  });
+
+  it('applies an approved switch to the connection, and only for a connected site', async () => {
+    expect(await mod.applyEvmChainSwitch(ORIGIN, 'ethereum')).toBe(true);
     expect(localData.get('evrdemo:dappEvmApprovedOrigins')).toEqual([{ origin: ORIGIN, walletId: 'evm1', chainKey: 'ethereum' }]);
+    expect(await mod.applyEvmChainSwitch('https://other.example', 'ethereum')).toBe(false);
+    expect(await mod.applyEvmChainSwitch(ORIGIN, 'not-a-chain')).toBe(false);
+  });
+
+  it('answers a switch to the chain it is already on without asking', async () => {
+    expect(await ask('wallet_switchEthereumChain', [{ chainId: '0x2105' }])).toEqual({ result: null });
+    expect(defer).not.toHaveBeenCalled();
+  });
+
+  it('refuses calldata with an odd number of hex digits', async () => {
+    const r = await ask('eth_sendTransaction', [{ to: ADDR2, data: '0xabc' }]);
+    expect(r.error?.code).toBe(-32602);
+    expect(defer).not.toHaveBeenCalled();
   });
 
   it('knows SATORI on Base for wallet_watchAsset, and refuses an unknown token', async () => {
     const satori = { type: 'ERC20', options: { address: '0xd0a5bFF2789230b0fb1Bd989fc7CE7084c947E17', symbol: 'SATORI', decimals: 18 } };
     expect(await ask('wallet_watchAsset', satori)).toEqual({ result: true });
     expect((await ask('wallet_watchAsset', { type: 'ERC20', options: { address: ADDR2 } })).error?.code).toBe(4200);
+  });
+});
+
+describe('window.ethereum: connection events', () => {
+  it('announces a disconnect, a new account and a chain move', async () => {
+    wallets({ id: 'evm1', address: ADDR, family: 'evm' }, { id: 'evm2', address: ADDR2, family: 'evm' });
+    const before = [
+      { origin: 'https://a.example', walletId: 'evm1', chainKey: 'base' },
+      { origin: 'https://b.example', walletId: 'evm1', chainKey: 'base' },
+      { origin: 'https://c.example', walletId: 'evm1', chainKey: 'base' },
+    ];
+    const after = [
+      { origin: 'https://b.example', walletId: 'evm2', chainKey: 'base' },
+      { origin: 'https://c.example', walletId: 'evm1', chainKey: 'ethereum' },
+      { origin: 'https://d.example', walletId: 'evm1', chainKey: 'base' },
+    ];
+    const events = await mod.evmApprovalEvents(before, after);
+    expect(events).toEqual(
+      expect.arrayContaining([
+        { origin: 'https://a.example', event: 'accountsChanged', data: [] },
+        { origin: 'https://b.example', event: 'accountsChanged', data: [ADDR2] },
+        { origin: 'https://c.example', event: 'chainChanged', data: '0x1' },
+        { origin: 'https://d.example', event: 'accountsChanged', data: [ADDR] },
+      ]),
+    );
+    expect(events).toHaveLength(4);
+  });
+});
+
+describe('window.ethereum: read limits', () => {
+  beforeEach(() => mod.resetReadBudgets());
+
+  it('limits how many reads a site that is not connected may make', async () => {
+    rpcCall.mockResolvedValue('0x10');
+    let refused = 0;
+    for (let i = 0; i < 70; i++) if ((await ask('eth_blockNumber')).error?.code === -32005) refused++;
+    expect(refused).toBe(10);
+  });
+
+  it('refuses eth_getLogs over a wide or unbounded range', async () => {
+    rpcCall.mockResolvedValue('0x100000');
+    expect((await ask('eth_getLogs', [{ fromBlock: 'earliest' }])).error?.code).toBe(-32602);
+    expect((await ask('eth_getLogs', [{ fromBlock: '0x0', toBlock: '0x100000' }])).error?.code).toBe(-32602);
+    expect((await ask('eth_getLogs', [{ fromBlock: '0x0' }])).error?.code).toBe(-32602);
+    rpcCall.mockClear();
+    rpcCall.mockResolvedValue([]);
+    expect(await ask('eth_getLogs', [{ fromBlock: '0x10', toBlock: '0x20' }])).toEqual({ result: [] });
+    expect(await ask('eth_getLogs', [{ blockHash: '0x' + '11'.repeat(32) }])).toEqual({ result: [] });
   });
 });
 

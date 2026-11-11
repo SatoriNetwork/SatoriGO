@@ -92,7 +92,7 @@ afterEach(() => {
 });
 
 describe('LiveHome notification banner', () => {
-  it('renders the matching notice under the Block / Synced row, above the coin mark', () => {
+  it('renders the matching notice under the status row, above the hero', () => {
     storeMod.useLiveStore.setState({
       notifications: [notif({ id: 'welcome', title: 'Welcome', severity: 'update' })],
     });
@@ -100,7 +100,9 @@ describe('LiveHome notification banner', () => {
 
     const banner = screen.getByTestId('live-notification');
     const status = screen.getByTestId('live-home-status');
-    const mark = screen.getByTestId('live-hero-mark');
+    // An asset chain has no coin mark over the hero since 1.6.3 (the coin is
+    // the list's first row), so the hero's own figure is the landmark.
+    const mark = screen.getByTestId('live-balance-hero');
     expect(banner).toHaveAttribute('data-severity', 'update');
     // Owner's placement (2026-08-25): right under the status row, NOT inside the
     // hero. It comes AFTER the Block / Synced row and BEFORE the coin mark.
@@ -124,8 +126,8 @@ describe('LiveHome notification banner', () => {
     storeMod.useLiveStore.setState({ notifications: [] });
     renderHome();
     expect(screen.queryByTestId('live-notification')).toBeNull();
-    // The coin mark is still there — the hero did not reserve space for a banner.
-    expect(screen.getByTestId('live-hero-mark')).toBeInTheDocument();
+    // The hero is still there: it did not reserve space for a banner.
+    expect(screen.getByTestId('live-balance-hero')).toBeInTheDocument();
   });
 
   it('hands the banner every matching notice, so it can rotate through them', () => {

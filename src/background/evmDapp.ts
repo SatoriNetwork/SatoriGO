@@ -67,6 +67,41 @@ const READ_METHODS = new Set([
   'eth_maxPriorityFeePerGas',
 ]);
 
+/** A connected site's network switch is the user's decision: these open an
+ *  approval when the site is connected and asks for a different chain. They are
+ *  NOT in EVM_APPROVAL_METHODS (no side panel on a page load's silent switch). */
+export const EVM_CHAIN_SWITCH_METHODS: readonly string[] = ['wallet_switchEthereumChain', 'wallet_addEthereumChain'];
+
+/** eth_getLogs: the widest block range a site may ask for in one call. */
+export const MAX_LOG_BLOCK_RANGE = 10_000n;
+
+/** Read passthrough budget per origin, per window (in-memory; a restarted
+ *  worker starts fresh, which only ever makes it more lenient for a moment). */
+const READ_WINDOW_MS = 10_000;
+const READ_BUDGET_CONNECTED = 300;
+const READ_BUDGET_UNCONNECTED = 60;
+const readUse = new Map<string, { start: number; count: number }>();
+
+/** True when `origin` may make one more read now (and counts it). */
+export function takeReadBudget(origin: string, connected: boolean, now = Date.now()): boolean {
+  let u = readUse.get(origin);
+  if (!u || now - u.start >= READ_WINDOW_MS) {
+    u = { start: now, count: 0 };
+    readUse.set(origin, u);
+    if (readUse.size > 500) {
+      for (const [k, v] of readUse) if (now - v.start >= READ_WINDOW_MS) readUse.delete(k);
+    }
+  }
+  if (u.count >= (connected ? READ_BUDGET_CONNECTED : READ_BUDGET_UNCONNECTED)) return false;
+  u.count++;
+  return true;
+}
+
+/** Test hook: forget every origin's read budget. */
+export function resetReadBudgets(): void {
+  readUse.clear();
+}
+
 const WALLETS_KEY = 'liveWallets';
 /** storage.session: the chain a NOT-yet-connected origin switched to. */
 const ORIGIN_CHAIN_PREFIX = 'evmOriginChain:';
@@ -180,6 +215,8 @@ export async function bindEvmOrigin(origin: string, walletId: string | undefined
 
 const isAddress = (v: unknown): v is string => typeof v === 'string' && /^0x[0-9a-fA-F]{40}$/.test(v);
 const isHex = (v: unknown): v is string => typeof v === 'string' && /^0x[0-9a-fA-F]*$/.test(v);
+/** Calldata: whole bytes only (an odd nibble count is not a byte string). */
+const isHexData = (v: unknown): v is string => typeof v === 'string' && /^0x([0-9a-fA-F]{2})*$/.test(v);
 const sameAddress = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
 /** The chain a site named in wallet_switchEthereumChain / addEthereumChain. */
@@ -194,7 +231,7 @@ function requestedChainId(params: unknown): number | null {
 export interface EvmDappDeps {
   /** Park the request and show the approval (index.ts deferToApproval). */
   defer(walletId: string | undefined, extra: { chainKey: string }): Promise<{ result?: unknown; error?: unknown; deferred?: boolean }>;
-  /** Push an EIP-1193 event to the requesting tab. */
+  /** Push an EIP-1193 event to every tab showing the requesting origin. */
   pushEvent(event: 'chainChanged' | 'accountsChanged', data: unknown): void;
 }
 
@@ -211,8 +248,8 @@ export async function handleEvmDappRequest(msg: EvmDappRequestMessage, deps: Evm
   const params = msg.params;
   const accounts = conn ? [conn.wallet.address as string] : [];
 
-  const deferred = async (walletId: string | undefined): Promise<EvmDappResponse> => {
-    const r = await deps.defer(walletId, { chainKey: chain.key });
+  const deferred = async (walletId: string | undefined, chainKeyFor = chain.key): Promise<EvmDappResponse> => {
+    const r = await deps.defer(walletId, { chainKey: chainKeyFor });
     return { result: r.result, deferred: r.deferred, error: toEvmProviderError(r.error) };
   };
 
@@ -225,10 +262,13 @@ export async function handleEvmDappRequest(msg: EvmDappRequestMessage, deps: Evm
       return { result: accounts };
 
     case 'eth_requestAccounts': {
-      // Already connected with only one EVM account to choose from: answer at
-      // once. Otherwise the user picks (or re-picks) in the approval.
-      if (conn && (await evmWallets()).length <= 1) return { result: accounts };
-      return deferred(conn?.wallet.id);
+      // A site that is already connected gets its account at once, however
+      // many EVM accounts the wallet holds: asking again on every page load
+      // taught users to click through the approval. To give a site a different
+      // account, disconnect it in the wallet (Settings, Connected sites) and
+      // connect again; the picker opens then.
+      if (conn) return { result: accounts };
+      return deferred(undefined);
     }
 
     case 'wallet_switchEthereumChain':
@@ -242,18 +282,22 @@ export async function handleEvmDappRequest(msg: EvmDappRequestMessage, deps: Evm
           ? err(4902, `Satori GO does not support chain ${id}. Supported: ${names}.`)
           : err(4200, `Satori GO cannot add new networks. Supported: ${names}.`);
       }
-      if (target.key !== chain.key) {
-        if (conn) {
-          await getStorage().set(EVM_APPROVED_ORIGINS_KEY, setEvmApprovalChain(conn.entries, msg.origin, target.key));
-        } else {
-          try {
-            await chrome.storage.session.set({ [ORIGIN_CHAIN_PREFIX + msg.origin]: target.key });
-          } catch {
-            return err(-32603, 'Could not switch chain.');
-          }
-        }
-        deps.pushEvent('chainChanged', evm.evmChainIdHex(target));
+      if (target.key === chain.key) return { result: null };
+      if (conn) {
+        // A connected site's later signs and sends happen on the chain it is
+        // on, so moving it is the user's call. The approval page settles it;
+        // the worker applies the PARKED chain key (applyEvmChainSwitch), and
+        // the storage change tells every tab of the origin.
+        return deferred(conn.wallet.id, target.key);
       }
+      // Not connected: the site sees no account and can do nothing but read,
+      // so following it is harmless. Kept for this browser session only.
+      try {
+        await chrome.storage.session.set({ [ORIGIN_CHAIN_PREFIX + msg.origin]: target.key });
+      } catch {
+        return err(-32603, 'Could not switch chain.');
+      }
+      deps.pushEvent('chainChanged', evm.evmChainIdHex(target));
       return { result: null };
     }
 
@@ -320,7 +364,7 @@ export async function handleEvmDappRequest(msg: EvmDappRequestMessage, deps: Evm
       if (!isAddress(tx.to)) return err(-32602, 'A transaction needs a "to" address. Contract deployment is not supported.');
       if (tx.value !== undefined && !isHex(tx.value)) return err(-32602, '"value" must be 0x hex wei.');
       const data = tx.data ?? tx.input;
-      if (data !== undefined && !isHex(data)) return err(-32602, '"data" must be 0x hex.');
+      if (data !== undefined && !isHexData(data)) return err(-32602, '"data" must be 0x hex bytes.');
       if (tx.chainId !== undefined) {
         const id = typeof tx.chainId === 'string' ? Number.parseInt(tx.chainId, 16) : Number(tx.chainId);
         if (id !== chain.chainId) return err(-32602, `The transaction is for chain ${id}, but this site is on ${chain.displayName}.`);
@@ -334,8 +378,15 @@ export async function handleEvmDappRequest(msg: EvmDappRequestMessage, deps: Evm
 
     default: {
       if (!READ_METHODS.has(msg.method)) return err(4200, `Satori GO does not support ${msg.method}.`);
+      if (!takeReadBudget(msg.origin, !!conn)) {
+        return err(-32005, 'Too many requests from this site. Try again in a few seconds.');
+      }
       const provider = readProvider(evm, chain);
       try {
+        if (msg.method === 'eth_getLogs') {
+          const refusal = await checkLogRange(params, () => provider.rpc.call<string>('eth_blockNumber', []));
+          if (refusal) return err(-32602, refusal);
+        }
         const result = await provider.rpc.call<unknown>(msg.method, Array.isArray(params) ? params : []);
         return { result: result ?? null };
       } catch (e) {
@@ -344,4 +395,80 @@ export async function handleEvmDappRequest(msg: EvmDappRequestMessage, deps: Evm
       }
     }
   }
+}
+
+/** Apply a switch the user approved: move the connected `origin` to `chainKey`
+ *  (taken from the PARKED request, never from the approval page). */
+export async function applyEvmChainSwitch(origin: string, chainKey: string | undefined): Promise<boolean> {
+  const evm = await requireEvm();
+  if (!evm || !chainKey || !evm.isEvmChainKey(chainKey)) return false;
+  const conn = await connectionFor(evm, origin);
+  if (!conn) return false;
+  await getStorage().set(EVM_APPROVED_ORIGINS_KEY, setEvmApprovalChain(conn.entries, origin, chainKey));
+  return true;
+}
+
+const BLOCK_TAGS_AT_HEAD = new Set(['latest', 'pending', 'safe', 'finalized']);
+
+/** eth_getLogs over a bounded range only: null when fine, else why not. A
+ *  blockHash filter is one block. 'earliest' or a range wider than
+ *  MAX_LOG_BLOCK_RANGE would make the wallet's endpoints scan the chain for a
+ *  site. */
+export async function checkLogRange(params: unknown, head: () => Promise<string>): Promise<string | null> {
+  const filter = Array.isArray(params) && params[0] && typeof params[0] === 'object' ? (params[0] as Record<string, unknown>) : null;
+  if (!filter) return 'Expected [filter].';
+  if (filter.blockHash !== undefined) return null;
+  const tooWide = `eth_getLogs is limited to ${MAX_LOG_BLOCK_RANGE} blocks per call.`;
+  let headNum: bigint | null = null;
+  const resolve = async (tag: unknown): Promise<bigint | null> => {
+    if (tag === undefined || (typeof tag === 'string' && BLOCK_TAGS_AT_HEAD.has(tag))) {
+      if (headNum === null) headNum = BigInt(await head());
+      return headNum;
+    }
+    if (typeof tag === 'string' && /^0x[0-9a-fA-F]+$/.test(tag)) return BigInt(tag);
+    return null; // 'earliest' or malformed
+  };
+  const from = await resolve(filter.fromBlock);
+  const to = await resolve(filter.toBlock);
+  if (from === null || to === null) return tooWide;
+  if (to >= from && to - from + 1n > MAX_LOG_BLOCK_RANGE) return tooWide;
+  return null;
+}
+
+/**
+ * The events a change of the stored connection list means for each origin:
+ * accountsChanged [] when it was disconnected, accountsChanged [address] when
+ * it was bound to an account (new or different), chainChanged when its chain
+ * moved. Raw values straight from storage.onChanged; malformed ones count as
+ * an empty list.
+ */
+export async function evmApprovalEvents(
+  oldRaw: unknown,
+  newRaw: unknown,
+): Promise<{ origin: string; event: 'chainChanged' | 'accountsChanged'; data: unknown }[]> {
+  const evm = await requireEvm();
+  if (!evm) return [];
+  const opts = { isChainKey: (k: string) => evm.isEvmChainKey(k), defaultChainKey: evm.DEFAULT_EVM_CHAIN_KEY };
+  const before = new Map(normalizeEvmApprovals(oldRaw, opts).entries.map((e) => [e.origin, e]));
+  const after = new Map(normalizeEvmApprovals(newRaw, opts).entries.map((e) => [e.origin, e]));
+  const wallets = await evmWallets();
+  const out: { origin: string; event: 'chainChanged' | 'accountsChanged'; data: unknown }[] = [];
+  for (const [origin, was] of before) {
+    const now = after.get(origin);
+    if (!now) {
+      out.push({ origin, event: 'accountsChanged', data: [] });
+      continue;
+    }
+    if (now.chainKey !== was.chainKey) {
+      const chain = evm.evmChainByKey(now.chainKey);
+      if (chain) out.push({ origin, event: 'chainChanged', data: evm.evmChainIdHex(chain) });
+    }
+  }
+  for (const [origin, now] of after) {
+    const was = before.get(origin);
+    if (was && was.walletId === now.walletId) continue;
+    const address = wallets.find((w) => w.id === now.walletId)?.address;
+    out.push({ origin, event: 'accountsChanged', data: address ? [address] : [] });
+  }
+  return out;
 }

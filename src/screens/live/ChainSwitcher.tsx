@@ -497,6 +497,9 @@ export function ChainSwitcher() {
             </span>
           )}
         </span>
+        {/* Before the star, not after it (1.6.6): every row's star then stands
+            in one column and the tick is the extra mark of the current one. */}
+        {isCurrent && <Check size={15} className="opt-check" style={{ flexShrink: 0 }} />}
         {/* Reordering, favourites only: one place up or down among the
             favourites on screen. Disabled (not hidden) at the ends so every
             favourite row keeps the same shape. */}
@@ -538,7 +541,6 @@ export function ChainSwitcher() {
             Add
           </span>
         )}
-        {isCurrent && <Check size={15} className="opt-check" />}
       </div>
     );
   }
@@ -587,6 +589,7 @@ export function ChainSwitcher() {
             style={{ position: 'fixed', inset: 0, zIndex: 49 }}
             onClick={closeAll}
           />
+          <div className="menu-scrim" aria-hidden />
           {/* Anchored LEFT, under the trigger it belongs to (.menu-pop's own
               right:14px is overridden here). 300px (was a cramped 224) is wide
               enough that the enable-chain confirm title fits on one line, and
@@ -600,10 +603,13 @@ export function ChainSwitcher() {
                Viewport units, not %, because the containing block is the
                header, not the frame. */
             style={{
-              left: 14,
+              left: 10,
               right: 'auto',
-              width: 'min(300px, calc(100% - 28px))',
-              maxHeight: 'calc(100vh - 110px)',
+              width: 'min(372px, calc(100% - 20px))',
+              // Under the header whatever its height; a fixed offset used to
+              // land the list across the address line.
+              top: 'calc(100% + 2px)',
+              maxHeight: 'calc(100vh - 100% - 20px)',
               overflowY: 'auto',
             }}
           >

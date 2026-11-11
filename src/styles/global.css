@@ -693,9 +693,27 @@ body {
   grid-template-columns: auto minmax(0, 1fr) auto;
   grid-template-rows: auto auto;
   column-gap: 8px;
-  row-gap: 1px;
+  row-gap: 4px;
   align-items: center;
   padding: 10px var(--pad-screen) 6px;
+}
+/* Row 2: WHO you are. The wallet's name and its address share one centred line
+   that spans the whole header, so the name has the full width of the frame
+   instead of what the chain pill and three icon buttons left it in row 1
+   (owner, 2026-11-11: wallet names were being cut to a few letters). The name
+   is the part that ellipsises; the address never shrinks. */
+.header-identity {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* A name too long to share the line pushes the address onto a line of its
+     own (wrapping happens before any shrinking), so the name is cut only when
+     it cannot fit the whole frame. */
+  flex-wrap: wrap;
+  gap: 0 2px;
+  min-width: 0;
 }
 /* Left slot: the chain trigger (ChainSwitcher.tsx). It hugs its own text and
    does NOT shrink — the chain name is a safety surface, so it is the wallet
@@ -705,7 +723,7 @@ body {
 .app-header .chain-trigger {
   grid-column: 1;
   grid-row: 1;
-  max-width: 136px;
+  max-width: 200px;
   height: 30px;
   padding: 0 9px 0 7px;
   font-size: 11.5px;
@@ -734,19 +752,17 @@ body {
    pushing them off the row; both children stretch to the slot, so the switcher's
    own box is still exactly the centre column. */
 .wallet-switcher {
-  grid-column: 2;
-  grid-row: 1;
-  justify-self: center;
-  max-width: 100%;
+  flex: 0 1 auto;
   min-width: 0;
-  height: 30px;
+  max-width: 100%;
+  height: 28px;
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 0 10px 0 6px;
+  gap: 7px;
+  padding: 0 8px 0 5px;
   border-radius: 999px;
-  font-size: 13px;
-  font-weight: 600;
+  font-size: 14px;
+  font-weight: 650;
   letter-spacing: -0.01em;
   color: var(--text);
   transition: background var(--dur) var(--ease);
@@ -765,16 +781,13 @@ body {
    beside it — hence the faint colour and the 9.5px type the plain text line
    used to have. */
 .wallet-address {
-  grid-column: 1 / -1;
-  grid-row: 2;
-  justify-self: center;
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 5px;
-  max-width: 100%;
   margin-top: 0;
-  padding: 2px 8px;
+  padding: 3px 8px;
   border: 0;
   border-radius: 999px;
   background: none;
@@ -820,8 +833,7 @@ body {
      chevron and drops the NAME (it is in the title / aria-label, in the
      dropdown, and the balance hero names the coin); the wallet name gets the
      width back. MetaMask's header shows only the network mark at every width. */
-  .app-header .chain-trigger { max-width: none; padding: 0 6px 0 7px; gap: 3px; }
-  .app-header .chain-trigger .chain-trigger-text { display: none; }
+  .app-header .chain-trigger { max-width: 150px; }
   .app-header .header-actions { gap: 2px; }
 }
 
@@ -1973,6 +1985,39 @@ button.list-row:hover, a.list-row:hover { background: var(--card-hover); border-
   text-align: left;
 }
 .menu-pop button:hover { background: var(--card-hover); }
+/* What is behind an open header menu goes dark, so the menu reads as ONE layer
+   on top instead of a box with the page showing through beside and under it
+   (users, 2026-11: "layers overlap"). It starts at the header's bottom edge:
+   the header itself, which holds the trigger, stays lit. Clicks pass through
+   to the closer underneath. */
+.menu-scrim {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  height: 100vh;
+  background: rgba(0, 0, 0, 0.62);
+  z-index: 48;
+  pointer-events: none;
+  animation: scrimIn 0.15s var(--ease);
+}
+:root[data-theme='light'] .menu-scrim { background: rgba(20, 20, 30, 0.38); }
+@keyframes scrimIn { from { opacity: 0; } to { opacity: 1; } }
+/* A wallet in the switcher: mark, then the NAME on its own line with the
+   address under it. No chips share the line. */
+.menu-pop button.wallet-row { flex: 1; min-width: 0; gap: 10px; padding: 7px 9px; }
+.wallet-row-text { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 1px; }
+.wallet-row-name {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.3;
+}
+.wallet-row-address { font-size: 10px; font-weight: 500; color: var(--text-faint); line-height: 1.25; }
+.wallet-row-check { color: var(--success); flex-shrink: 0; }
 .menu-pop button.danger { color: var(--danger); }
 /* Coin marks in header menus and chips sit on the darkest surfaces, and several
    official marks are themselves dark (WojakCoin, Litecoin). Lift the existing
@@ -2319,9 +2364,13 @@ button.list-row:hover, a.list-row:hover { background: var(--card-hover); border-
   flex: 1;
   min-width: 0;
 }
+.lock-wallet-name { font-size: 13px; font-weight: 650; line-height: 1.3; }
+.lock-wallet-warn { color: var(--warning); }
+.live-scope .lock-wallet { gap: 10px; text-align: left; }
 .lock-wallet-addr {
   max-width: 100%;
-  font-size: 9px;
+  font-size: 10px;
+  line-height: 1.25;
   color: var(--text-faint);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2390,6 +2439,64 @@ button.list-row:hover, a.list-row:hover { background: var(--card-hover); border-
    because `.live-scope .home-tight .hero-value` outranks both. */
 .live-scope .token-row .token-amount { font-size: var(--token-font); }
 .live-scope .token-row .token-meta { font-size: var(--token-meta); }
+
+/* The Home asset row: two lines, name over (24h move + badges) on the left,
+   amount over fiat value on the right. Flat, like the Activity rows: the list
+   is a list, not a stack of cards. */
+.live-scope .token-row.asset-row {
+  background: transparent;
+  border-color: transparent;
+  padding-left: 8px;
+  padding-right: 8px;
+}
+.live-scope .token-row.asset-row:hover { background: var(--card); border-color: transparent; }
+.live-scope .token-row.asset-row.token-row-edit { background: var(--card); border-color: var(--border); }
+.live-scope .token-row.asset-row + .token-row.asset-row { margin-top: var(--asset-row-gap, 2px); }
+/* The two text lines together are never taller than the mark beside them (32px
+   roomy, 28px in the dense popup), so the MARK sets the row's height: a row
+   with an empty second line, a row in edit mode and a full row are all the
+   same height, and the dense popup still shows seven whole rows. */
+.asset-main { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: 0; }
+.live-scope .token-row .asset-title {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: calc(var(--token-font) + 1px);
+  line-height: 1.2;
+}
+.asset-sub { display: flex; align-items: center; gap: 6px; min-width: 0; height: 13px; overflow: hidden; white-space: nowrap; line-height: 13px; }
+.asset-sub:empty { display: none; }
+/* The wallet's own "unlisted" pill keeps its solid fill here (see
+   UntrustedTokenBadge) but takes the line's height, so it is never clipped. */
+.asset-sub [data-testid^='live-untrusted-'] {
+  padding-top: 0 !important;
+  padding-bottom: 0 !important;
+  font-size: 10px !important;
+  line-height: 12px !important;
+}
+.asset-sub .asset-badge { padding-top: 0; padding-bottom: 0; line-height: 12px; }
+.asset-figures {
+  flex: 0 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.live-scope .token-row .asset-figures .token-amount { font-size: calc(var(--token-font) + 1px); line-height: 1.2; }
+.asset-figures .token-meta { height: 13px; line-height: 13px; }
+/* The dense popup: 3px of padding and a 1px seam, a 37px pitch. */
+.app-content.home-pinned.home-tight { --asset-row-gap: 1px; }
+.app-content.home-pinned.home-tight .token-row.asset-row { padding-top: 3px; padding-bottom: 3px; }
+.app-content.home-pinned.home-tight .asset-sub,
+.app-content.home-pinned.home-tight .asset-figures .token-meta { height: 12px; line-height: 12px; }
+.asset-badge { flex-shrink: 0; font-size: 9.5px; font-weight: 600; padding: 1px 6px; border-radius: 999px; }
+.asset-badge.warning { color: var(--warning); background: var(--warning-bg); }
+.asset-badge.success { color: var(--success); background: var(--success-bg); }
 
 /* Lock-screen "or create / import a new wallet" alternatives. */
 .live-scope .lock-alt { margin-top: 18px; width: 100%; }
@@ -2479,3 +2586,212 @@ button.list-row:hover, a.list-row:hover { background: var(--card-hover); border-
 .link:hover {
   filter: brightness(1.2);
 }
+
+/* ----- 1.6.3 ---------------------------------------------------------------- */
+/* The connection state, in the header beside the chain it is about (row 1, the
+   column between the chain pill and the icon buttons). Not a boxed pill here:
+   a dot, and words only when there is something to say. The words give way
+   (ellipsis) before the chain name or the buttons do. */
+.app-header .header-status {
+  grid-column: 2;
+  grid-row: 1;
+  justify-self: start;
+  min-width: 0;
+  max-width: 100%;
+  padding: 4px 2px;
+  border: 0;
+  background: none;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  overflow: hidden;
+}
+.app-header .header-status .header-status-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.app-header .header-status.state-offline { color: var(--danger); }
+
+/* The coin's own balance, under the wallet's total worth. */
+.hero .hero-native {
+  margin-top: 3px;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.3;
+}
+.hero .hero-native .hero-native-ticker { margin-left: 5px; font-weight: 500; }
+.app-content.home-pinned.home-tight .hero .hero-native { margin-top: 1px; font-size: 12.5px; }
+
+/* Rename / Remove for one switcher row, opened by its "more" button: words,
+   under the row they act on, indented to the name. */
+.wallet-row-actions { display: flex; gap: 6px; padding: 0 6px 6px 45px; }
+.menu-pop .wallet-row-actions button:not(.icon-btn):not(.btn) {
+  width: auto;
+  flex: 0 0 auto;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+/* "3 incoming transfers of unlisted tokens hidden. Show" above Activity. */
+.activity-unlisted-note {
+  display: block;
+  width: 100%;
+  margin: 0 0 6px;
+  padding: 5px 8px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: none;
+  cursor: pointer;
+  font-size: 11px;
+  text-align: center;
+}
+.activity-unlisted-note:hover { background: var(--card); }
+
+/* The selected wallet on the lock screen: kind, chain and password as words. */
+.lock-selected-sub {
+  display: block;
+  margin-top: 1px;
+  font-size: 10.5px;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.menu-pop .wallet-row-actions button.danger:not(.icon-btn):not(.btn) { color: var(--danger); }
+
+/* ----- 1.6.4 ---------------------------------------------------------------- */
+/* Under an amount field: what is available on the left, what the typed amount
+   is worth on the right. */
+.send-amount-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 6px 2px 8px;
+  font-size: 11.5px;
+}
+/* The header address: 8+6 normally, 6+4 in a panel dragged narrow. */
+.wallet-address-text .addr-narrow { display: none; }
+@media (max-width: 360px) {
+  .wallet-address-text .addr-wide { display: none; }
+  .wallet-address-text .addr-narrow { display: inline; }
+}
+/* The switching screen stays empty for a beat, then says what it is doing. */
+.switching-late { animation: switchingLate 0.2s ease 0.35s both; }
+@keyframes switchingLate { from { opacity: 0; } to { opacity: 1; } }
+/* PRESSED states: everything tappable answers the press itself, at once,
+   before whatever the tap starts has had time to show. */
+.live-scope .action-round:active .action-circle { transform: scale(0.93); filter: brightness(0.9); }
+.live-scope .action-round .action-circle { transition: transform 0.08s ease, filter 0.08s ease; }
+.live-scope .token-row.asset-row:not(.token-row-edit):active { background: var(--card-hover); }
+.live-scope [data-testid^='live-tx-row-']:hover { background: var(--card); }
+.live-scope [data-testid^='live-tx-row-']:active { background: var(--card-hover); }
+.live-scope .nav-item:active { transform: scale(0.96); }
+.live-scope .btn:active:not(:disabled) { transform: scale(0.985); filter: brightness(0.94); }
+.live-scope .chip[type='button']:active, .live-scope button.chip:active { filter: brightness(0.85); }
+.live-scope .list-row:active { background: var(--card-hover); }
+@media (prefers-reduced-motion: reduce) {
+  .live-scope .action-round:active .action-circle,
+  .live-scope .nav-item:active,
+  .live-scope .btn:active:not(:disabled) { transform: none; }
+  .switching-late { animation: none; }
+}
+/* The Satori tab, labelled like the other three. */
+.nav-item.nav-item-mark { flex: 1 1 0; padding: 6px 0 3px; justify-content: flex-start; }
+.nav-item-mark img { box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 55%, transparent); }
+
+/* ----- 1.6.5 ---------------------------------------------------------------- */
+/* The build number on the lock screens: small, bottom right, out of the way. */
+.lock-version {
+  position: absolute;
+  right: 10px;
+  bottom: 7px;
+  z-index: 2;
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+/* The switching screen: the outline of Home, inert. Its header pieces are the
+   real header's classes, so the name sits exactly where it will be a moment
+   later. */
+.switching-frame { pointer-events: none; }
+.switching-frame .wallet-switcher { cursor: default; }
+.switching-frame .action-round .action-circle { background: var(--card); box-shadow: none; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+/* ----- 1.6.6 ---------------------------------------------------------------- */
+/* The eye hangs BESIDE the big figure instead of being part of the centred
+   line, so the number itself stands on the screen's axis, over Send/Receive. */
+.hero .hero-value {
+  position: relative;
+  width: fit-content;
+  max-width: calc(100% - 68px);
+  margin-left: auto;
+  margin-right: auto;
+}
+.hero .hero-value .hero-eye {
+  position: absolute;
+  left: 100%;
+  top: 50%;
+  margin-left: 6px;
+  transform: translateY(-50%);
+}
+/* Compact Home: a breath between the coin's balance and the two actions. */
+.app-content.home-pinned.home-tight .actions-row { margin-top: 6px; }
+/* One weight for a big amount wherever it is drawn (the asset screen's figure
+   sat outside .hero and fell back to a thin regular). */
+.live-scope .hero-value { font-weight: 750; letter-spacing: -0.02em; }
+/* The dot-only status is a dot, as in Home's header: no chip around it. */
+.pill.pill-dot { background: none; border-color: transparent; }
+/* Activity and Network tabs: the identity footer rests at the bottom of the
+   panel instead of floating under a short list. */
+.app-content.tab-flow { display: flex; flex-direction: column; }
+.app-content.tab-flow > * { flex-shrink: 0; }
+.app-content.tab-flow > .home-footer { margin-top: auto; }
+/* Settings: "Detail level" is a small switch on its label's line, not the
+   largest control of the screen. */
+.settings-mode-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.settings-mode-row .seg { flex: 0 0 auto; }
+.settings-mode-row .seg button { flex: 0 0 auto; padding: 5px 14px; font-size: 11.5px; }
+/* A select that reads as one: the chevron the native arrow took with it. */
+.live-scope select.live-picker {
+  padding-right: 30px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238b8b99' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+}
+/* A disclosure with our chevron instead of the browser's triangle. */
+details.disclosure > summary { list-style: none; display: flex; align-items: center; gap: 5px; }
+details.disclosure > summary::-webkit-details-marker { display: none; }
+details.disclosure .disclosure-chev { flex-shrink: 0; transition: transform var(--dur) var(--ease); }
+details.disclosure[open] .disclosure-chev { transform: rotate(90deg); }
+
+/* ----- 1.6.7 ---------------------------------------------------------------- */
+/* The Satori tab is selected the way its three neighbours are: by colour. */
+.nav-item-mark[aria-selected='true'] { background: none; }
+/* Settings, Wallets: the bin is quiet until it is pointed at. */
+.icon-btn.row-remove { color: var(--text-faint); flex-shrink: 0; }
+.icon-btn.row-remove:hover { color: var(--danger); background: var(--danger-bg); }
+/* Chain picker at create/import: three rows and a half show, the rest scroll. */
+.chain-pick-box {
+  max-height: 132px;
+  overflow-y: auto;
+  border-radius: var(--r-md);
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+.chain-pick-box > .seg { border-radius: var(--r-md); }
+.field input.chain-pick-filter {
+  width: 100%;
+  font-size: 12px;
+  padding: 7px 9px;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--card);
+  outline: none;
+}
+.field input.chain-pick-filter:focus-visible { border-color: var(--accent); }

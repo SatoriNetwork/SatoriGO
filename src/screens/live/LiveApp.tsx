@@ -9,6 +9,7 @@ import { LiveLock } from './LiveLock';
 import { LiveAppLock } from './LiveAppLock';
 import { LiveForceAppPassword } from './LiveForceAppPassword';
 import { LiveHome } from './LiveHome';
+import { LiveSwitching } from './LiveSwitching';
 import { LiveReceive } from './LiveReceive';
 import { LiveSend } from './LiveSend';
 import { LiveSendEvm } from './LiveSendEvm';
@@ -85,6 +86,7 @@ export function LiveApp() {
   const phase = useLiveStore((s) => s.phase);
   const satoriOfficial = useLiveStore((s) => satoriRowIsOfficial(activeEvmChain(s)?.defaultTokens, s.evmTokens));
   const syncing = useLiveStore((s) => s.syncing);
+  const switchingTo = useLiveStore((s) => s.switchingTo);
   const init = useLiveStore((s) => s.init);
   const refresh = useLiveStore((s) => s.refresh);
   const startAutoRefresh = useLiveStore((s) => s.startAutoRefresh);
@@ -266,18 +268,13 @@ export function LiveApp() {
     return wrap(<LiveForceAppPassword />);
   }
 
-  // Wallet switch in progress: a full-frame loading screen instead of the
-  // intermediate lock/empty-home flash while the target wallet spins up.
+  // Wallet switch in progress. The outline of Home with the TARGET wallet's
+  // name and address already in the header (LiveSwitching), instead of the
+  // blank "Switching wallet…" spinner frame it was until 1.6.5: the eye lands
+  // on the new wallet at once and the figures fill in under it. It still covers
+  // the intermediate lock / empty-home states while the target spins up.
   if (syncing === 'switching') {
-    return wrap(
-      <div className="app-frame" data-testid="live-syncing">
-        <div className="result-screen">
-          <span className="spinner lg" style={{ color: 'var(--accent)' }} />
-          <h3 style={{ marginTop: 14 }}>Switching wallet…</h3>
-          <p className="text-dim" style={{ fontSize: 12 }}>Loading the selected wallet.</p>
-        </div>
-      </div>,
-    );
+    return wrap(<LiveSwitching target={switchingTo} />);
   }
 
   if (phase === 'onboarding') {

@@ -224,8 +224,19 @@ describe('EVM accounts in the store', () => {
     expect(state().wallets.map((w) => w.name)).toEqual(['EVM', 'Account 2']);
     expect(state().wallets.find((w) => w.active)?.hdIndex).toBe(1);
 
-    // And switching back the other way is just as seamless.
+    // And switching back the other way is just as seamless. While it runs the
+    // store names the wallet being opened (1.6.5: the switching screen draws
+    // its header from this), and forgets it the moment the switch is over.
+    const seen: Array<{ id: string; name: string; address: string } | null> = [];
+    const unsubscribe = mod.useLiveStore.subscribe((s) => {
+      if (s.syncing === 'switching') seen.push(s.switchingTo);
+    });
     await state().switchWallet(account1!);
+    unsubscribe();
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.every((t) => t?.id === account1 && t.name === 'EVM' && t.address === ADDR[0])).toBe(true);
+    expect(state().switchingTo).toBeNull();
+    expect(state().syncing).not.toBe('switching');
     expect(state().phase).toBe('ready');
     expect(state().address).toBe(ADDR[0]);
     await settle();

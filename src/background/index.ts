@@ -40,11 +40,15 @@ import {
 } from './approvals';
 import {
   EVM_APPROVAL_METHODS,
+  EVM_CHAIN_SWITCH_METHODS,
+  applyEvmChainSwitch,
+  evmApprovalEvents,
   bindEvmOrigin,
   handleEvmDappRequest,
   toEvmProviderError,
   type EvmDappRequestMessage,
 } from './evmDapp';
+import { EVM_APPROVED_ORIGINS_KEY } from './evmApprovals';
 
 // Best-effort: adopt the user's configured Electrum server pools so the dApp
 // worker's watch-only reads (getBalances) and the deposit poll use the SAME
@@ -750,6 +754,8 @@ async function deferToApproval(
   if (pending.length >= MAX_PENDING_TOTAL) {
     return { error: 'too-many-pending-requests' };
   }
+  // The id is the page's: one already parked (by any origin) is never replaced.
+  if (pending.some((p) => p.id === msg.id)) return { error: 'bad-request' };
   await savePending({
     id: msg.id,
     tabId,
@@ -899,11 +905,23 @@ async function tabMayReceive(tabId: number, origin: string): Promise<boolean> {
 
 /** Outcome from the approval page -> persist the approval, route to the tab. */
 async function handleApproveResult(msg: DappApproveResultMessage): Promise<void> {
+  const parked = (await chrome.storage.session.get(PENDING_PREFIX + msg.id))[PENDING_PREFIX + msg.id] as
+    | PendingDappRequest
+    | undefined;
+  if (parked?.family === 'evm' && EVM_CHAIN_SWITCH_METHODS.includes(parked.method)) {
+    // A network switch: apply the chain the WORKER parked, whatever the page
+    // sent, and answer the site with null (EIP-3326) or the error.
+    const pending = await takePending(msg.id);
+    if (!pending) return;
+    if (!msg.error && !(await applyEvmChainSwitch(pending.origin, pending.chainKey))) {
+      await deliverToTab(pending, { error: 'This site is no longer connected.' });
+      return;
+    }
+    await deliverToTab(pending, msg.error ? { error: msg.error } : { result: null });
+    return;
+  }
   if (msg.approveOrigin && !msg.error) {
     // Which provider asked decides which list the connection goes in.
-    const parked = (await chrome.storage.session.get(PENDING_PREFIX + msg.id))[PENDING_PREFIX + msg.id] as
-      | PendingDappRequest
-      | undefined;
     if (parked?.family === 'evm') {
       if (parked.origin === msg.approveOrigin) await bindEvmOrigin(msg.approveOrigin, msg.walletId, parked.chainKey);
     } else {
@@ -913,6 +931,40 @@ async function handleApproveResult(msg: DappApproveResultMessage): Promise<void>
   const pending = await takePending(msg.id);
   if (!pending) return; // already settled (double-send guard) or unknown id
   await deliverToTab(pending, { result: msg.result, error: msg.error });
+}
+
+/**
+ * Send an EIP-1193 event to every tab: content.js relays it only into a
+ * document whose location.origin is `origin`, so other sites never see it.
+ * (tabs.query cannot filter by origin without the tabs permission.)
+ */
+function broadcastEvmEvent(origin: string, event: 'chainChanged' | 'accountsChanged', data: unknown): void {
+  void (async () => {
+    try {
+      const tabs = await chrome.tabs.query({});
+      for (const t of tabs) {
+        if (typeof t.id !== 'number') continue;
+        void Promise.resolve(chrome.tabs.sendMessage(t.id, { type: 'evm-dapp-event', origin, event, data })).catch(
+          () => undefined,
+        );
+      }
+    } catch {
+      // no tabs API: nothing to tell
+    }
+  })();
+}
+
+// A connection that changes anywhere (a switch the user approved, a new
+// account picked, a disconnect in Settings) is announced to the site's tabs.
+if (typeof chrome.storage?.onChanged?.addListener === 'function') {
+  const evmKey = 'evrdemo:' + EVM_APPROVED_ORIGINS_KEY;
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local' || !Object.prototype.hasOwnProperty.call(changes, evmKey)) return;
+    const change = changes[evmKey];
+    void evmApprovalEvents(change.oldValue, change.newValue).then((events) => {
+      for (const e of events) broadcastEvmEvent(e.origin, e.event, e.data);
+    });
+  });
 }
 
 /** True when the message provably comes from one of OUR extension pages. */
@@ -938,16 +990,10 @@ chrome.runtime.onMessage.addListener(
       // window.ethereum: same gesture rule, same approval machinery.
       const evmMsg = msg as EvmDappRequestMessage;
       const panelOpening = openSidePanelForRequest(evmMsg, sender);
-      const tabId = sender.tab?.id;
       handleEvmDappRequest(evmMsg, {
         defer: (walletId, extra) =>
           deferToApproval(evmMsg, sender, walletId, panelOpening, { family: 'evm', chainKey: extra.chainKey }),
-        pushEvent: (event, data) => {
-          if (typeof tabId !== 'number') return;
-          void Promise.resolve(
-            chrome.tabs.sendMessage(tabId, { type: 'evm-dapp-event', origin: evmMsg.origin, event, data }),
-          ).catch(() => undefined);
-        },
+        pushEvent: (event, data) => broadcastEvmEvent(evmMsg.origin, event, data),
       })
         .then(sendResponse)
         .catch((err: unknown) =>

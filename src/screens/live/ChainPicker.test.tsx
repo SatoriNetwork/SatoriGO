@@ -313,3 +313,17 @@ describe('EVM chains', () => {
     expect(screen.getByTestId('test-chain-evm:bsc')).toBeTruthy();
   });
 });
+
+describe('long list (1.6.7): a filter over a scrolling box', () => {
+  it('narrows the options by name and never drops the selected chain', () => {
+    render(
+      <ChainPicker value="mainnet" onChange={() => {}} testIdPrefix="test-chain" secretKind="phrase" />,
+    );
+    fireEvent.change(screen.getByTestId('filter-test-chain'), { target: { value: 'lite' } });
+    const left = screen.getAllByTestId(/^test-chain-/).map((b) => b.getAttribute('data-testid'));
+    expect([...left].sort()).toEqual(['test-chain-litecoin-mainnet', 'test-chain-mainnet']);
+    // Clearing the filter brings every chain back.
+    fireEvent.change(screen.getByTestId('filter-test-chain'), { target: { value: '' } });
+    expect(screen.getAllByTestId(/^test-chain-/).length).toBe(9);
+  });
+});

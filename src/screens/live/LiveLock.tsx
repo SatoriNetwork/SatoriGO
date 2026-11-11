@@ -1,3 +1,4 @@
+import { getAppVersion } from '../../services/constants';
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { Check, ChevronDown, ChevronLeft, ChevronRight } from 'lucide-react';
 import { Button } from '../../components/Button';
@@ -191,19 +192,29 @@ export function LiveLock(_props: LiveLockProps) {
   const tickerOf = (w: { family?: string; network: string }) =>
     w.family === 'evm' ? 'EVM' : nativeTickerFor(w.network);
 
-  /** WHICH PASSWORD OPENS THIS WALLET, once there is more than one answer.
-   *  Absent until an app password exists, so an install that never opted in
-   *  shows exactly the chips it always showed. It reuses this list's own
-   *  vocabulary (a short `chip neutral lock-chip`) rather than inventing a
-   *  badge: after a migration some wallets open with the app password and some
-   *  still ask for their own, and a user must be able to READ that off the list
-   *  instead of finding out one lock screen at a time. */
-  const pwChip = (w: { appProtected?: boolean }, testId?: string) =>
-    appPasswordSet ? (
-      <span className="chip neutral lock-chip" data-testid={testId}>
-        {w.appProtected ? 'App pw' : 'Own pw'}
+  // WHICH PASSWORD OPENS A WALLET is said in words on its second line, and
+  // only once an app password exists: after a migration some wallets open with
+  // the app password and some still ask for their own, and a user must be able
+  // to READ that off the list instead of finding out one lock screen at a time.
+
+  /** The quiet SECOND line of a list row: chain, address, and which password
+   *  opens it. These used to be chips on the name's own line and were crowding
+   *  the name out (owner, 2026-11-11); the words are unchanged, only quieter. */
+  const rowSub = (
+    w: { address?: string; passwordless?: boolean; noSendPassword?: boolean; appProtected?: boolean },
+    chain: string,
+    ids: { chain?: string; pw?: string },
+  ) => {
+    const pw = w.passwordless ? 'No pw' : w.noSendPassword ? 'Sends without pw' : '';
+    return (
+      <span className="lock-wallet-addr lock-wallet-sub">
+        <span data-testid={ids.chain}>{chain}</span>
+        {w.address && <span className="mono">{` · ${shortAccountAddress(w.address)}`}</span>}
+        {pw && <span className="lock-wallet-warn">{` · ${pw}`}</span>}
+        {appPasswordSet && <span data-testid={ids.pw}>{` · ${w.appProtected ? 'App pw' : 'Own pw'}`}</span>}
       </span>
-    ) : null;
+    );
+  };
 
   // ---- password view: the ONE wallet this password unlocks -------------------
   const selectedNode = walletNodes.find((n) =>
@@ -250,20 +261,22 @@ export function LiveLock(_props: LiveLockProps) {
         {activeWallet.address && (
           <span className="mono lock-selected-addr">{shortAccountAddress(activeWallet.address)}</span>
         )}
-        <span className="lock-selected-chips">
-          <span className="chip neutral">{walletKindTag(activeWallet)}</span>
-          <span className="chip neutral" data-testid="live-lock-selected-chain">
-            {selectedTicker}
-          </span>
-          {activeWallet.passwordless && <span className="chip warning">No pw</span>}
-          {pwChip(activeWallet, 'live-lock-selected-pw')}
+        {/* The same facts the chips carried, as one quiet line (1.6.3: the
+            last place on this screen that still drew them as chips). */}
+        <span className="lock-selected-sub">
+          <span>{walletKindTag(activeWallet)}</span>
+          <span data-testid="live-lock-selected-chain">{` · ${selectedTicker}`}</span>
+          {activeWallet.passwordless && <span className="lock-wallet-warn">{' · No pw'}</span>}
+          {appPasswordSet && (
+            <span data-testid="live-lock-selected-pw">{` · ${activeWallet.appProtected ? 'App pw' : 'Own pw'}`}</span>
+          )}
           {/* §6's convenience half, made visible. A wallet that migrated from
               passwordless keeps "do not ask when sending" but loses the
               `passwordless` flag, so it used to show NO badge at all while
               still spending with nothing typed. */}
           {!activeWallet.passwordless && activeWallet.noSendPassword && (
-            <span className="chip warning" data-testid="live-lock-selected-no-send-pw">
-              Sends without pw
+            <span className="lock-wallet-warn" data-testid="live-lock-selected-no-send-pw">
+              {' · Sends without pw'}
             </span>
           )}
         </span>
@@ -336,7 +349,6 @@ export function LiveLock(_props: LiveLockProps) {
           const i = rowIndexById.get(w.id) ?? 0;
           const selected = w.id === activeWalletId;
           const walletTicker = tickerOf(w);
-          const isOtherChain = w.family === 'evm' || walletTicker !== 'EVR';
           return (
             <button
               key={w.id}
@@ -347,23 +359,13 @@ export function LiveLock(_props: LiveLockProps) {
               onClick={() => pickWallet(w.id)}
               data-testid={`live-lock-wallet-${i}`}
             >
-              {/* Identicon on every row (the account's own mark), then the
-                  brand/chain mark that says what KIND of wallet it is. */}
-              <AccountAvatar address={w.address} seed={w.id} size={16} />
-              {w.kind === 'pk' && <BrandLogo slot="satori" size={16} alt="Satori" />}
-              {isOtherChain && <TokenIcon assetId={walletTicker} size={16} />}
-              <span className="lock-wallet-name">{w.name}</span>
-              <span className="chip neutral lock-chip">{walletKindTag(w)}</span>
-              {isOtherChain && (
-                <span className="chip neutral lock-chip" data-testid={`live-lock-wallet-chain-${i}`}>
-                  {walletTicker}
-                </span>
-              )}
-              {w.passwordless && <span className="chip warning lock-chip">No pw</span>}
-              {!w.passwordless && w.noSendPassword && (
-                <span className="chip warning lock-chip">Sends without pw</span>
-              )}
-              {pwChip(w, `live-lock-wallet-pw-${i}`)}
+              {/* The account's own mark, then its NAME on a line of its own;
+                  chain, address and password kind sit quietly under it. */}
+              <AccountAvatar address={w.address} seed={w.id} size={26} />
+              <span className="lock-wallet-main">
+                <span className="lock-wallet-name">{w.name}</span>
+                {rowSub(w, walletTicker, { chain: `live-lock-wallet-chain-${i}`, pw: `live-lock-wallet-pw-${i}` })}
+              </span>
               {selected && <Check size={14} className="lock-wallet-tick" />}
             </button>
           );
@@ -390,25 +392,21 @@ export function LiveLock(_props: LiveLockProps) {
               >
                 {/* One row per seed: the EVM mark for the family, plus the
                     identicon of the account this row actually unlocks. */}
-                <TokenIcon assetId="EVM" size={16} />
-                <AccountAvatar address={target.address} seed={target.id} size={16} />
+                <AccountAvatar address={target.address} seed={target.id} size={26} />
                 <span className="lock-wallet-main">
                   <span className="lock-wallet-name">{node.title}</span>
                   <span className="mono lock-wallet-addr" data-testid={`live-lock-group-sub-${ni}`}>
                     {many
-                      ? `${node.members.length} accounts · unlocks ${memberLabel(target, node.title, node.members.length)}`
+                      ? `EVM · ${node.members.length} accounts · unlocks ${memberLabel(target, node.title, node.members.length)}`
                       : target.address
-                        ? shortAccountAddress(target.address)
-                        : '1 account'}
+                        ? `EVM · ${shortAccountAddress(target.address)}`
+                        : 'EVM · 1 account'}
+                    {target.passwordless ? ' · No pw' : target.noSendPassword ? ' · Sends without pw' : ''}
+                    {appPasswordSet && (
+                      <span data-testid={`live-lock-group-pw-${ni}`}>{` · ${target.appProtected ? 'App pw' : 'Own pw'}`}</span>
+                    )}
                   </span>
                 </span>
-                <span className="chip neutral lock-chip">Seed</span>
-                <span className="chip neutral lock-chip">EVM</span>
-                {target.passwordless && <span className="chip warning lock-chip">No pw</span>}
-                {!target.passwordless && target.noSendPassword && (
-                  <span className="chip warning lock-chip">Sends without pw</span>
-                )}
-                {pwChip(target, `live-lock-group-pw-${ni}`)}
                 {groupSelected && <Check size={14} className="lock-wallet-tick" />}
               </button>
               {many && (
@@ -437,23 +435,13 @@ export function LiveLock(_props: LiveLockProps) {
                   onClick={() => pickWallet(w.id)}
                   data-testid={`live-lock-wallet-${i}`}
                 >
-                  <AccountAvatar address={w.address} seed={w.id} size={16} />
+                  <AccountAvatar address={w.address} seed={w.id} size={22} />
                   <span className="lock-wallet-main">
                     <span className="lock-wallet-name">
                       {memberLabel(w, node.title, node.members.length)}
                     </span>
-                    {w.address && (
-                      <span className="mono lock-wallet-addr">{shortAccountAddress(w.address)}</span>
-                    )}
+                    {rowSub(w, 'EVM', { chain: `live-lock-wallet-chain-${i}`, pw: `live-lock-wallet-pw-${i}` })}
                   </span>
-                  <span className="chip neutral lock-chip" data-testid={`live-lock-wallet-chain-${i}`}>
-                    EVM
-                  </span>
-                  {w.passwordless && <span className="chip warning lock-chip">No pw</span>}
-                  {!w.passwordless && w.noSendPassword && (
-                    <span className="chip warning lock-chip">Sends without pw</span>
-                  )}
-                  {pwChip(w, `live-lock-wallet-pw-${i}`)}
                   {selected && <Check size={14} className="lock-wallet-tick" />}
                 </button>
               );
@@ -467,6 +455,8 @@ export function LiveLock(_props: LiveLockProps) {
   if (view === 'wallets') {
     return (
       <div className="app-frame screen-enter" data-testid="live-lock">
+      {/* Which build this is, readable before unlocking (owner, 2026-11-11). */}
+      <span className="lock-version" data-testid="live-lock-version">v{getAppVersion()}</span>
         <ConstellationField variant="calm" />
         <div className="lock-screen lock-screen-list">
           {/* The brand block shrinks to a title row here: the list is what this
@@ -493,6 +483,8 @@ export function LiveLock(_props: LiveLockProps) {
 
   return (
     <div className="app-frame screen-enter" data-testid="live-lock">
+      {/* Which build this is, readable before unlocking (owner, 2026-11-11). */}
+      <span className="lock-version" data-testid="live-lock-version">v{getAppVersion()}</span>
       {/* The same network as the first-run screen, turned down (fewer dots,
           slower, dimmer), so unlocking feels like re-entering the same world.
           No entrance choreography here: this screen stays calm. */}
@@ -516,7 +508,7 @@ export function LiveLock(_props: LiveLockProps) {
         {/* No lock badge above this heading: it restated what the heading says
             in words, and the ~62px it cost came straight out of the wallet
             list, which is the one thing on this screen that needs the height. */}
-        <h2>Live Wallet Locked</h2>
+        <h2>Wallet locked</h2>
         {/* The card below names the wallet being unlocked, so the subtitle only
             earns its place when there is no wallet to name yet. */}
         {wallets.length === 0 && (
@@ -644,7 +636,7 @@ export function LiveLock(_props: LiveLockProps) {
             </Button>
             <Button
               type="button"
-              variant="ghost"
+              variant="secondary"
               onClick={() => addWalletStart()}
               data-testid="live-lock-import"
               style={{ flex: 1 }}

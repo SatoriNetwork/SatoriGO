@@ -5,7 +5,7 @@ import { CopyButton } from '../../components/CopyButton';
 import { Button } from '../../components/Button';
 import { TokenIcon } from '../../components/BrandLogo';
 import { useLiveStore, nativeTickerFor, assetsSupported, chainDisplayName, activeFamily } from '../../store/liveStore';
-import { ChevronLeft, CheckCircle, Plus } from 'lucide-react';
+import { ChevronLeft, Plus } from 'lucide-react';
 import { LiveNav } from './LiveNav';
 
 // The chain name comes from chainParams via chainDisplayName(); this screen used
@@ -95,11 +95,6 @@ export function LiveReceive({ onBack }: LiveReceiveProps) {
         <SyncStatusPill compact />
       </div>
       <div className="app-content" data-testid="live-receive">
-        <div className="banner info" style={{ marginBottom: 14 }}>
-          <CheckCircle size={14} />
-          {`Ready to receive. This is your real ${networkName} address.`}
-        </div>
-
         {/* Network header: which chain this address is on. Assets are not listed
             here, because every asset on the chain shares this one address. */}
         <div
@@ -122,7 +117,7 @@ export function LiveReceive({ onBack }: LiveReceiveProps) {
           </div>
         </div>
 
-        <p className="text-dim" style={{ fontSize: 12, margin: '0 2px 14px', lineHeight: 1.5 }}>
+        <p className="text-dim" style={{ fontSize: 12, margin: '0 2px 10px', lineHeight: 1.45 }}>
           {helper}
         </p>
 
@@ -168,19 +163,19 @@ export function LiveReceive({ onBack }: LiveReceiveProps) {
           </div>
         )}
 
-        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 16 }}>
+        {/* Sized so the address AND its copy control clear the tab bar in the
+            400x600 popup without scrolling (the copy row used to sit under it). */}
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10 }}>
           <div className="qr-card" data-testid="live-receive-qr">
-            <QRCodeView value={shownAddress} size={180} />
+            <QRCodeView value={shownAddress} size={148} />
           </div>
 
           <div className="addr-box" style={{ width: '100%' }} data-testid="live-receive-address">
             <span className="mono" style={{ fontSize: 11.5, wordBreak: 'break-all' }}>{shownAddress}</span>
           </div>
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <CopyButton value={shownAddress} label="Copy address" size={14} />
-            <span className="text-dim" style={{ fontSize: 12 }}>Copy address</span>
-          </div>
+          {/* THE action of this screen, so a button and not a grey caption (1.6.7). */}
+          <CopyButton value={shownAddress} label="Copy address" text="Copy address" size={14} testId="live-receive-copy" />
 
           {/* New address — seed wallets only (pk wallets have one fixed address). */}
           {isSeedWallet && (

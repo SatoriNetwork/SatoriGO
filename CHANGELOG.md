@@ -9,7 +9,7 @@ and release commits.
 
 ---
 
-## Unreleased
+## 1.7.0
 
 ### Base and Ethereum websites
 
@@ -22,6 +22,25 @@ and release commits.
   your other wallet answers sites that only look for one.
 - Connected sites lists Base and Ethereum connections too, and Disconnect works for
   them the same way.
+
+### A clearer wallet
+
+- Wallet names are shown in full: the name has its own line in the header, the
+  wallet list and the lock screen, and menus no longer cover what is under them.
+- The wallet screen leads with what your wallet is worth, with the coin balance
+  under it. Connection status is one dot beside the network name.
+- Switching wallets shows the wallet you are opening straight away.
+- Send shows what is available and what the amount is worth as you type. The
+  token screen shows value, unit price and the 24 hour change.
+- Activity names who a transfer came from or went to when you know them, and
+  folds away incoming transfers of tokens you have not listed. One tap shows them.
+- Rename and Remove for a wallet sit behind one button in the wallet list.
+- Receive has a full Copy address button.
+- Choosing a network when you create or import a wallet is a short list with a
+  search field, so the recovery phrase field stays in view.
+- The version number is shown on the lock screen.
+- A connected website now gets your account at once when it asks again. To let a
+  site use a different account, disconnect it in Settings, Connected sites.
 
 ---
 

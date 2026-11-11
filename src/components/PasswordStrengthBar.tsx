@@ -43,7 +43,7 @@ export function PasswordStrengthBar({ password }: { password: string }) {
       data-testid="password-strength"
       data-score={score}
       aria-hidden="true"
-      style={{ margin: '6px 0 2px' }}
+      style={{ margin: '6px 0 10px' }}
     >
       <div style={{ display: 'flex', gap: 4 }}>
         {Array.from({ length: SEGMENTS }, (_, i) => (

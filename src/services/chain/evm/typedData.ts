@@ -71,7 +71,8 @@ export function parseTypedData(input: unknown): TypedData {
   if (t.primaryType !== 'EIP712Domain' && (!t.message || typeof t.message !== 'object')) {
     throw new TypedDataError('The typed data has no message.');
   }
-  const types: Record<string, TypedDataField[]> = {};
+  // No prototype: a type named `constructor` or `__proto__` is just a name.
+  const types: Record<string, TypedDataField[]> = Object.create(null) as Record<string, TypedDataField[]>;
   for (const [name, fields] of Object.entries(t.types)) {
     if (!Array.isArray(fields)) throw new TypedDataError(`Type ${name} is not a field list.`);
     types[name] = fields.map((f) => {
@@ -81,18 +82,42 @@ export function parseTypedData(input: unknown): TypedData {
       return { name: f.name, type: f.type };
     });
   }
-  if (!types.EIP712Domain) {
-    types.EIP712Domain = DOMAIN_FIELDS.filter((f) => t.domain![f.name] !== undefined);
+  const domain = t.domain as Record<string, unknown>;
+  const present = DOMAIN_FIELDS.filter((f) => hasOwn(domain, f.name) && domain[f.name] !== undefined);
+  for (const key of Object.keys(domain)) {
+    if (domain[key] !== undefined && !DOMAIN_FIELDS.some((f) => f.name === key)) {
+      throw new TypedDataError(`The domain has an unknown field ${key}.`);
+    }
   }
-  if (t.primaryType !== 'EIP712Domain' && !types[t.primaryType]) {
+  if (!hasOwn(types, 'EIP712Domain')) {
+    types.EIP712Domain = present;
+  } else {
+    // A supplied EIP712Domain must describe exactly the domain shown: a field
+    // listed but absent, or present but not listed, would sign a domain other
+    // than the one on screen.
+    const listed = types.EIP712Domain;
+    const names = new Set(listed.map((f) => f.name));
+    if (names.size !== listed.length || names.size !== present.length) {
+      throw new TypedDataError('EIP712Domain does not match the domain.');
+    }
+    for (const f of listed) {
+      const known = present.find((d) => d.name === f.name);
+      if (!known || known.type !== f.type) throw new TypedDataError('EIP712Domain does not match the domain.');
+    }
+  }
+  if (t.primaryType !== 'EIP712Domain' && !hasOwn(types, t.primaryType)) {
     throw new TypedDataError(`The primary type ${t.primaryType} is not defined.`);
   }
   return {
     types,
     primaryType: t.primaryType,
-    domain: t.domain as Record<string, unknown>,
+    domain,
     message: (t.message ?? {}) as Record<string, unknown>,
   };
+}
+
+function hasOwn(o: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(o, key);
 }
 
 /** `Foo[]` or `Foo[3]` -> { base: 'Foo', length: undefined | 3 }, else null. */
@@ -104,8 +129,8 @@ function arrayType(type: string): { base: string; length?: number } | null {
 
 /** Every struct type `primary` depends on (itself first). */
 function dependencies(primary: string, types: Record<string, TypedDataField[]>, found = new Set<string>()): Set<string> {
-  const base = arrayType(primary)?.base ?? primary;
-  if (found.has(base) || !types[base]) return found;
+  const base = primary.replace(/(\[\d*\])+$/, '');
+  if (found.has(base) || !hasOwn(types, base)) return found;
   found.add(base);
   for (const f of types[base]) dependencies(f.type, types, found);
   return found;
@@ -152,8 +177,8 @@ function word(n: bigint): Uint8Array {
 }
 
 function encodeValue(type: string, value: unknown, types: Record<string, TypedDataField[]>, path: string): Uint8Array {
-  if (types[type]) {
-    if (!value || typeof value !== 'object') throw new TypedDataError(`${path} must be a ${type} object.`);
+  if (hasOwn(types, type)) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new TypedDataError(`${path} must be a ${type} object.`);
     return hashStruct(type, value as Record<string, unknown>, types, path);
   }
   const arr = arrayType(type);
@@ -210,11 +235,18 @@ export function hashStruct(
   types: Record<string, TypedDataField[]>,
   path = primary,
 ): Uint8Array {
+  if (!hasOwn(types, primary)) throw new TypedDataError(`Type ${primary} is not defined.`);
   const fields = types[primary];
-  if (!fields) throw new TypedDataError(`Type ${primary} is not defined.`);
+  // A value with no field in the type is not signed, yet the approval screen
+  // would show it: refuse rather than display something the signature omits.
+  for (const key of Object.keys(data)) {
+    if (data[key] !== undefined && !fields.some((f) => f.name === key)) {
+      throw new TypedDataError(`${path}.${key} is not part of type ${primary}.`);
+    }
+  }
   const parts = [typeHash(primary, types)];
   for (const f of fields) {
-    const v = data[f.name];
+    const v = hasOwn(data, f.name) ? data[f.name] : undefined;
     if (v === undefined || v === null) throw new TypedDataError(`${path}.${f.name} is missing.`);
     parts.push(encodeValue(f.type, v, types, `${path}.${f.name}`));
   }

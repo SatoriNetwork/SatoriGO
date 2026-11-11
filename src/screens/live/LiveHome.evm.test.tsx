@@ -174,14 +174,19 @@ describe('LiveHome with an EVM active wallet', () => {
     expect(screen.queryByTestId('live-add-asset')).not.toBeNull();
   }, 30_000);
 
-  it('shows "EVM" (never a UTXO ticker) for an EVM row in the wallet switcher menu', async () => {
+  it('a switcher row is the name and the address, with no chips on the name line', async () => {
     await state().importWallet(VECTOR_MNEMONIC, PW, 'My EVM', 'evm:base');
     await state().loadWallets();
 
     renderHome();
     fireEvent.click(screen.getByTestId('live-wallet-switcher'));
 
-    expect(screen.getByTestId('live-wallet-item-chain-0')).toHaveTextContent('EVM');
+    const row = screen.getByTestId('live-wallet-item-0');
+    expect(screen.getByTestId('live-wallet-name-0')).toHaveTextContent('My EVM');
+    expect(screen.getByTestId('live-account-address-0')).toHaveTextContent(/^0x9858…[0-9a-fA-F]{4}$/);
+    // Owner, 2026-11-11: kind, chain and password chips crowded the name out.
+    expect(row.querySelector('.chip')).toBeNull();
+    expect(screen.queryByTestId('live-wallet-item-chain-0')).toBeNull();
   }, 30_000);
 });
 
@@ -245,8 +250,12 @@ describe('LiveHome wallet switcher: accounts of one seed (the EVM accounts desig
     try {
       renderHome();
       fireEvent.click(screen.getByTestId('live-wallet-switcher'));
-      // Every row has a pencil, the active one included (rename is not a switch).
-      expect(screen.getByTestId('live-wallet-rename-0')).toBeInTheDocument();
+      // Rename and Remove sit behind each row's "more" button (1.6.3), so no
+      // row shows either until it is asked for. Every row has the button, the
+      // active one included (rename is not a switch).
+      expect(screen.queryByTestId('live-wallet-rename-1')).toBeNull();
+      expect(screen.getByTestId('live-wallet-more-0')).toBeInTheDocument();
+      fireEvent.click(screen.getByTestId('live-wallet-more-1'));
       fireEvent.click(screen.getByTestId('live-wallet-rename-1'));
       const input = screen.getByTestId('live-wallet-rename-input-1') as HTMLInputElement;
       expect(input.value).toBe('Account 2');
@@ -260,6 +269,7 @@ describe('LiveHome wallet switcher: accounts of one seed (the EVM accounts desig
       expect(screen.getByTestId('live-wallet-item-1')).toBeInTheDocument();
 
       // Escape cancels without a store call.
+      fireEvent.click(screen.getByTestId('live-wallet-more-0'));
       fireEvent.click(screen.getByTestId('live-wallet-rename-0'));
       fireEvent.change(screen.getByTestId('live-wallet-rename-input-0'), { target: { value: 'Nope' } });
       fireEvent.keyDown(screen.getByTestId('live-wallet-rename-input-0'), { key: 'Escape' });
@@ -267,6 +277,7 @@ describe('LiveHome wallet switcher: accounts of one seed (the EVM accounts desig
       expect(screen.queryByTestId('live-wallet-rename-input-0')).toBeNull();
 
       // An empty name is not a rename.
+      fireEvent.click(screen.getByTestId('live-wallet-more-0'));
       fireEvent.click(screen.getByTestId('live-wallet-rename-0'));
       fireEvent.change(screen.getByTestId('live-wallet-rename-input-0'), { target: { value: '   ' } });
       fireEvent.click(screen.getByTestId('live-wallet-rename-save-0'));
@@ -293,7 +304,7 @@ describe('LiveHome wallet switcher: accounts of one seed (the EVM accounts desig
     // The group heading names the seed (the lowest-index member's name) once.
     const heading = screen.getByTestId('live-wallet-group-0');
     expect(heading).toHaveTextContent('My EVM');
-    expect(heading).toHaveTextContent('Seed');
+    expect(heading.querySelector('.chip')).toBeNull();
 
     // One row per account, in hdIndex order, each with its OWN short address.
     // The first account reads "Account 1" under the group title (its stored
@@ -303,8 +314,13 @@ describe('LiveHome wallet switcher: accounts of one seed (the EVM accounts desig
     expect(screen.getByTestId('live-account-address-0')).toHaveTextContent('0x9858…da94');
     expect(screen.getByTestId('live-wallet-item-1')).toHaveTextContent('Account 2');
     expect(screen.getByTestId('live-account-address-1')).toHaveTextContent('0x6Fac…b9C0');
-    // The non-active account keeps its delete affordance; the active one has none.
+    // Remove is behind the row's "more" button: the non-active account has it
+    // there, the active one is offered Rename only.
+    expect(screen.queryByTestId('live-wallet-delete-1')).toBeNull();
+    fireEvent.click(screen.getByTestId('live-wallet-more-1'));
     expect(screen.queryByTestId('live-wallet-delete-1')).not.toBeNull();
+    fireEvent.click(screen.getByTestId('live-wallet-more-0'));
+    expect(screen.queryByTestId('live-wallet-rename-0')).not.toBeNull();
     expect(screen.queryByTestId('live-wallet-delete-0')).toBeNull();
 
     // Both account actions hang off the ACTIVE group. "Add wallet" (a different
@@ -409,23 +425,24 @@ describe('LiveHome wallet switcher: accounts of one seed (the EVM accounts desig
     expect(screen.queryByTestId('live-accounts-found')).toBeNull();
   }, 30_000);
 
-  it('announces a discovery on Home and dismisses it', async () => {
+  it('announces a discovery as a toast (it moves nothing on Home) and clears it', async () => {
     await importEvm();
     setWallets([evmAccount({ id: 'a1', name: 'My EVM', active: true })], 'a1');
+    const { useUiStore } = await import('../../store/uiStore');
+    useUiStore.setState({ toasts: [] });
 
     renderHome();
-    expect(screen.queryByTestId('live-accounts-found')).toBeNull();
+    expect(useUiStore.getState().toasts).toHaveLength(0);
 
     storeMod.useLiveStore.setState({ evmAccountScan: { scanning: false, added: 2, error: null } });
     await waitFor(() =>
-      expect(screen.getByTestId('live-accounts-found')).toHaveTextContent(
+      expect(useUiStore.getState().toasts.map((t) => t.text)).toContain(
         'Found 2 more accounts on this seed. They are in the wallet switcher.',
       ),
     );
-
-    fireEvent.click(screen.getByTestId('live-accounts-found-dismiss'));
-    await waitFor(() => expect(screen.queryByTestId('live-accounts-found')).toBeNull());
-    expect(state().evmAccountScan.added).toBeNull();
+    // Said once: the store's flag is cleared, and no banner is left on Home.
+    await waitFor(() => expect(state().evmAccountScan.added).toBeNull());
+    expect(screen.queryByTestId('live-accounts-found')).toBeNull();
   }, 30_000);
 
   it('does not announce a scan that found nothing', async () => {
@@ -452,6 +469,7 @@ describe('LiveHome wallet switcher: accounts of one seed (the EVM accounts desig
 
     renderHome();
     fireEvent.click(screen.getByTestId('live-wallet-switcher'));
+    fireEvent.click(screen.getByTestId('live-wallet-more-1'));
     fireEvent.click(screen.getByTestId('live-wallet-delete-1'));
 
     const dialog = await screen.findByText(/Removes Account 2 only/);
@@ -532,6 +550,7 @@ describe('LiveHome wallet switcher: accounts of one seed (the EVM accounts desig
 
     renderHome();
     fireEvent.click(screen.getByTestId('live-wallet-switcher'));
+    fireEvent.click(screen.getByTestId('live-wallet-more-1'));
     fireEvent.click(screen.getByTestId('live-wallet-delete-1'));
 
     expect(await screen.findByText(/you will lose access/i)).toBeTruthy();

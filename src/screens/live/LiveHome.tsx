@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type React from 'react';
-import { AlertTriangle, ArrowDownLeft, ArrowUpRight, Check, ChevronDown, Copy, Eye, EyeOff, ExternalLink, Gift, GripVertical, Landmark, LogOut, Pencil, Plus, RefreshCw, Search, Trash2, Wifi, WifiOff, X, ListFilter } from 'lucide-react';
+import { AlertTriangle, ArrowDownLeft, ArrowUpRight, Check, ChevronDown, Copy, Eye, EyeOff, ExternalLink, Gift, GripVertical, Landmark, Lock, MoreHorizontal, Pencil, Plus, RefreshCw, Search, Trash2, Wifi, WifiOff, X, ListFilter } from 'lucide-react';
 import { AccountAvatar } from '../../components/AccountAvatar';
 import { ActivityPager } from '../../components/ActivityPager';
-import { SyncStatusPill } from '../../components/SyncStatusPill';
 import { taoExplorerAccountUrl } from '../../store/taoChain';
 import { formatAmount, formatListAmount, amountToNumber } from '../../services/chain/amounts';
 import { deriveSyncStatus, formatSyncBannerText, pillStateFor } from './syncStatus';
@@ -30,7 +29,6 @@ import {
   memberLabel,
   filterAccountsForChain,
 } from './walletGroups';
-import { walletKindTag } from './walletKindTag';
 import { orderAssetsForDisplay, applyManualOrder, moveInOrder, orderableNames } from './assetOrder';
 import {
   toggleAssetSelection,
@@ -168,7 +166,18 @@ function HeaderAddress({ address }: { address: string }) {
     >
       {/* The address text is what the smokes read, so the transient "Copied"
           replaces it rather than sitting beside it. */}
-      <span className="wallet-address-text mono">{copied ? 'Copied' : shortenAddr(address)}</span>
+      {/* Two forms, one shown: 8+6 where there is room, 6+4 in a panel dragged
+          narrow (CSS, global.css), so the name beside it keeps its width. */}
+      <span className="wallet-address-text mono">
+        {copied ? (
+          'Copied'
+        ) : (
+          <>
+            <span className="addr-wide">{shortenAddr(address)}</span>
+            <span className="addr-narrow">{`${address.slice(0, 6)}…${address.slice(-4)}`}</span>
+          </>
+        )}
+      </span>
       {copied ? <Check size={11} className="text-success" /> : <Copy size={11} />}
     </button>
   );
@@ -254,14 +263,9 @@ function quoteForAsset(
 
 /** Compact activity timestamp with the exact time, e.g. "12 Jul, 14:30:05". */
 function fmtTxTime(ts: number): string {
-  const d = new Date(ts);
-  const date = d.toLocaleDateString(undefined, { day: '2-digit', month: 'short' });
-  const time = d.toLocaleTimeString(undefined, {
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  });
-  return `${date}, ${time}`;
+  // Hour and minute only: the day header above the row already says the date,
+  // and the second is on the transaction's own screen.
+  return new Date(ts).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
 }
 
 /** What a staking row needs to name its validator and format its amount. Null
@@ -278,11 +282,19 @@ function TxRow({
   onOpen,
   masked,
   stakingCtx,
+  partyName,
+  unlisted,
 }: {
   tx: LiveTransaction;
   onOpen?: (txid: string) => void;
   masked?: boolean;
   stakingCtx?: StakingRowContext | null;
+  /** A name the user knows this address by (address book, or one of their own
+   *  wallets), when there is one. */
+  partyName?: (address: string) => string | undefined;
+  /** An incoming transfer of a token the wallet checked and does not vouch for
+   *  (nearly always airdropped spam): drawn quiet, never as green income. */
+  unlisted?: boolean;
 }) {
   const isIn = tx.direction === 'in';
   const openId = tx.txid;
@@ -298,8 +310,13 @@ function TxRow({
   // stake leaves for the staking module and a claim comes back from it: both
   // are the user's own bookkeeping, so both stay in the neutral tone, with the
   // arrow the only thing that says which way it went.
-  const positiveTone = staking ? false : isIn;
+  const positiveTone = staking || unlisted ? false : isIn;
   const arrowIn = staking ? staking.incoming : isIn;
+  // WHO it came from or went to, by name when the user has one for the address.
+  // The txid is the fallback where a chain shows no counterparty (Monero).
+  const party = tx.counterparty
+    ? `${isIn ? 'From' : 'To'} ${partyName?.(tx.counterparty) ?? shortenAddr(tx.counterparty)}`
+    : null;
   return (
     <div
       role="button"
@@ -313,6 +330,7 @@ function TxRow({
       }}
       aria-label={`Open transaction ${openId.slice(0, 10)}`}
       data-testid={`live-tx-row-${openId.slice(0, 8)}`}
+      data-unlisted={unlisted ? 'true' : undefined}
       style={{
         display: 'flex',
         alignItems: 'center',
@@ -322,6 +340,7 @@ function TxRow({
         cursor: onOpen ? 'pointer' : 'default',
         width: '100%',
         textAlign: 'left',
+        opacity: unlisted ? 0.6 : undefined,
       }}
     >
       <div
@@ -350,14 +369,21 @@ function TxRow({
           {tx.status === 'pending' && (
             <span className="chip warning" style={{ fontSize: 9, padding: '1px 5px', flexShrink: 0 }}>pending</span>
           )}
+          {unlisted && (
+            <span className="asset-badge warning" style={{ fontSize: 10 }} data-testid={`live-tx-unlisted-${openId.slice(0, 8)}`}>
+              unlisted
+            </span>
+          )}
         </div>
         {/* WHERE it went, for a staking row: the validator, by name when the
             chain gave us one. The txid stays the second line everywhere else. */}
         <div
-          className={staking ? 'text-dim' : 'text-dim mono'}
+          className="text-dim"
+          title={staking || !tx.counterparty ? undefined : tx.counterparty}
+          data-testid={`live-tx-party-${openId.slice(0, 8)}`}
           style={{ fontSize: 10.5, marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
         >
-          {staking ? staking.subtitle : tx.txid ? `${tx.txid.slice(0, 10)}...` : 'n/a'}
+          {staking ? staking.subtitle : party ?? (tx.txid ? `${tx.txid.slice(0, 10)}...` : 'n/a')}
         </div>
       </div>
       {/* Right-aligned amount: cap its width and single-line ellipsis so a long
@@ -365,7 +391,7 @@ function TxRow({
           the ticker end while the numeric amount at the start stays visible and
           the left column keeps a readable share of the row. Short amounts fit
           under the cap and render exactly as before. */}
-      <div style={{ textAlign: 'right', flexShrink: 0, minWidth: 0, maxWidth: '60%' }}>
+      <div style={{ textAlign: 'right', flexShrink: 0, minWidth: 0, maxWidth: '50%' }}>
         <div style={{ fontSize: 12.5, fontWeight: 600, color: positiveTone ? 'var(--success)' : 'var(--text)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
           {staking
             ? staking.amountText === ''
@@ -373,7 +399,11 @@ function TxRow({
               : masked
                 ? MASKED
                 : staking.amountText
-            : `${isIn ? '+' : '-'}${masked ? MASKED : fmtAmount(tx.amount, txAmountDecimals(tx.asset))} ${shownAsset}`}
+            : `${isIn ? '+' : '-'}${masked ? MASKED : fmtAmount(tx.amount, txAmountDecimals(tx.asset))}${
+                // A long symbol (nearly always an airdropped name) is already in
+                // the title beside it; repeating it here only cut both short.
+                shownAsset.length > 10 ? '' : ` ${shownAsset}`
+              }`}
         </div>
         <div className="text-dim" style={{ fontSize: 10.5, whiteSpace: 'nowrap' }}>
           {fmtTxTime(tx.timestamp)}
@@ -477,8 +507,13 @@ function BalanceRow({
   nativeTicker,
   compact,
   edit,
+  pricesLoaded,
 }: {
   asset: LiveAssetBalance;
+  /** The price feed has answered for this wallet (some row is priced), so a
+   *  row with no price is a token the feed does not carry, not one still
+   *  loading. Only then does the row say "No price". */
+  pricesLoaded?: boolean;
   /** Unit price in the display currency (or in USD, labelled so, when the
    *  chosen currency cannot be reached); absent when the asset is unpriced. */
   fiatPrice?: FiatValue;
@@ -526,7 +561,7 @@ function BalanceRow({
   // only live things in it, so a mis-tap while dragging cannot navigate away.
   return (
     <div
-      className={editing ? 'token-row token-row-edit' : 'token-row'}
+      className={editing ? 'token-row asset-row token-row-edit' : 'token-row asset-row'}
       role={editing ? undefined : 'button'}
       tabIndex={editing ? undefined : 0}
       onClick={editing ? undefined : () => onSelect?.(asset.name)}
@@ -574,102 +609,88 @@ function BalanceRow({
           // Exactly the size of the coin mark beside it (the --token-* scale's
           // 24 in the dense popup, 26 elsewhere), which is what keeps edit mode
           // from making a single row taller than the list already is.
-          style={{ width: compact ? 24 : 26, height: compact ? 24 : 26 }}
+          style={{ width: compact ? 26 : 28, height: compact ? 28 : 32 }}
         >
           <GripVertical size={14} />
         </button>
       )}
-      <TokenIcon assetId={asset.name} size={compact ? 24 : 26} />
-      <div
-        className="token-name"
-        style={{ flex: 1, minWidth: '3.5em', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 6 }}
-      >
-        <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{shownName}</span>
-        <UntrustedTokenBadge symbol={asset.name} />
-        {isLegacyAsset(asset.name, nativeTicker) && (
-          <span
-            data-testid="legacy-asset-pill"
-            title={getAssetNote(asset.name, nativeTicker)?.note}
-            style={{
-              flexShrink: 0,
-              fontSize: 9.5,
-              padding: '1px 5px',
-              borderRadius: 999,
-              color: 'var(--warning)',
-              background: 'var(--warning-bg)',
-            }}
-          >
-            {getAssetNote(asset.name, nativeTicker)?.badge}
-          </span>
-        )}
-        {staked && (
-          <span
-            data-testid="staked-asset-pill"
-            title={`Staked with ${staked.poolAlias || shortenAddr(staked.poolAddress)}`}
-            style={{
-              flexShrink: 0,
-              fontSize: 9.5,
-              padding: '1px 5px',
-              borderRadius: 999,
-              color: 'var(--success)',
-              background: 'var(--success-bg)',
-            }}
-          >
-            staked
-          </span>
-        )}
+      <TokenIcon assetId={asset.name} size={compact ? 28 : 32} />
+      {/* TWO LINES, the way MetaMask lays a token out (owner, 2026-11-11: "the
+          asset name must be visible, there is too much in one line"). Line 1 is
+          the NAME on the left and the AMOUNT on the right, and nothing else:
+          the name gets every pixel the amount does not need. Line 2 is the
+          quiet one: the 24h move and any badge under the name, the fiat value
+          under the amount. An asset with no price and no badge simply has an
+          empty second line, so every row keeps the same height. */}
+      <div className="asset-main">
+        <span className="token-name asset-title">{shownName}</span>
+        <span className="asset-sub">
+          {/* 24h move, only for an asset whose feed publishes one. Never a
+              "0.0%" placeholder when the change is unknown: that would read as
+              a flat day, which is a different claim. */}
+          {showSecondary && change24h != null && (
+            <span
+              className="token-meta"
+              data-testid={`live-asset-change-${asset.name}`}
+              title={`24h change: ${fmtChange(change24h)}`}
+              style={{
+                flexShrink: 0,
+                fontVariantNumeric: 'tabular-nums',
+                // Rounded, so the colour agrees with the digits shown: a -0.04%
+                // day prints "0.0%" and is painted neutral, not as a loss or a gain.
+                color:
+                  Math.round(change24h * 10) / 10 < 0
+                    ? 'var(--danger)'
+                    : Math.round(change24h * 10) / 10 > 0
+                      ? 'var(--success)'
+                      : 'var(--text-dim)',
+              }}
+            >
+              {fmtChange(change24h)}
+            </span>
+          )}
+          <UntrustedTokenBadge symbol={asset.name} />
+          {isLegacyAsset(asset.name, nativeTicker) && (
+            <span
+              className="asset-badge warning"
+              data-testid="legacy-asset-pill"
+              title={getAssetNote(asset.name, nativeTicker)?.note}
+            >
+              {getAssetNote(asset.name, nativeTicker)?.badge}
+            </span>
+          )}
+          {staked && (
+            <span
+              className="asset-badge success"
+              data-testid="staked-asset-pill"
+              title={`Staked with ${staked.poolAlias || shortenAddr(staked.poolAddress)}`}
+            >
+              staked
+            </span>
+          )}
+        </span>
       </div>
-      {/* Compact single line: amount + USD side by side, right-aligned. The group
-          may shrink (flexShrink:1) and clips its overflow, but its automatic
-          min-content floor equals the bold amount, so the AMOUNT is never
-          squeezed. Only the secondary USD gives way (it carries minWidth:0, so
-          it contributes nothing to that floor and is the part that clips). The
-          maxWidth cap and the name's minWidth floor keep a readable name beside
-          a funded (very wide) balance. At a zero or normal balance the content
-          fits and nothing clips. The cap is 68% rather than the old 62%: the
-          row's remove button is gone (removing lives on the asset's detail
-          screen now), so that space belongs to the numbers. */}
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 7, flexShrink: 1, maxWidth: editing ? '40%' : '68%', overflow: 'hidden', whiteSpace: 'nowrap' }}>
+      {/* The numbers hug the right edge and never shrink below the amount: it
+          is the name that ellipsises when the two cannot both fit. */}
+      <div className="asset-figures" style={{ maxWidth: editing ? '40%' : '62%' }}>
         <span
           className="token-amount"
-          style={{ fontWeight: 700, fontVariantNumeric: 'tabular-nums', flexShrink: 0 }}
+          style={{ fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}
           data-testid={`live-balance-${asset.name}`}
           title={masked ? undefined : `${fmtFull(asset.amountBase, asset.scale)} ${shownName}`}
         >
           {masked ? MASKED : fmtBase(asset.amountBase, asset.scale)}
         </span>
         {showSecondary && fiat != null && (
-          <span
-            className="text-dim token-meta"
-            data-testid={`live-asset-usd-${asset.name}`}
-            style={{ minWidth: 0 }}
-          >
-            ≈ {masked ? MASKED : formatFiatValue(fiat)}
+          <span className="text-dim token-meta" data-testid={`live-asset-usd-${asset.name}`}>
+            {masked ? MASKED : formatFiatValue(fiat)}
           </span>
         )}
-        {/* 24h move, only for an asset whose feed publishes one. Never a "0.0%"
-            placeholder when the change is unknown: that would read as a flat
-            day, which is a different claim. The hero total stays unchanged —
-            one number cannot honestly summarise a mixed portfolio's day. */}
-        {showSecondary && change24h != null && (
-          <span
-            className="token-meta"
-            data-testid={`live-asset-change-${asset.name}`}
-            title={`24h change: ${fmtChange(change24h)}`}
-            style={{
-              flexShrink: 0,
-              fontVariantNumeric: 'tabular-nums',
-              // Rounded, so the colour agrees with the digits shown: a -0.04%
-              // day prints "0.0%" and is painted neutral, not as a loss or a gain.
-              color:
-                Math.round(change24h * 10) / 10 < 0
-                  ? 'var(--danger)'
-                  : Math.round(change24h * 10) / 10 > 0
-                    ? 'var(--success)'
-                    : 'var(--text-dim)',
-            }}
-          >
-            {fmtChange(change24h)}
+        {/* An empty slot under the amount read as a row that had not finished
+            loading. Said only once the feed has answered for something else. */}
+        {showSecondary && fiat == null && pricesLoaded && (
+          <span className="text-faint token-meta" data-testid={`live-asset-noprice-${asset.name}`}>
+            No price
           </span>
         )}
       </div>
@@ -680,7 +701,7 @@ function BalanceRow({
         // the mark itself is small.
         <label
           className="asset-edit-tick"
-          style={{ width: compact ? 24 : 26, height: compact ? 24 : 26 }}
+          style={{ width: compact ? 26 : 28, height: compact ? 28 : 32 }}
           title={
             edit?.selectable
               ? `Select ${shownName} for removal`
@@ -731,9 +752,6 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
   const setHideBalances = useLiveStore((s) => s.setHideBalances);
   const setHideZeroBalances = useLiveStore((s) => s.setHideZeroBalances);
   const wallets = useLiveStore((s) => s.wallets);
-  // Which password opens each wallet, for the switcher chips below. False on an
-  // install that never set an app password, and then no such chip is rendered.
-  const appPasswordSet = useLiveStore((s) => s.appPasswordSet);
   const activeWalletId = useLiveStore((s) => s.activeWalletId);
   const switchWallet = useLiveStore((s) => s.switchWallet);
   const removeWallet = useLiveStore((s) => s.removeWallet);
@@ -852,20 +870,85 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
       </button>
     </div>
   );
-  /** The pencil next to a switcher row. */
-  const renameButton = (id: string, name: string, i: number) => (
+  /** What a switcher row shows: the account's mark, its NAME on a line of its
+   *  own, and its address under it. Nothing else shares the name's line (owner,
+   *  2026-11-11: the kind, chain and password chips were crowding the name out).
+   *  What those chips said is in the row's tooltip and in Settings > Wallets. */
+  const walletRowBody = (w: { id: string; address: string; active?: boolean }, label: string, i: number) => (
+    <>
+      <AccountAvatar address={w.address} seed={w.id} size={26} />
+      <span className="wallet-row-text">
+        <span className="wallet-row-name" data-testid={`live-wallet-name-${i}`}>
+          {label}
+        </span>
+        {w.address && (
+          <span className="wallet-row-address mono" data-testid={`live-account-address-${i}`}>
+            {shortAccountAddress(w.address)}
+          </span>
+        )}
+      </span>
+      {w.active && <Check size={15} className="wallet-row-check" data-testid={`live-wallet-active-${i}`} />}
+    </>
+  );
+  const walletRowTitle = (w: { name: string; passwordless?: boolean; noSendPassword?: boolean }) =>
+    w.passwordless
+      ? `${w.name} · opens without a password`
+      : w.noSendPassword
+        ? `${w.name} · sends without a password`
+        : w.name;
+  /** The ONE control beside a switcher row. Rename and Remove used to sit here
+   *  as two icons on every row, which put deleting an account one slip away
+   *  from switching to it and took the width the name needs at 320px. They are
+   *  now behind this button, as words. */
+  const [rowMenuId, setRowMenuId] = useState<string | null>(null);
+  const rowMoreButton = (id: string, name: string, i: number) => (
     <button
       type="button"
       className="icon-btn"
-      onClick={() => startRename(id, name)}
-      aria-label={`Rename ${name}`}
-      title={`Rename ${name}`}
-      data-testid={`live-wallet-rename-${i}`}
-      style={{ width: 30, height: 30, flexShrink: 0, color: 'var(--text-dim)' }}
+      onClick={() => setRowMenuId((cur) => (cur === id ? null : id))}
+      aria-label={`More actions for ${name}`}
+      aria-expanded={rowMenuId === id}
+      title="Rename or remove"
+      data-testid={`live-wallet-more-${i}`}
+      style={{ width: 30, height: 30, flexShrink: 0, color: 'var(--text-faint)' }}
     >
-      <Pencil size={13} />
+      <MoreHorizontal size={15} />
     </button>
   );
+  const rowActions = (w: { id: string; name: string; active?: boolean }, i: number) =>
+    rowMenuId === w.id ? (
+      <div className="wallet-row-actions" data-testid={`live-wallet-actions-${i}`}>
+        <button
+          type="button"
+          onClick={() => { setRowMenuId(null); startRename(w.id, w.name); }}
+          data-testid={`live-wallet-rename-${i}`}
+        >
+          <Pencil size={13} /> Rename
+        </button>
+        {/* The wallet you are in cannot be removed from here: switch first. */}
+        {!w.active && (
+          <button
+            type="button"
+            className="danger"
+            onClick={() => { setRowMenuId(null); setShowWalletMenu(false); setDeleteWalletId(w.id); }}
+            data-testid={`live-wallet-delete-${i}`}
+          >
+            <Trash2 size={13} /> Remove
+          </button>
+        )}
+      </div>
+    ) : null;
+  // ACCOUNTS FOUND ON THIS SEED. A find added entries the user never asked for
+  // by name, so it says where they went; as a toast since 1.6.4, because the
+  // banner it used to be pushed the whole screen down when it appeared.
+  // "Nothing found" and a failed check are answered inside the switcher.
+  const toast = useUiStore((s) => s.toast);
+  useEffect(() => {
+    const added = evmAccountScan.added;
+    if (added == null || added <= 0) return;
+    toast(`Found ${added} more ${added === 1 ? 'account' : 'accounts'} on this seed. They are in the wallet switcher.`);
+    clearEvmAccountScan();
+  }, [evmAccountScan.added, toast, clearEvmAccountScan]);
   // Feedback for the two account actions inside the switcher. Local (not store)
   // state: both are answers to a click the user just made in this popover, and
   // they are meaningless once it closes — see the reset effect below.
@@ -890,11 +973,51 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
     () => filterActivity(mergedActivity, activityQuery),
     [mergedActivity, activityQuery],
   );
+  // ARRIVALS OF UNLISTED TOKENS (users, 2026-11: airdropped spam reads as
+  // income). Only a token the wallet CHECKED and does not vouch for counts: a
+  // symbol it knows nothing about is left alone, and so is everything the user
+  // sent. They fold under one line that says how many and puts them back; a
+  // search looks through them too, so a txid is never "not found".
+  const [showUnlisted, setShowUnlisted] = useState(false);
+  const unlistedSymbols = useMemo(() => {
+    const listed = new Set<string>();
+    const unlisted = new Set<string>();
+    for (const t of [...evmTokens.tracked, ...evmTokens.discovered]) {
+      const sym = t.symbol.trim().toUpperCase();
+      if (t.trusted === true) listed.add(sym);
+      else if (t.trusted === false) unlisted.add(sym);
+    }
+    // A listed verdict wins for a shared symbol, as in the token registry.
+    for (const sym of listed) unlisted.delete(sym);
+    return unlisted;
+  }, [evmTokens]);
+  const isUnlistedArrival = useCallback(
+    (tx: LiveTransaction) => tx.direction === 'in' && !tx.staking && unlistedSymbols.has(tx.asset.trim().toUpperCase()),
+    [unlistedSymbols],
+  );
+  const unlistedCount = useMemo(
+    () => filteredActivity.filter((item) => item.kind === 'tx' && isUnlistedArrival(item.tx)).length,
+    [filteredActivity, isUnlistedArrival],
+  );
+  const foldUnlisted = !showUnlisted && !activityQuery.trim() && unlistedCount > 0;
+  const shownActivity = useMemo(
+    () => (foldUnlisted ? filteredActivity.filter((item) => !(item.kind === 'tx' && isUnlistedArrival(item.tx))) : filteredActivity),
+    [foldUnlisted, filteredActivity, isUnlistedArrival],
+  );
+  // Names the user already has for an address: the address book, then their
+  // own wallets. Activity says "To Savings" instead of a hash.
+  const addressBook = useLiveStore((s) => s.addressBook);
+  const partyName = useMemo(() => {
+    const names = new Map<string, string>();
+    for (const w of wallets) if (w.address) names.set(w.address.toLowerCase(), w.name);
+    for (const c of addressBook) if (c.label.trim()) names.set(c.address.toLowerCase(), c.label.trim());
+    return (addr: string) => names.get(addr.toLowerCase());
+  }, [wallets, addressBook]);
   const {
     items: activityItems,
     page: activityCurrentPage,
     totalPages: activityTotalPages,
-  } = useMemo(() => paginate(filteredActivity, activityPage, ACTIVITY_PER_PAGE), [filteredActivity, activityPage]);
+  } = useMemo(() => paginate(shownActivity, activityPage, ACTIVITY_PER_PAGE), [shownActivity, activityPage]);
   // Day headers for THIS page's rows. Grouped after pagination on purpose: the
   // header sits above the first row of its day *within the page*, so it can
   // never announce a day whose remaining rows are on the next page. `now` is
@@ -937,9 +1060,22 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
         !snapshot || snapshot.address !== address || Date.now() - snapshot.readAt > SATORI_REWARDS_MAX_AGE_MS;
       if (due) void refreshSatoriRewards();
     };
-    readIfDue();
-    const timer = setInterval(readIfDue, 60_000);
-    return () => clearInterval(timer);
+    // UNTIL THERE IS A FIRST ANSWER for this address the next look comes soon
+    // (2s, 4s, 8s, 15s, 30s), then once a minute as before. A first read that
+    // lost a race with a fresh import or a chain switch, or that simply failed,
+    // used to leave Home with no rewards for the whole minute to the next tick.
+    const SOON = [2_000, 4_000, 8_000, 15_000, 30_000];
+    let attempt = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const tick = () => {
+      readIfDue();
+      const { snapshot } = useLiveStore.getState().satoriRewards;
+      const answered = !!snapshot && snapshot.address === address;
+      const delay = answered ? 60_000 : (SOON[attempt++] ?? 60_000);
+      timer = setTimeout(tick, delay);
+    };
+    tick();
+    return () => clearTimeout(timer);
   }, [rewardsChain, address, refreshSatoriRewards]);
   const pendingRewards = rewardsChain && address ? allPendingSatoriRewards(satoriRewardsState, address) : null;
 
@@ -1116,7 +1252,6 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
   // else (the wallet list, Settings, this button's accessible name) keeps the
   // full name.
   const headerName = activeWallet ? headerWalletName(activeWallet) : activeWalletName;
-  const activeIsPk = activeWallet?.kind === 'pk';
   const deleteTarget = wallets.find((w) => w.id === deleteWalletId) ?? null;
   // Accounts of the SAME seed as the wallet about to be deleted. Non-empty means
   // the seed survives this deletion in its other accounts, which changes what
@@ -1162,6 +1297,7 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
     });
   const closeWalletMenu = () => {
     setShowWalletMenu(false);
+    setRowMenuId(null);
     setWalletQuery('');
     setToggledGroups(new Set());
   };
@@ -1638,7 +1774,7 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
   // at the end of the normally-scrolling panel exactly as before.
   const footer = (
     <div
-      className="text-faint"
+      className="text-faint home-footer"
       style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3, padding: '18px 0 8px' }}
     >
       <a
@@ -1651,8 +1787,63 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
       >
         <BrandLogo slot="satori" size={13} alt="" /> Satori Network
       </a>
+      {/* The chain's own site: the domain is what tells a user WHICH project a
+          similar-sounding chain is. It stood alone over the balance until 1.6.7. */}
+      {activeChainHomepage && (
+        <button
+          type="button"
+          className="link"
+          onClick={openChainHomepage}
+          title={`Open ${activeChainHomepageHost} in a new tab`}
+          data-testid="live-chain-homepage"
+          style={{ fontSize: 10.5, display: 'inline-flex', alignItems: 'center', gap: 3, background: 'none', border: 0, cursor: 'pointer' }}
+        >
+          {activeChainHomepageHost}
+          <ExternalLink size={10} />
+        </button>
+      )}
       <span style={{ fontSize: 10 }}>Satori GO v{getAppVersion()}</span>
     </div>
+  );
+
+  // The header's status words. Synced says nothing: the green dot is the whole
+  // message, and the block height is in its tooltip.
+  const headerStatusLabel = offline ? 'Offline' : !network ? 'Connecting…' : ledState === 'connected' ? null : syncStatus.label;
+
+  // The hero's two figures. With a price the total leads and the coin follows;
+  // without one the coin's balance is the hero, as it always was.
+  const fiatFirst = !firstLoad && hasPrice;
+  // Monero's figure is the UNLOCKED balance, what can be spent now; the locked
+  // remainder is named under it (the Monero engine design notes §10).
+  const heroNativeText = hideBalances
+    ? MASKED
+    : isMoneroActive && moneroSlice.balance
+      ? fmtBase(moneroSlice.balance.unlocked, 12)
+      : nativeRow
+        ? fmtBase(nativeRow.amountBase, nativeRow.scale)
+        : '0';
+  const heroNativeTitle =
+    hideBalances || !nativeRow ? undefined : `${fmtFull(nativeRow.amountBase, nativeRow.scale)} ${nativeTicker}`;
+  // Privacy mode (MetaMask's eye): one tap masks every amount on Home (hero,
+  // total, rows, activity); persisted. It rides inside the big figure's line,
+  // so its box is kept under that line's height.
+  const heroEye = (
+    <button
+      type="button"
+      className="icon-btn hero-eye"
+      onClick={() => setHideBalances(!hideBalances)}
+      aria-pressed={hideBalances}
+      aria-label={hideBalances ? 'Show balances' : 'Hide balances'}
+      title={hideBalances ? 'Show balances' : 'Hide balances'}
+      data-testid="live-hide-balances"
+      style={{
+        width: tightList ? 22 : 26,
+        height: tightList ? 22 : 26,
+        color: 'var(--text-faint)',
+      }}
+    >
+      {hideBalances ? <EyeOff size={tightList ? 13 : 14} /> : <Eye size={tightList ? 13 : 14} />}
+    </button>
   );
 
   return (
@@ -1682,15 +1873,37 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
         {/* Network switcher: mounted here only. Self-contained (own trigger +
             popover) — see ChainSwitcher.tsx. */}
         <ChainSwitcher />
+        {/* THE connection state, beside the chain it is about and on every
+            tab. Quiet when all is well (a green dot; the block height is in
+            its tooltip) and worded when it is not: "Syncing 3/12", "No block
+            6h 12m", "Offline". It used to be a whole row of Home ("Block
+            55,987,931 · Synced") that a user who is simply synced never needs
+            to read. */}
+        <span
+          className={`header-status pill state-${pillState}`}
+          data-testid="live-network-pill"
+          data-block={network ? String(network.blockHeight) : undefined}
+          title={network && !offline ? `Block ${network.blockHeight.toLocaleString()} · ${syncStatus.tooltip}` : syncStatus.tooltip}
+          role="img"
+          aria-label={headerStatusLabel ?? syncStatus.label}
+        >
+          <span className="dot" data-testid="live-led" data-state={ledState} aria-hidden />
+          {headerStatusLabel && (
+            <span className="header-status-text" data-testid="sync-status">
+              {headerStatusLabel}
+            </span>
+          )}
+        </span>
         {/* Centre: the wallet switcher, ONE line tall like the chain pill and
             the icon buttons beside it (the header is a grid: row 1 is the three
             controls at one height, row 2 is the address centred under them).
             The address is a SEPARATE button: clicking it copies and must not
             open the wallet menu, and a button cannot live inside a button. */}
+        <div className="header-identity">
         <button
           type="button"
           className="wallet-switcher"
-          onClick={() => (showWalletMenu ? closeWalletMenu() : (setWalletQuery(''), setToggledGroups(new Set()), setShowWalletMenu(true)))}
+          onClick={() => (showWalletMenu ? closeWalletMenu() : (setWalletQuery(''), setRowMenuId(null), setToggledGroups(new Set()), setShowWalletMenu(true)))}
           data-testid="live-wallet-switcher"
           /* The name is in the label, not only in the button's text: this is
              now the header's identity control, so a screen reader has to say
@@ -1703,18 +1916,23 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
               every list (switcher, lock screen, Settings) — the thing the eye
               matches on before it reads the name. */}
           <AccountAvatar address={address} seed={activeWalletId ?? undefined} size={20} />
-          {activeIsPk && <BrandLogo slot="satori" size={12} alt="Satori" />}
           <span className="wallet-switcher-text" title={activeWalletName} data-testid="live-wallet-switcher-name">
             {headerName}
           </span>
           <ChevronDown size={12} style={{ flexShrink: 0 }} />
         </button>
+        {/* THE address of this wallet, the only one on Home, beside its name.
+            Click to copy the whole thing (shown truncated). A separate button:
+            copying must not open the wallet menu. */}
+        {address && <HeaderAddress address={address} />}
+        </div>
         <div className="header-actions">
           <button
             type="button"
             className="icon-btn"
             onClick={() => refresh()}
             aria-label="Refresh"
+            title="Refresh balances and activity"
             disabled={loadingRefresh}
           >
             <RefreshCw size={16} className={loadingRefresh ? 'spin' : ''} />
@@ -1745,13 +1963,10 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
             title="Lock wallet"
             data-testid="live-lock-btn"
           >
-            <LogOut size={16} />
+            {/* A padlock: this locks the wallet, it does not sign anyone out. */}
+            <Lock size={16} />
           </button>
         </div>
-        {/* Row 2: THE address of this wallet, the only one on Home, centred
-            under the name. Click to copy the whole thing (shown truncated). */}
-        {address && <HeaderAddress address={address} />}
-      </div>
 
       {/* Wallet switcher dropdown. SCOPED TO THE ACTIVE CHAIN: the chain you are
           on decides which wallets exist here, so this lists siblings you can
@@ -1774,9 +1989,12 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
             left: 0,
             right: 0,
             margin: '0 auto',
-            width: 'min(360px, calc(100% - 28px))',
-            top: 52,
-            maxHeight: 'calc(100% - 64px)',
+            width: 'min(372px, calc(100% - 20px))',
+            // Under the header, whatever its height (it has a tight and a roomy
+            // form): a fixed offset used to land the menu across the address.
+            top: 'calc(100% + 2px)',
+            // Viewport units: the containing block is the header, not the frame.
+            maxHeight: 'calc(100vh - 100% - 20px)',
             overflowY: 'auto',
           }}
         >
@@ -1806,18 +2024,6 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
               const w = node.wallet;
               const i = rowIndexById.get(w.id) ?? 0;
               if (!matchesQuery(w)) return null;
-              // Each row's OWN chain (not the active chain) drives its badge: any
-              // wallet whose native ticker isn't the default (Evrmore) gets an
-              // icon + ticker chip, so a Ravencoin, Bitcoin Gold, or future
-              // non-Evrmore wallet is distinguishable in the switcher.
-              //
-              // An EVM wallet's stored `network` is the 'evm' sentinel, never a
-              // real chain id, so nativeTickerFor(w.network) must NEVER be called
-              // for one — it would resolve against the ACTIVE EVM chain instead
-              // of this row's own wallet. 'EVM' is shown directly instead.
-              const isEvmRow = w.family === 'evm';
-              const walletTicker = isEvmRow ? 'EVM' : nativeTickerFor(w.network);
-              const isOtherChain = isEvmRow || walletTicker !== 'EVR';
               if (renamingId === w.id) {
                 return (
                   <div key={w.id} style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
@@ -1826,66 +2032,20 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
                 );
               }
               return (
-                <div key={w.id} style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-                  <button
-                    type="button"
-                    onClick={() => selectWallet(w.id)}
-                    data-testid={`live-wallet-item-${i}`}
-                    style={{ gap: 7, flex: 1, minWidth: 0 }}
-                  >
-                    {/* Identicon first on EVERY row: it is the per-account mark
-                        the eye matches on. A Satori (pk) wallet keeps its brand
-                        mark next to it — that says which KIND of wallet it is,
-                        which the identicon cannot. */}
-                    <AccountAvatar address={w.address} seed={w.id} size={16} />
-                    {w.kind === 'pk' && <BrandLogo slot="satori" size={16} alt="Satori" />}
-                    {isOtherChain && <TokenIcon assetId={walletTicker} size={16} />}
-                    <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {w.name}
-                    </span>
-                    <span className="chip neutral" style={{ fontSize: 8.5, padding: '1px 4px', flexShrink: 0 }}>
-                      {walletKindTag(w)}
-                    </span>
-                    {isOtherChain && (
-                      <span
-                        className="chip neutral"
-                        data-testid={`live-wallet-item-chain-${i}`}
-                        style={{ fontSize: 8.5, padding: '1px 4px', flexShrink: 0 }}
-                      >
-                        {walletTicker}
-                      </span>
-                    )}
-                    {w.passwordless && (
-                      <span className="chip warning" style={{ fontSize: 8.5, padding: '1px 4px', flexShrink: 0 }}>No pw</span>
-                    )}
-                    {/* §6: a wallet that migrated from passwordless keeps "do
-                        not ask when sending" but loses `passwordless`, so this
-                        row showed nothing at all for a wallet that still spends
-                        with nothing typed. */}
-                    {!w.passwordless && w.noSendPassword && (
-                      <span className="chip warning" style={{ fontSize: 8.5, padding: '1px 4px', flexShrink: 0 }}>Sends without pw</span>
-                    )}
-                    {appPasswordSet && (
-                      <span className="chip neutral" style={{ fontSize: 8.5, padding: '1px 4px', flexShrink: 0 }}>
-                        {w.appProtected ? 'App pw' : 'Own pw'}
-                      </span>
-                    )}
-                    {w.active && <Check size={14} style={{ color: 'var(--success)', flexShrink: 0 }} />}
-                  </button>
-                  {renameButton(w.id, w.name, i)}
-                  {!w.active && (
+                <div key={w.id}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                     <button
                       type="button"
-                      className="danger"
-                      onClick={() => { setShowWalletMenu(false); setDeleteWalletId(w.id); }}
-                      aria-label={`Remove ${w.name}`}
-                      title={`Remove ${w.name}`}
-                      data-testid={`live-wallet-delete-${i}`}
-                      style={{ width: 30, flexShrink: 0, justifyContent: 'center', padding: '9px 6px' }}
+                      onClick={() => selectWallet(w.id)}
+                      data-testid={`live-wallet-item-${i}`}
+                      className="wallet-row"
+                      title={walletRowTitle(w)}
                     >
-                      <Trash2 size={13} />
+                      {walletRowBody(w, w.name, i)}
                     </button>
-                  )}
+                    {rowMoreButton(w.id, w.name, i)}
+                  </div>
+                  {rowActions(w, i)}
                 </div>
               );
             }
@@ -1940,9 +2100,6 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
                       {node.members.length} {node.members.length === 1 ? 'account' : 'accounts'}
                     </span>
                   )}
-                  <span className="chip neutral" style={{ fontSize: 8.5, padding: '1px 4px', flexShrink: 0 }}>
-                    Seed
-                  </span>
                   {collapsible && (
                     <ChevronDown
                       size={13}
@@ -1961,80 +2118,20 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
                     );
                   }
                   return (
-                    <div key={w.id} style={{ display: 'flex', alignItems: 'center', gap: 2, paddingLeft: 8 }}>
-                      <button
-                        type="button"
-                        onClick={() => selectWallet(w.id)}
-                        data-testid={`live-wallet-item-${i}`}
-                        style={{ gap: 7, flex: 1, minWidth: 0 }}
-                      >
-                        {/* Accounts of one seed differ ONLY by address, so the
-                            identicon is the fastest way to tell them apart. */}
-                        <AccountAvatar address={w.address} seed={w.id} size={16} />
-                        <span
-                          style={{
-                            display: 'flex',
-                            flexDirection: 'column',
-                            alignItems: 'flex-start',
-                            gap: 1,
-                            flex: 1,
-                            minWidth: 0,
-                          }}
-                        >
-                          <span
-                            style={{
-                              maxWidth: '100%',
-                              overflow: 'hidden',
-                              textOverflow: 'ellipsis',
-                              whiteSpace: 'nowrap',
-                            }}
-                          >
-                            {memberLabel(w, node.title, node.members.length)}
-                          </span>
-                          {w.address && (
-                            <span
-                              className="mono"
-                              style={{ fontSize: 9, color: 'var(--text-faint)' }}
-                              data-testid={`live-account-address-${i}`}
-                            >
-                              {shortAccountAddress(w.address)}
-                            </span>
-                          )}
-                        </span>
-                        <span
-                          className="chip neutral"
-                          data-testid={`live-wallet-item-chain-${i}`}
-                          style={{ fontSize: 8.5, padding: '1px 4px', flexShrink: 0 }}
-                        >
-                          EVM
-                        </span>
-                        {w.passwordless && (
-                          <span className="chip warning" style={{ fontSize: 8.5, padding: '1px 4px', flexShrink: 0 }}>No pw</span>
-                        )}
-                        {!w.passwordless && w.noSendPassword && (
-                          <span className="chip warning" style={{ fontSize: 8.5, padding: '1px 4px', flexShrink: 0 }}>Sends without pw</span>
-                        )}
-                        {appPasswordSet && (
-                          <span className="chip neutral" style={{ fontSize: 8.5, padding: '1px 4px', flexShrink: 0 }}>
-                            {w.appProtected ? 'App pw' : 'Own pw'}
-                          </span>
-                        )}
-                        {w.active && <Check size={14} style={{ color: 'var(--success)', flexShrink: 0 }} />}
-                      </button>
-                      {renameButton(w.id, w.name, i)}
-                      {!w.active && (
+                    <div key={w.id} style={{ paddingLeft: 8 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                         <button
                           type="button"
-                          className="danger"
-                          onClick={() => { setShowWalletMenu(false); setDeleteWalletId(w.id); }}
-                          aria-label={`Remove ${w.name}`}
-                          title={`Remove ${w.name}`}
-                          data-testid={`live-wallet-delete-${i}`}
-                          style={{ width: 30, flexShrink: 0, justifyContent: 'center', padding: '9px 6px' }}
+                          onClick={() => selectWallet(w.id)}
+                          data-testid={`live-wallet-item-${i}`}
+                          className="wallet-row"
+                          title={walletRowTitle(w)}
                         >
-                          <Trash2 size={13} />
+                          {walletRowBody(w, memberLabel(w, node.title, node.members.length), i)}
                         </button>
-                      )}
+                        {rowMoreButton(w.id, w.name, i)}
+                      </div>
+                      {rowActions(w, i)}
                     </div>
                   );
                 })}
@@ -2104,7 +2201,6 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
           </button>
         </div>
       )}
-
       {showWalletMenu && (
         /* Outside-click closer. FIXED (not absolute) for the same reason as
            the chain switcher's overlay: absolute anchors to whichever ancestor
@@ -2117,6 +2213,9 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
           onClick={() => { closeWalletMenu(); cancelRename(); }}
         />
       )}
+      {showWalletMenu && <div className="menu-scrim" aria-hidden />}
+      </div>
+
 
       <div
         /* `home-roomy` on a chain with no token list: the balance and the two
@@ -2138,7 +2237,7 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
             ? `app-content home-pinned${canHoldAssets ? ' home-centered' : ' home-roomy'}${
                 hasNotice ? ' has-notice' : ''
               }${tightList ? ' home-tight' : ''}`
-            : 'app-content'
+            : 'app-content tab-flow'
         }
         data-testid={`live-tab-panel-${tab}`}
       >
@@ -2186,35 +2285,6 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
           </div>
         )}
 
-        {/* Accounts found on this seed. Only a FIND is announced here: it added
-            entries the user never asked for by name, so it has to say where they
-            went. "Nothing found" and a failed check are answered inside the
-            switcher, next to the button that asked. */}
-        {evmAccountScan.added != null && evmAccountScan.added > 0 && (
-          <div
-            className="banner info"
-            style={{ marginBottom: 10, alignItems: 'flex-start' }}
-            data-testid="live-accounts-found"
-          >
-            <Search size={14} style={{ flexShrink: 0, marginTop: 1 }} />
-            <span style={{ flex: 1, minWidth: 0 }}>
-              Found {evmAccountScan.added} more{' '}
-              {evmAccountScan.added === 1 ? 'account' : 'accounts'} on this seed. They are in the
-              wallet switcher.
-            </span>
-            <button
-              type="button"
-              className="icon-btn"
-              onClick={() => clearEvmAccountScan()}
-              aria-label="Dismiss"
-              data-testid="live-accounts-found-dismiss"
-              style={{ flexShrink: 0 }}
-            >
-              <X size={13} />
-            </button>
-          </div>
-        )}
-
         {tab === 'assets' ? (
           <>
             {/* Network status + address. The chain-name line that used to sit
@@ -2225,82 +2295,18 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
                 centred block below (see .home-centered) is centred in the space
                 UNDER it, which is also where it sits on a chain with no list.
                 Its testid is what the smoke measures that free space from. */}
+            {/* The connection state moved to the header (1.6.3). What is left
+                here is the project's site, on a chain that has one; on an EVM
+                account the row is empty and takes no height. */}
             <div
               data-testid="live-home-status"
               style={{
                 display: 'flex',
                 alignItems: 'flex-start',
-                justifyContent: 'space-between',
-                // The break under the status row. On the compact popup the pill
-                // already carries 4px of its own padding, so 6 more is a band
-                // of nothing between two things that belong together.
-                marginBottom: tightList ? 3 : 6,
+                justifyContent: 'flex-end',
+                marginBottom: 0,
               }}
             >
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
-                {/* Sync text beside the block pill (owner's placement): the
-                    pill says where the chain tip is, the label says whether
-                    THIS wallet is caught up to it, so one glance answers
-                    both. minWidth:0 + ellipsis is a last-resort guard against
-                    implausible digit widths, not an expected state. When
-                    offline the pill itself already reads "Offline", so the
-                    label (whose derivation would also say "Offline") is
-                    skipped instead of echoed beside it. */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
-                  {loadingRefresh && !network ? (
-                    <Skeleton width={110} height={26} radius={999} />
-                  ) : (
-                    /* Inline .pill markup rather than <StatusPill>: the pill's
-                       dot IS the app's one connection LED now (the brand-row
-                       LED is gone), so it needs the live-led testid, a
-                       data-state, and the derived 'stale' state — none of
-                       which StatusPill's NetworkState contract carries. */
-                    <span
-                      className={`pill state-${pillState}`}
-                      data-testid="live-network-pill"
-                      title={syncStatus.tooltip}
-                    >
-                      <span
-                        className="dot"
-                        data-testid="live-led"
-                        data-state={ledState}
-                        aria-hidden
-                      />
-                      {offline
-                        ? 'Offline'
-                        : network
-                        ? `Block ${network.blockHeight.toLocaleString()}`
-                        : 'Connecting…'}
-                    </span>
-                  )}
-                  {!offline && (
-                    <>
-                      <span aria-hidden="true" style={{ fontSize: 9.5, color: 'var(--text-faint)', flexShrink: 0 }}>
-                        ·
-                      </span>
-                      <span
-                        data-testid="sync-status"
-                        title={syncStatus.tooltip}
-                        style={{
-                          fontSize: 9.5,
-                          // A stalled chain must not read like routine faint
-                          // metadata: "No block 6h 12m" gets the warning color
-                          // to match the pill dot beside it.
-                          fontWeight: ledState === 'stale' ? 600 : 400,
-                          color: ledState === 'stale' ? 'var(--warning)' : 'var(--text-faint)',
-                          whiteSpace: 'nowrap',
-                          overflow: 'hidden',
-                          textOverflow: 'ellipsis',
-                          minWidth: 0,
-                        }}
-                      >
-                        {syncStatus.label}
-                      </span>
-                    </>
-                  )}
-                </div>
-              </div>
-
               {/* The project's own site. The address that used to sit above it
                   (with its own copy button) is GONE from this row: Home printed
                   the same address twice, and the header's line is now the one
@@ -2311,29 +2317,7 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
               <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 1, flexShrink: 0 }}>
                 {/* No project homepage for an EVM account: it is one address
                     across every EVM chain, not a single chain's own project. */}
-                {activeChainHomepage && (
-                  <button
-                    type="button"
-                    className="link"
-                    onClick={openChainHomepage}
-                    title={`Open ${activeChainHomepageHost} in a new tab`}
-                    data-testid="live-chain-homepage"
-                    style={{
-                      fontSize: 11,
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: 3,
-                      whiteSpace: 'nowrap',
-                      background: 'none',
-                      border: 0,
-                      cursor: 'pointer',
-                      textAlign: 'right',
-                    }}
-                  >
-                    {activeChainHomepageHost}
-                    <ExternalLink size={10} />
-                  </button>
-                )}
+                {/* The chain's own site is in the footer since 1.6.7. */}
               </div>
             </div>
 
@@ -2408,29 +2392,36 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
                   Claim SATORI
                 </button>
               )}
-              <div className="hero-mark" data-testid="live-hero-mark">
-                <TokenIcon assetId={nativeTicker} size={tightList ? 36 : 64} />
-              </div>
-              <div className="hero-label">{nativeTicker} Balance</div>
+              {/* The coin's own mark leads the hero only on a chain with no asset
+                  list: where a list follows, its first row is this same coin
+                  with this same mark, an inch lower. */}
+              {!canHoldAssets && (
+                <div className="hero-mark" data-testid="live-hero-mark">
+                  <TokenIcon assetId={nativeTicker} size={64} />
+                </div>
+              )}
+              <div className="hero-label">{fiatFirst ? 'Total balance' : `${nativeTicker} Balance`}</div>
               {firstLoad ? (
                 <Skeleton width={160} height={36} style={{ margin: '4px auto' }} />
+              ) : fiatFirst ? (
+                <>
+                  {/* Priced: the big figure is what the wallet is worth, and the
+                      coin's own balance sits under it (MetaMask's order). The
+                      testids are the ones these two figures always had. */}
+                  <div className="hero-value" data-testid="live-total-usd">
+                    <span data-testid="total-balance" style={{ fontVariantNumeric: 'tabular-nums' }}>
+                      {hideBalances || !totalFiat ? MASKED : formatFiatValue(totalFiat)}
+                    </span>
+                    {heroEye}
+                  </div>
+                  <div className="hero-native" data-testid="live-balance-hero" title={heroNativeTitle}>
+                    {heroNativeText}
+                    <span className="hero-native-ticker">{nativeTicker}</span>
+                  </div>
+                </>
               ) : (
-                <div
-                  className="hero-value"
-                  data-testid="live-balance-hero"
-                  title={hideBalances || !nativeRow ? undefined : `${fmtFull(nativeRow.amountBase, nativeRow.scale)} ${nativeTicker}`}
-                >
-                  {/* Monero's hero is the UNLOCKED balance, what can be spent
-                      now; the locked remainder is named under it (the Monero
-                      engine design notes §10). Every other chain shows its
-                      one balance row. */}
-                  {hideBalances
-                    ? MASKED
-                    : isMoneroActive && moneroSlice.balance
-                      ? fmtBase(moneroSlice.balance.unlocked, 12)
-                      : nativeRow
-                        ? fmtBase(nativeRow.amountBase, nativeRow.scale)
-                        : '0'}
+                <div className="hero-value" data-testid="live-balance-hero" title={heroNativeTitle}>
+                  {heroNativeText}
                   {/* Ticker scales with the roomy hero so it stays proportional. */}
                   <span
                     style={{
@@ -2442,57 +2433,7 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
                   >
                     {nativeTicker}
                   </span>
-                  {/* Privacy mode (MetaMask's eye): one tap masks every amount
-                      on Home (hero, total, rows, activity); persisted. */}
-                  <button
-                    type="button"
-                    className="icon-btn"
-                    onClick={() => setHideBalances(!hideBalances)}
-                    aria-pressed={hideBalances}
-                    aria-label={hideBalances ? 'Show balances' : 'Hide balances'}
-                    title={hideBalances ? 'Show balances' : 'Hide balances'}
-                    data-testid="live-hide-balances"
-                    // The eye rides INSIDE the balance line, so its box is what
-                    // sets that line's height: at 26px it, not the 21px figure,
-                    // was the tallest thing in the compact hero.
-                    style={{
-                      width: tightList ? 22 : 26,
-                      height: tightList ? 22 : 26,
-                      marginLeft: 6,
-                      verticalAlign: 'middle',
-                      color: 'var(--text-faint)',
-                    }}
-                  >
-                    {hideBalances ? <EyeOff size={tightList ? 13 : 14} /> : <Eye size={tightList ? 13 : 14} />}
-                  </button>
-                </div>
-              )}
-              {!firstLoad && hasPrice && (
-                <div
-                  data-testid="live-total-usd"
-                  style={{
-                    // INLINE, and therefore the only place this value can be
-                    // set: a `.home-tight [data-testid='live-total-usd']` rule
-                    // in global.css lost to this declaration every time and
-                    // shipped as dead weight for two releases. The compact
-                    // figure sits beside the roomy one instead.
-                    marginTop: tightList ? 1 : 6,
-                    display: 'inline-flex',
-                    alignItems: 'baseline',
-                    gap: 6,
-                    justifyContent: 'center',
-                  }}
-                >
-                  {/* Same micro-label treatment as the hero label above it
-                      (uppercase comes from CSS text-transform, so innerText
-                      keeps the authored casing). */}
-                  <span className="hero-label">Total balance</span>
-                  <span
-                    data-testid="total-balance"
-                    style={{ fontSize: tightList ? 13.5 : 15, fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}
-                  >
-                    {hideBalances || !totalFiat ? MASKED : formatFiatValue(totalFiat)}
-                  </span>
+                  {heroEye}
                 </div>
               )}
               {/* What this account has STAKED, under the balance it can spend.
@@ -2831,6 +2772,7 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
                       onSelect={onSelectAsset}
                       nativeTicker={nativeTicker}
                       compact={tightList}
+                      pricesLoaded={hasPrice}
                       edit={
                         editingAssets
                           ? {
@@ -2939,6 +2881,7 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
                 justifyContent: 'space-between',
                 gap: 8,
                 marginTop: 2,
+                marginBottom: 6,
               }}
             >
               <div className="section-label" style={{ marginTop: 0, display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -2953,7 +2896,6 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
                   />
                 )}
               </div>
-              <SyncStatusPill />
             </div>
             {/* Bittensor Activity is the sends made from this wallet only (the
                 owner's no-Taostats rule for v1): say so, always, or a received
@@ -3056,13 +2998,31 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
                   />
                 </div>
 
+                {/* Never a silent loss: say how many rows are folded away, and
+                    let that line put them back (and fold them again). */}
+                {unlistedCount > 0 && !activityQuery.trim() && (
+                  <button
+                    type="button"
+                    className="text-dim activity-unlisted-note"
+                    onClick={() => {
+                      setShowUnlisted(!showUnlisted);
+                      setActivityPage(1);
+                    }}
+                    aria-pressed={showUnlisted}
+                    data-testid="live-activity-unlisted-note"
+                  >
+                    {showUnlisted
+                      ? `Showing ${unlistedCount} incoming ${unlistedCount === 1 ? 'transfer' : 'transfers'} of unlisted tokens. Hide`
+                      : `${unlistedCount} incoming ${unlistedCount === 1 ? 'transfer' : 'transfers'} of unlisted tokens hidden. Show`}
+                  </button>
+                )}
                 {filteredActivity.length === 0 ? (
                   <EmptyState
                     icon={<Search size={20} />}
                     title="No matches"
                     description="Try a different asset, address, tx id, or pool name."
                   />
-                ) : (
+                ) : shownActivity.length === 0 ? null : (
                   <>
                     {/* Day headers between the rows: "Today" / "Yesterday" /
                         "14 Aug 2026", grouped over THIS page's rows only (the
@@ -3086,6 +3046,8 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
                                 onOpen={onSelectTx}
                                 masked={hideBalances}
                                 stakingCtx={stakingRowCtx}
+                                partyName={partyName}
+                                unlisted={isUnlistedArrival(item.tx)}
                               />
                             ) : (
                               <StakingEventRow key={item.id} event={item.event} />

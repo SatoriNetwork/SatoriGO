@@ -265,10 +265,11 @@ try {
     'copy address: the line goes back to the address after the confirmation',
   );
 
-  // Poll the pill text up to 30s for a real "Block <height>" label.
+  // Poll the header status up to 30s for a real "Block <height>". Since 1.6.3
+  // the height is in the status dot's tooltip, not printed on Home.
   let pill = '';
   for (let i = 0; i < 30; i++) {
-    pill = (await page.locator('[data-testid="live-network-pill"]').innerText().catch(() => '')) || '';
+    pill = (await page.locator('[data-testid="live-network-pill"]').getAttribute('title').catch(() => '')) || '';
     if (/block\s*[\d,]/i.test(pill)) break;
     await page.waitForTimeout(1000);
   }
@@ -999,18 +1000,25 @@ try {
   check(homeMetrics.scrollW <= 360 && homeMetrics.frameW === 360, `panel home at 360px: fills the panel, no horizontal overflow (frame ${homeMetrics.frameW}, scrollWidth ${homeMetrics.scrollW})`);
   await panelPage.screenshot({ path: path.join(shotsDir, '30-live-side-panel-narrow.png') });
 
-  // Header layout across the whole width the user can drag the panel to
-  // (MetaMask's order: network LEFT, wallet CENTRE, actions RIGHT). The three
-  // slots must never intersect and the page must never scroll sideways, at any
-  // of these widths. The chain name is a safety surface, so it also has to stay
-  // readable — whole, or at least ~9 characters — at the narrowest width.
+  // Header layout across the whole width the user can drag the panel to.
+  // Row 1 is network LEFT and actions RIGHT; row 2 is the wallet (name +
+  // address), which has the whole width to itself since 1.6.2. The two rows
+  // must not intersect and the page must never scroll sideways, at any of
+  // these widths. The chain name is a safety surface, so it has to stay
+  // readable, whole or at least ~9 characters, at the narrowest width too.
   const headerMetrics = () =>
     panelPage.evaluate(() => {
       const box = (sel) => {
         const el = document.querySelector(sel);
         if (!el) return null;
         const r = el.getBoundingClientRect();
-        return { left: Math.round(r.left), right: Math.round(r.right), width: Math.round(r.width) };
+        return {
+          left: Math.round(r.left),
+          right: Math.round(r.right),
+          top: Math.round(r.top),
+          bottom: Math.round(r.bottom),
+          width: Math.round(r.width),
+        };
       };
       // Visible characters of a label that ellipsises: clientWidth is what is
       // painted, scrollWidth what the full string would need.
@@ -1045,30 +1053,22 @@ try {
     const m = await headerMetrics();
     const ok = m.chain && m.wallet && m.actions;
     check(
-      Boolean(ok) && m.chain.right <= m.wallet.left && m.wallet.right <= m.actions.left,
-      `header at ${w}px: network | wallet | actions do not intersect (${
+      Boolean(ok) && m.chain.right <= m.actions.left && m.wallet.top >= m.chain.bottom - 1 && m.wallet.top >= m.actions.bottom - 1,
+      `header at ${w}px: network and actions share row 1, the wallet sits under them (${
         ok
-          ? `chain ${m.chain.left}-${m.chain.right}, wallet ${m.wallet.left}-${m.wallet.right}, actions ${m.actions.left}-${m.actions.right}`
+          ? `chain ${m.chain.left}-${m.chain.right}, actions ${m.actions.left}-${m.actions.right}, wallet top ${m.wallet.top} under ${m.chain.bottom}`
           : 'a header slot is missing'
       })`,
     );
     check(m.scrollW <= w, `header at ${w}px: no horizontal overflow (scrollWidth ${m.scrollW})`);
-    if (w < 360) {
-      // Under 360px the pill shows the mark only; the name lives in its label.
-      check(
-        !m.chainTextShown && /Evrmore/.test(m.chainAria) && (m.walletLabel.whole || m.walletLabel.chars >= 6),
-        `header at ${w}px: chain pill is mark-only but labelled (${m.chainAria}); wallet name ${
-          m.walletLabel.whole ? 'whole' : `${m.walletLabel.chars} chars`
-        }`,
-      );
-    } else {
-      check(
-        m.chainTextShown && (m.chainLabel.whole || m.chainLabel.chars >= 9),
-        `header at ${w}px: the chain name stays readable (${
-          m.chainLabel.whole ? 'whole' : `${m.chainLabel.chars} chars`
-        }); wallet name ${m.walletLabel.whole ? 'whole' : `${m.walletLabel.chars} chars`}`,
-      );
-    }
+    check(
+      m.chainTextShown && /Evrmore/.test(m.chainAria) && (m.chainLabel.whole || m.chainLabel.chars >= 9),
+      `header at ${w}px: the chain name stays readable (${m.chainLabel.whole ? 'whole' : `${m.chainLabel.chars} chars`})`,
+    );
+    check(
+      m.walletLabel.whole || m.walletLabel.chars >= 14,
+      `header at ${w}px: the wallet name has the row to itself (${m.walletLabel.whole ? 'whole' : `${m.walletLabel.chars} chars`})`,
+    );
     if (w === 320 || w === 480) {
       // Both popovers, at the extremes: opened, they must stay inside the frame
       // (the wallet menu is centred on it, the chain menu hangs off its left).
@@ -1089,7 +1089,7 @@ try {
         };
       });
       check(
-        menus.inside && menus.offCentre <= 1,
+        menus.inside && menus.offCentre <= 1 && menus.top >= 0,
         `wallet menu at ${w}px: inside the column and centred under the button (off by ${menus.offCentre}px, ${menus.top}px under the header)`,
       );
       await panelPage.screenshot({ path: path.join(shotsDir, `32-live-header-${w}.png`) });
@@ -1103,10 +1103,11 @@ try {
         return {
           inside: menu.left >= row.left - 1 && menu.right <= row.right + 1,
           left: Math.round(menu.left - row.left),
+          top: Math.round(menu.top - row.bottom),
         };
       });
       check(
-        chainMenu.inside && chainMenu.left <= 16,
+        chainMenu.inside && chainMenu.left <= 16 && chainMenu.top >= 0,
         `chain menu at ${w}px: inside the column, anchored under its own trigger (${chainMenu.left}px in)`,
       );
       await panelPage.screenshot({ path: path.join(shotsDir, `33-live-header-chain-menu-${w}.png`) });
@@ -1317,8 +1318,17 @@ try {
 
   // 1.9.0: every NON-active switcher row carries a delete affordance; the
   // active wallet (index 1, just created) has none.
-  check((await byId('live-wallet-delete-0').count()) === 1, 'switcher: non-active wallet shows a delete affordance');
-  check((await byId('live-wallet-delete-1').count()) === 0, 'switcher: active wallet has no delete affordance');
+  // 1.6.3: Rename and Remove sit behind each row's "more" button, so neither
+  // is on screen until asked for.
+  check((await byId('live-wallet-delete-0').count()) === 0, 'switcher: no Remove control on a row until its "more" button is used');
+  await byId('live-wallet-more-0').click();
+  check((await byId('live-wallet-delete-0').count()) === 1, 'switcher: non-active wallet offers Remove behind "more"');
+  await byId('live-wallet-more-1').click();
+  check(
+    (await byId('live-wallet-rename-1').count()) === 1 && (await byId('live-wallet-delete-1').count()) === 0,
+    'switcher: active wallet offers Rename only, no Remove',
+  );
+  await byId('live-wallet-more-1').click();
 
   // Switch back to the first wallet — a full-frame "Switching wallet…" screen
   // (live-syncing) may show while the target spins up, then it lands LOCKED
@@ -1482,7 +1492,9 @@ try {
   await byId('live-wallet-switcher').click({ timeout: 10_000 });
   await byId('live-wallet-item-0').waitFor({ timeout: 10_000 });
   const switcherText = await page.locator('.menu-pop').innerText();
-  check(/satori/i.test(switcherText), 'pk import: switcher shows a Satori/key badge for the pk wallet');
+  // Since 1.6.2 a switcher row is the name and the address only (owner: the
+  // badges were crowding the name out), so the pk wallet is told by its name.
+  check(/key wallet/i.test(switcherText) && !/\bPK\b|Seed/.test(switcherText), `pk import: the switcher names the pk wallet, with no badge on the name line ("${switcherText.replace(/\s+/g, ' ').slice(0, 80)}")`);
 
   // Passwordless: create a wallet with the "no password" checkbox (menu is open).
   await byId('live-add-wallet').click({ timeout: 10_000 });
@@ -1757,7 +1769,7 @@ try {
     let chainPill = '';
     for (let i = 0; i < 40; i++) {
       chainPill =
-        (await page.locator('[data-testid="live-network-pill"]').innerText().catch(() => '')) || '';
+        (await page.locator('[data-testid="live-network-pill"]').getAttribute('title').catch(() => '')) || '';
       if (/block\s*[\d,]/i.test(chainPill)) break;
       await page.waitForTimeout(1000);
     }
@@ -2028,9 +2040,12 @@ try {
   await byId('live-wallet-switcher').click({ timeout: 10_000 });
   await byId('live-wallet-item-0').waitFor({ timeout: 10_000 });
   const walletRows = (await page.locator('[data-testid^="live-wallet-item-"]').allInnerTexts()).join(' | ');
+  // Since 1.6.2 a switcher row is the name and the address only: which
+  // password opens a wallet is said on the lock screen and in Settings.
+  const walletRowTitles = (await page.locator('[data-testid^="live-wallet-item-"][title]').evaluateAll((els) => els.map((e) => e.title))).join(' | ');
   check(
-    /App pw/.test(walletRows) && !/No pw/.test(walletRows),
-    `wallet switcher: the wallet the forced setup moved is marked as opened by the app password -> "${walletRows.replace(/\s+/g, ' ').slice(0, 120)}"`,
+    !/App pw|No pw|Own pw/.test(walletRows) && !/opens without a password/.test(walletRowTitles),
+    `wallet switcher: rows carry no chips, and the moved wallet is not flagged as passwordless -> "${walletRows.replace(/\s+/g, ' ').slice(0, 120)}"`,
   );
   await page.keyboard.press('Escape');
   await byId('live-home').waitFor({ timeout: 10_000 });

@@ -8,8 +8,9 @@
 //   4. personal_sign and eth_signTypedData_v4 -> approval -> signatures that
 //      RECOVER to the account (verified here with @noble directly, not with the
 //      wallet's own code);
-//   5. wallet_switchEthereumChain (Ethereum, then an unknown chain -> 4902),
-//      chainChanged reaches the page;
+//   5. wallet_switchEthereumChain on a connected site asks first (reject keeps
+//      the chain, approve moves it), chainChanged reaches the page, an
+//      unknown chain -> 4902;
 //   6. read passthrough (eth_blockNumber, eth_getBalance) against the real RPC;
 //   7. wallet_watchAsset knows SATORI on Base; eth_sign is refused;
 //   8. eth_sendTransaction -> approval -> Review runs the real fee quote (the
@@ -270,14 +271,24 @@ try {
   check(wrongChain.error?.code === -32602, `typed data for another chain is refused before any window opens (${wrongChain.error?.code})`);
 
   // --- 5. Chains -----------------------------------------------------------------
-  check((await call(site, 'wallet_switchEthereumChain', [{ chainId: '0x1' }])).result === null, 'switch to Ethereum');
+  const sw1 = await clickCall(site, 'wallet_switchEthereumChain', [{ chainId: '0x1' }]);
+  check(/from Base to Ethereum/.test((await sw1.scope.getByTestId('dapp-switch-text').innerText()).replace(/\s+/g, ' ')), 'a connected site asks before switching (Base to Ethereum)');
+  await sw1.scope.getByTestId('dapp-reject').click();
+  const sw1Out = await pendingResult(site);
+  check(sw1Out.error?.code === 4001, `rejecting the switch gives the page 4001 (${JSON.stringify(sw1Out.error)})`);
+  check((await call(site, 'eth_chainId')).result === '0x2105', 'after a rejected switch the site is still on Base');
+  const sw2 = await clickCall(site, 'wallet_switchEthereumChain', [{ chainId: '0x1' }]);
+  await sw2.scope.getByTestId('dapp-approve').click();
+  check((await pendingResult(site)).result === null, 'an approved switch to Ethereum resolves null');
   check((await call(site, 'eth_chainId')).result === '0x1', 'eth_chainId is now 0x1');
   await site.waitForTimeout(300);
   check((await site.evaluate(() => window.__events)).some(([e, c]) => e === 'chainChanged' && c === '0x1'), 'chainChanged(0x1) reached the page');
   check((await site.evaluate(() => window.ethereum.chainId)) === '0x1', 'provider.chainId follows the switch');
   const unknown = await call(site, 'wallet_switchEthereumChain', [{ chainId: '0x89' }]);
   check(unknown.error?.code === 4902, `an unsupported chain answers 4902 (${unknown.error?.code})`);
-  await call(site, 'wallet_switchEthereumChain', [{ chainId: '0x2105' }]);
+  const sw3 = await clickCall(site, 'wallet_switchEthereumChain', [{ chainId: '0x2105' }]);
+  await sw3.scope.getByTestId('dapp-approve').click();
+  await pendingResult(site);
   check((await call(site, 'eth_chainId')).result === '0x2105', 'back on Base');
 
   // --- 6. Reads ------------------------------------------------------------------
@@ -311,6 +322,18 @@ try {
   const txOut = await pendingResult(site);
   check(txOut.error?.code === 4001, `rejecting the transaction gives the page 4001 (${JSON.stringify(txOut.error)})`);
 
+  // An unlimited token approval is decoded and called out before Review.
+  const spender = '0x000000000000000000000000000000000000dEaD';
+  const approveData = `0x095ea7b3${spender.slice(2).toLowerCase().padStart(64, '0')}${'f'.repeat(64)}`;
+  const ap = await clickCall(site, 'eth_sendTransaction', [{ from: VECTOR_ADDRESS, to: SATORI_BASE, data: approveData }]);
+  const apWarn = ap.scope.getByTestId('dapp-allowance-warning');
+  await apWarn.waitFor({ timeout: 15_000 }).catch(() => undefined);
+  check((await apWarn.count()) === 1 && /UNLIMITED/.test(await apWarn.innerText()), 'an unlimited approve(spender) is decoded and flagged');
+  const apRows = (await ap.scope.getByTestId('dapp-call-row').allInnerTexts()).join(' | ');
+  check(/Unlimited/.test(apRows) && apRows.toLowerCase().includes(spender.slice(2).toLowerCase()), `approve rows show the spender and the amount (${apRows.slice(0, 120)})`);
+  await ap.scope.getByTestId('dapp-reject').click();
+  check((await pendingResult(site)).error?.code === 4001, 'rejecting the approve gives the page 4001');
+
   // --- 9. Connected sites -------------------------------------------------------
   await wallet.getByTestId('live-settings-btn').click();
   await wallet.getByTestId('live-settings-mode-expert').click({ timeout: 10_000 });
@@ -321,6 +344,11 @@ try {
   await wallet.getByTestId('live-site-disconnect-0').click();
   await wallet.getByTestId('live-sites-empty').waitFor({ timeout: 10_000 });
   check(JSON.stringify((await call(site, 'eth_accounts')).result) === '[]', 'after Disconnect, eth_accounts is [] again');
+  await site.waitForTimeout(500);
+  check(
+    (await site.evaluate(() => window.__events)).some(([e, a]) => e === 'accountsChanged' && Array.isArray(a) && a.length === 0),
+    'Disconnect in Settings sends accountsChanged([]) to the site',
+  );
 
   // --- 10. Default browser wallet ----------------------------------------------
   const other = await context.newPage();

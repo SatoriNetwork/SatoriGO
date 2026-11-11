@@ -1,5 +1,5 @@
 import { Suspense, lazy, useEffect, useMemo, useState } from 'react';
-import { KeyRound, Download, AlertTriangle, Fingerprint, Info, ShieldCheck } from 'lucide-react';
+import { KeyRound, Download, AlertTriangle, ChevronRight, Fingerprint, Info, ShieldCheck } from 'lucide-react';
 import { Button } from '../../components/Button';
 import { PasswordField, TextField } from '../../components/TextField';
 import { CopyButton } from '../../components/CopyButton';
@@ -1050,12 +1050,13 @@ function ImportForm({ onBack }: { onBack(): void }) {
           field exists, so the copy names the consequence rather than the
           feature. Hidden behind a disclosure so it cannot be mistaken for a
           required step by the overwhelming majority who do not have one. */}
-      <details style={{ marginBottom: 13 }}>
+      <details className="disclosure" style={{ marginBottom: 13 }}>
         <summary
           className="text-dim"
           style={{ fontSize: 11.5, cursor: 'pointer', padding: '2px 0' }}
           data-testid="live-import-passphrase-toggle"
         >
+          <ChevronRight size={13} className="disclosure-chev" aria-hidden />
           My phrase has a passphrase (25th word)
         </summary>
         <div style={{ marginTop: 8 }}>

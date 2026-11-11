@@ -176,7 +176,8 @@ interface RootRow {
  *  rows made the user read every one of them to find anything; the groups say
  *  where to start looking. */
 const SECTION_GROUPS: ReadonlyArray<{ title: string; sections: readonly RootRowId[] }> = [
-  { title: 'Wallet', sections: ['wallets', 'monero', 'addresses', 'addressBook', 'transactions'] },
+  // Monero last: it is one chain's own page, not part of managing the list.
+  { title: 'Wallet', sections: ['wallets', 'addresses', 'addressBook', 'transactions', 'monero'] },
   // 'moneroReveal' is a direct row (it opens the 25-word reveal, no sub-screen)
   // and only for an active Monero wallet: the words are the one backup a
   // Monero user goes looking for, so they are one tap from the root list.
@@ -748,48 +749,35 @@ export function LiveSettings({ onBack, onOpenAddressBook, onImportMonero }: Live
           {/* The account's identicon, the same mark it carries in the Home
               switcher and on the lock screen — so a row here is recognisable as
               the same wallet without reading the address under it. */}
-          <AccountAvatar address={w.address} seed={w.id} size={16} />
+          <AccountAvatar address={w.address} seed={w.id} size={26} />
           <span className="row-main" style={{ flex: 1, minWidth: 0 }}>
-            <span
-              className="row-title"
-              style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}
-            >
-              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {label}
+            {/* The NAME has its line to itself (1.6.2's rule, here since 1.6.3).
+                What used to be chips beside it is the quiet line under it, in
+                the same words: active, the kind, the password it opens with. */}
+            <span className="row-title" style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {label}
+            </span>
+            {/* Chain name from the chain params, never the raw internal chain
+                id ("mainnet"). An account of a seed names its ADDRESS instead:
+                its siblings share the chain, so the chain does not tell them
+                apart and the address does. The seed is named once, by the
+                group heading, so its accounts do not repeat the kind. */}
+            <span className="row-desc" style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {w.id === activeWalletId && <span style={{ color: 'var(--success)', fontWeight: 600 }}>{'active · '}</span>}
+              <span className={nested && w.address ? 'mono' : undefined}>
+                {nested && w.address ? shortAccountAddress(w.address) : chainDisplayName(w.network)}
               </span>
-              {w.id === activeWalletId && (
-                <span className="chip success" style={{ fontSize: 9, padding: '1px 5px' }}>active</span>
-              )}
-              {/* The seed is named once, by the group heading — repeating "Seed"
-                  on every account of it says nothing new. */}
-              {!nested && (
-                <span className="chip neutral" style={{ fontSize: 9, padding: '1px 5px' }}>
-                  {kindLabel(w)}
-                </span>
-              )}
-              {w.passwordless && (
-                <span className="chip warning" style={{ fontSize: 9, padding: '1px 5px' }}>No password</span>
-              )}
+              {!nested && ` · ${kindLabel(w)}`}
+              {w.passwordless && <span style={{ color: 'var(--warning)' }}>{' · No password'}</span>}
               {/* Which password opens it, once there is more than one answer.
                   After a migration some wallets open with the app password and
                   some still ask for their own; that state has to be readable
                   here, not discovered at a lock screen. */}
               {appPasswordSet && (
-                <span
-                  className="chip neutral"
-                  style={{ fontSize: 9, padding: '1px 5px' }}
-                  data-testid={`live-settings-wallet-pw-${w.id}`}
-                >
-                  {w.appProtected ? 'App password' : 'Own password'}
+                <span data-testid={`live-settings-wallet-pw-${w.id}`}>
+                  {` · ${w.appProtected ? 'App password' : 'Own password'}`}
                 </span>
               )}
-            </span>
-            {/* Chain name from the chain params — never the raw internal chain
-                id ("mainnet"). An account of a seed names its ADDRESS instead:
-                its siblings share the chain, so the chain does not tell them
-                apart and the address does. */}
-            <span className={nested && w.address ? 'row-desc mono' : 'row-desc'}>
-              {nested && w.address ? shortAccountAddress(w.address) : chainDisplayName(w.network)}
             </span>
           </span>
           <button
@@ -803,13 +791,13 @@ export function LiveSettings({ onBack, onOpenAddressBook, onImportMonero }: Live
           </button>
           <button
             type="button"
-            className="btn btn-ghost btn-sm danger"
+            className="icon-btn row-remove"
             onClick={() => setRemoveId(w.id)}
             aria-label={`Remove ${w.name}`}
+            title={`Remove ${w.name}`}
             data-testid={`live-wallet-remove-${w.id}`}
-            style={{ padding: '4px 8px', flexShrink: 0 }}
           >
-            <Trash2 size={13} /> Remove
+            <Trash2 size={14} />
           </button>
         </>
       )}
@@ -995,7 +983,7 @@ export function LiveSettings({ onBack, onOpenAddressBook, onImportMonero }: Live
       },
       monero: {
         testId: 'live-settings-row-monero',
-        icon: <Wallet size={17} />,
+        icon: <TokenIcon assetId="XMR" size={18} />,
         title: 'Monero',
         desc: isMoneroWallet
           ? 'Restore height, rescan, recovery words'
@@ -1122,7 +1110,7 @@ export function LiveSettings({ onBack, onOpenAddressBook, onImportMonero }: Live
     };
 
     return (
-      <Shell title="Settings" onBack={onBack} testId="live-settings" modals={modals} showSync={false} scrollKey="root">
+      <Shell title="Settings" onBack={onBack} testId="live-settings" modals={modals} scrollKey="root">
         {/* Mode switch first: it explains why the list below is short. */}
         <div className="field" style={{ marginBottom: 12 }}>
           {/* The connection pill rides on this label's row rather than a row of
@@ -1130,10 +1118,10 @@ export function LiveSettings({ onBack, onOpenAddressBook, onImportMonero }: Live
               longer a screen where the wallet can silently go offline
               (KNOWN_LIMITATIONS item 33); same pill, same derivation as the
               Activity tab. */}
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-            <label>Detail level</label>
-            <SyncStatusPill />
-          </div>
+          {/* The connection state is the dot in this screen's header, as on
+              every other sub-screen (it was a labelled pill here until 1.6.4). */}
+          <div className="settings-mode-row">
+          <label>Detail level</label>
           <Segmented<SettingsMode>
             options={[
               { value: 'basic', label: 'Basic' },
@@ -1143,6 +1131,7 @@ export function LiveSettings({ onBack, onOpenAddressBook, onImportMonero }: Live
             onChange={setSettingsMode}
             testIdPrefix="live-settings-mode"
           />
+          </div>
           <span className="text-faint" style={{ fontSize: 10, display: 'block', marginTop: 6 }}>
             {settingsMode === 'basic'
               ? 'Everyday settings only. Expert adds servers, addresses, connected sites, export and diagnostics.'

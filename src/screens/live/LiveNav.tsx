@@ -104,8 +104,11 @@ export function LiveNav() {
                 aria-label={`${unreadActivity} new`}
                 style={{
                   position: 'absolute',
-                  top: -5,
-                  right: -8,
+                  /* Beside the icon's corner, not over its face (1.6.6): "9+"
+                     used to cover half the clock. */
+                  top: -6,
+                  left: '100%',
+                  marginLeft: -6,
                   minWidth: 15,
                   height: 15,
                   padding: '0 3px',
@@ -136,9 +139,8 @@ export function LiveNav() {
           <Settings size={19} />
           Settings
         </button>
-        {/* Satori Network. Last in the row, unlabelled, and larger than the icon tabs:
-            the mark IS the label, and it earns the extra weight for being the Satori
-            entry point. */}
+        {/* Satori Network. Last in the row and labelled like its neighbours since
+            1.6.4: a bare mark did not say it was a tab or where it led. */}
         <button
           type="button"
           role="tab"
@@ -149,7 +151,8 @@ export function LiveNav() {
           aria-label="Satori Network"
           title="Satori Network"
         >
-          <BrandLogo slot="satori" size={30} alt="" />
+          <BrandLogo slot="satori" size={19} alt="" />
+          Satori
         </button>
       </nav>
     </>

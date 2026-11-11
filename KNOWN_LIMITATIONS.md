@@ -1,6 +1,6 @@
 # Known limitations
 
-Current, honest limitations of the wallet (v1.6.0).
+Current, honest limitations of the wallet (v1.7.0).
 
 Satori GO is a non-custodial multi-chain wallet. Eight coin networks and four
 EVM networks ship in this version, and every one of them has had a funded send
@@ -398,15 +398,17 @@ confirmed by the owner on mainnet (item 7). Nothing below is marketing.
     receive keep working. There are no desktop notifications for incoming TAO.
 
 42. **window.ethereum is new and has had no funded test on mainnet yet.**
-    A transaction a site requests is simulated before it can be confirmed, but the
-    wallet cannot tell what a contract call does: the approval shows the
+    A transaction a site requests is simulated before it can be confirmed. The
+    approval names the ordinary token calls (a transfer, an allowance, an
+    approval for a whole collection) and warns when an allowance is unlimited.
+    For any other contract call the wallet cannot tell what it does: it shows the
     recipient, the amount, the size of the calldata and its first four bytes, not
     a decoded description. Typed data is shown as raw JSON with a warning when it
-    looks like a token permit. A chain switch reaches only the tab that asked
-    (other open tabs of the same site learn it on their next request), and
-    turning Default browser wallet on or off applies when a page is reloaded.
-    `eth_sign`, contract deployment and adding networks the wallet does not know
-    are refused.
+    looks like a token permit. A site you have connected gets the same account
+    again without a new approval window; to give it a different account,
+    disconnect it in Settings > Connected sites first. Turning Default browser
+    wallet on or off applies when a page is reloaded. `eth_sign`, contract
+    deployment and adding networks the wallet does not know are refused.
 
 Real P2SH output support, taproot key ownership, inscription and BGC-20
 awareness, gap-limit address discovery, BIP39 passphrases at wallet creation,

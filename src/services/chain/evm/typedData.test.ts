@@ -104,4 +104,75 @@ describe('EIP-712 typed data', () => {
     });
     expect(() => typedDataDigest(t)).toThrow(/out of range/);
   });
+
+  // Digests below were computed independently with ethers 6.13.4
+  // (TypedDataEncoder.hash), not with this module.
+  const vDomain = { name: 'Vectors', chainId: 8453, verifyingContract: '0x1111111111111111111111111111111111111111' };
+
+  it('matches ethers on arrays: dynamic, fixed and nested arrays with negative ints', () => {
+    const t = parseTypedData({
+      types: { Order: [{ name: 'ids', type: 'uint256[]' }, { name: 'tags', type: 'string[2]' }, { name: 'grid', type: 'int8[][]' }] },
+      primaryType: 'Order',
+      domain: vDomain,
+      message: { ids: ['1', '2', '300'], tags: ['a', 'b'], grid: [[-1, 2], [-128]] },
+    });
+    expect(hex(typedDataDigest(t))).toBe('0x53853de4243c704c35d77d495f6ddf26d9f092889f0865b7d73e9732206373c6');
+  });
+
+  it('matches ethers on nested struct arrays, bytes and bytesN', () => {
+    const t = parseTypedData({
+      types: {
+        Leg: [{ name: 'who', type: 'address' }, { name: 'amt', type: 'int256' }],
+        Trade: [{ name: 'legs', type: 'Leg[]' }, { name: 'memo', type: 'bytes' }, { name: 'ref', type: 'bytes4' }],
+      },
+      primaryType: 'Trade',
+      domain: vDomain,
+      message: {
+        legs: [
+          { who: '0x2222222222222222222222222222222222222222', amt: '-5' },
+          { who: '0x3333333333333333333333333333333333333333', amt: '7' },
+        ],
+        memo: '0xdeadbeef00',
+        ref: '0x01020304',
+      },
+    });
+    expect(encodeType('Trade', t.types)).toBe('Trade(Leg[] legs,bytes memo,bytes4 ref)Leg(address who,int256 amt)');
+    expect(hex(typedDataDigest(t))).toBe('0xfda256b1ecb033d32253ae48bea205be264ecda97fd0bde7549bd4aed175a085');
+  });
+
+  it('finds a struct dependency behind a multi-dimensional array', () => {
+    const types = { Cell: [{ name: 'v', type: 'uint8' }], Board: [{ name: 'cells', type: 'Cell[][]' }] };
+    expect(encodeType('Board', types)).toBe('Board(Cell[][] cells)Cell(uint8 v)');
+  });
+
+  it('matches ethers on a domain with only some fields', () => {
+    const t = parseTypedData({ types: { Ping: [{ name: 'n', type: 'uint8' }] }, primaryType: 'Ping', domain: { name: 'Only', version: '2' }, message: { n: 1 } });
+    expect(hex(typedDataDigest(t))).toBe('0xad64c1292999e5330ec1ff0b40bf84f517a95037aa81ef28dc6fd09481411cce');
+  });
+
+  it('refuses an EIP712Domain that does not describe the domain shown', () => {
+    const lessListed = { ...mail, types: { ...mail.types, EIP712Domain: mail.types.EIP712Domain.slice(0, 2) } };
+    expect(() => parseTypedData(lessListed)).toThrow(/does not match/);
+    const moreListed = { ...mail, domain: { name: 'Ether Mail', version: '1', chainId: 1 } };
+    expect(() => parseTypedData(moreListed)).toThrow(/does not match/);
+    const wrongType = {
+      ...mail,
+      types: { ...mail.types, EIP712Domain: [...mail.types.EIP712Domain.slice(0, 3), { name: 'verifyingContract', type: 'string' }] },
+    };
+    expect(() => parseTypedData(wrongType)).toThrow(/does not match/);
+    expect(() => parseTypedData({ ...mail, domain: { ...mail.domain, extra: 'x' } })).toThrow(/unknown field/);
+  });
+
+  it('refuses message values that have no field in the type', () => {
+    const t = parseTypedData({ ...mail, message: { ...mail.message, note: 'not signed' } });
+    expect(() => typedDataDigest(t)).toThrow(/not part of type Mail/);
+    const nested = parseTypedData({ ...mail, message: { ...mail.message, to: { ...mail.message.to, extra: 1 } } });
+    expect(() => typedDataDigest(nested)).toThrow(/not part of type Person/);
+  });
+
+  it('is not fooled by inherited object properties', () => {
+    const t = parseTypedData({ types: { Thing: [{ name: 'toString', type: 'string' }] }, primaryType: 'Thing', domain: { name: 'x' }, message: {} });
+    expect(() => typedDataDigest(t)).toThrow(/missing/);
+    expect(() => parseTypedData({ types: {}, primaryType: 'constructor', domain: { name: 'x' }, message: {} })).toThrow(/not defined/);
+  });
 });

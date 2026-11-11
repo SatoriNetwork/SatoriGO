@@ -27,6 +27,9 @@ import { formatAmount } from '../../services/chain/amounts';
 import { displaySymbol } from '../../services/displaySymbol';
 import { shortAccountAddress, filterAccountsForChain } from './walletGroups';
 import { LiveNav } from './LiveNav';
+import { SyncStatusPill } from '../../components/SyncStatusPill';
+import { useAssetFiat, typedAmountFiat } from './useFiat';
+import { formatFiatValue } from '../../services/fiat';
 import { ContactsPicker, MyWalletsPicker, SaveContactPanel } from './RecipientPickers';
 
 interface LiveSendEvmProps {
@@ -90,6 +93,11 @@ export function LiveSendEvm({ onBack, onDone, asset }: LiveSendEvmProps) {
   // --- form state --------------------------------------------------------
   const [to, setTo] = useState('');
   const [amountText, setAmountText] = useState('');
+  // The asset's unit price, read up here with the other hooks (the form below
+  // sits after early returns). Native = no asset given, or the chain's coin.
+  const fiatChainTicker = useLiveStore((st) => activeEvmChain(st)?.nativeTicker ?? '');
+  const fiatIsNative = !asset || asset.toUpperCase() === fiatChainTicker.toUpperCase();
+  const assetUnitFiat = useAssetFiat(fiatIsNative ? fiatChainTicker : (asset ?? ''), fiatIsNative).unit;
   const [level, setLevel] = useState<FeeLevel>('normal');
   const [fieldError, setFieldError] = useState('');
   const [maxLoading, setMaxLoading] = useState(false);
@@ -526,6 +534,8 @@ export function LiveSendEvm({ onBack, onDone, asset }: LiveSendEvmProps) {
     ? knownTokens.find((t) => t.symbol?.toUpperCase() === assetUpper) ?? null
     : null;
   const unknownAsset = !isNativeAsset && !token;
+  // What the typed amount is worth, when the feed prices this asset.
+  const amountFiat = typedAmountFiat(amountText, assetUnitFiat);
   const assetId: string | null = isNativeAsset ? chain.nativeTicker : token ? token.address : null;
   const assetSymbol = isNativeAsset ? chain.nativeTicker : (token?.symbol ?? assetUpper ?? '');
   // `assetSymbol` is the IDENTITY (it matches a balance row and keys the trust
@@ -599,7 +609,8 @@ export function LiveSendEvm({ onBack, onDone, asset }: LiveSendEvmProps) {
           <ChevronLeft size={20} />
         </button>
         <h2>Send {shownSymbol} on {chain.displayName}</h2>
-        <span />
+        {/* The same dot every other sub-screen carries (1.6.6). */}
+        <SyncStatusPill compact />
       </div>
       <div className="app-content send-pinned">
         <form onSubmit={(e) => { void handleReview(e); }}>
@@ -649,12 +660,15 @@ export function LiveSendEvm({ onBack, onDone, asset }: LiveSendEvmProps) {
               }
             />
 
-            <div
-              className="text-dim"
-              data-testid="live-send-available"
-              style={{ fontSize: 11.5, margin: '6px 2px 8px' }}
-            >
-              Available: {formatAmount(availableBase, availableDecimals, { grouping: true })} {shownSymbol}
+            <div className="send-amount-meta">
+              <span className="text-dim" data-testid="live-send-available">
+                Available: {formatAmount(availableBase, availableDecimals, { grouping: true })} {shownSymbol}
+              </span>
+              {amountFiat && (
+                <span className="text-dim" data-testid="live-send-fiat" style={{ fontVariantNumeric: 'tabular-nums' }}>
+                  {formatFiatValue(amountFiat)}
+                </span>
+              )}
             </div>
 
             <div style={{ display: 'flex', gap: 6, marginBottom: 4 }}>
@@ -677,16 +691,19 @@ export function LiveSendEvm({ onBack, onDone, asset }: LiveSendEvmProps) {
                 onClick={() => { void fillMax(); }}
                 disabled={maxLoading}
                 aria-busy={maxLoading}
+                // What Max does with the fee is said where Max is, on demand,
+                // instead of as two lines of standing text under the buttons.
+                title={
+                  isNativeAsset
+                    ? 'Max leaves the maximum fee aside, plus a small margin for the fee market moving before you confirm.'
+                    : undefined
+                }
                 style={{ flex: 1, justifyContent: 'center', cursor: 'pointer' }}
               >
                 {maxLoading ? '…' : 'Max'}
               </button>
             </div>
-            {isNativeAsset && (
-              <p className="text-faint" style={{ fontSize: 10, margin: '0 2px 10px' }}>
-                Max leaves the maximum fee aside, plus a small margin for the fee market moving before you confirm.
-              </p>
-            )}
+            <div style={{ height: 10 }} />
 
             <div className="section-label">Network fee</div>
             <div className="card" data-testid="live-fee-section" style={{ marginBottom: 10, padding: 12 }}>

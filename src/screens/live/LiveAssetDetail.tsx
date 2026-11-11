@@ -18,6 +18,9 @@ import { displaySymbol } from '../../services/displaySymbol';
 import { ACTIVITY_PER_PAGE, paginate } from '../../services/activityFeed';
 import type { LiveAssetBalance, LiveTransaction } from '../../services/chain/electrumProvider';
 import { LiveNav } from './LiveNav';
+import { useAssetFiat } from './useFiat';
+import { formatFiatValue } from '../../services/fiat';
+import { amountToNumber } from '../../services/chain/amounts';
 import { stakingRowLabel } from './stakingRowLabel';
 
 interface LiveAssetDetailProps {
@@ -181,6 +184,9 @@ export function LiveAssetDetail({ asset, onBack, onReceive, onSend, onSelectTx, 
     [txs, assetName],
   );
   const [page, setPage] = useState(1);
+  // Price, value and 24h move, under the Home list's own pricing rule.
+  const { unit: unitFiat, change24h } = useAssetFiat(asset.name, asset.isNative);
+  const change = change24h == null ? null : Math.round(change24h * 10) / 10;
   const pageOfTxs = useMemo(() => paginate(assetTxs, page, ACTIVITY_PER_PAGE), [assetTxs, page]);
 
   const handleRemove = () => {
@@ -219,11 +225,11 @@ export function LiveAssetDetail({ asset, onBack, onReceive, onSend, onSelectTx, 
             display: 'flex',
             flexDirection: 'column',
             alignItems: 'center',
-            gap: 8,
-            padding: '10px 0 18px',
+            gap: 5,
+            padding: '2px 0 12px',
           }}
         >
-          <TokenIcon assetId={asset.name} size={56} />
+          <TokenIcon assetId={asset.name} size={40} />
           {/* Title may wrap (a long asset name breaks onto lines instead of
               overflowing the centered header); the Staked chip stays on its own row. */}
           <div
@@ -319,6 +325,24 @@ export function LiveAssetDetail({ asset, onBack, onReceive, onSend, onSelectTx, 
               {shownName}
             </span>
           </div>
+          {/* What it is worth, the unit price and the 24h move: the same three
+              facts its row on Home shows, which this screen used to drop. */}
+          {unitFiat && (
+            <div className="text-dim" data-testid="live-asset-detail-fiat" style={{ fontSize: 12.5, fontVariantNumeric: 'tabular-nums', textAlign: 'center' }}>
+              <span style={{ fontWeight: 600, color: 'var(--text)' }}>
+                {formatFiatValue({ value: amountToNumber(asset.amountBase, asset.scale) * unitFiat.value, currency: unitFiat.currency })}
+              </span>
+              {` · ${formatFiatValue(unitFiat)} each`}
+              {change != null && (
+                <span
+                  data-testid="live-asset-detail-change"
+                  style={{ color: change < 0 ? 'var(--danger)' : change > 0 ? 'var(--success)' : undefined }}
+                >
+                  {` · ${change > 0 ? '+' : ''}${change.toFixed(1)}% 24h`}
+                </span>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Primary actions */}

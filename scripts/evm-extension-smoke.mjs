@@ -341,9 +341,10 @@ try {
   });
   check(
     Boolean(header.chain && header.wallet && header.actions) &&
-      header.chain.right <= header.wallet.left &&
-      header.wallet.right <= header.actions.left,
-    `header at 400px: network | wallet | actions do not intersect (chain ${header.chain?.right}, wallet ${header.wallet?.left}-${header.wallet?.right}, actions ${header.actions?.left})`,
+      header.chain.right <= header.actions.left &&
+      header.wallet.top >= header.chain.bottom - 1 &&
+      header.wallet.top >= header.actions.bottom - 1,
+    `header at 400px: network and actions share row 1, the wallet has row 2 to itself (chain ends ${header.chain?.right}, actions start ${header.actions?.left}, wallet top ${header.wallet?.top} under ${header.chain?.bottom})`,
   );
   check(/0x/.test(header.walletText), `wallet switcher names the account and its address: "${header.walletText}"`);
   check(
@@ -661,7 +662,7 @@ try {
     .innerText()
     .catch(() => '');
   check(
-    /Seed/i.test(groupHeading),
+    groupHeading.trim().length > 0 && !/Seed/.test(groupHeading),
     `switcher groups the accounts under their seed: ${groupHeading.replace(/\n/g, ' ').slice(0, 60)}`,
   );
   await byId('live-add-account').click();
@@ -696,6 +697,7 @@ try {
   const activeRow = page.locator('button[data-testid^="live-wallet-item-"]').filter({ hasText: accountName.split('\n')[0].trim() }).first();
   const activeRowId = await activeRow.getAttribute('data-testid');
   const activeRowIndex = activeRowId ? activeRowId.replace('live-wallet-item-', '') : '';
+  await byId(`live-wallet-more-${activeRowIndex}`).click();
   await byId(`live-wallet-rename-${activeRowIndex}`).click();
   await byId(`live-wallet-rename-input-${activeRowIndex}`).fill('Trading');
   await byId(`live-wallet-rename-input-${activeRowIndex}`).press('Enter');
@@ -945,7 +947,9 @@ try {
     return rows;
   });
   const overlapping = rowGeometry.filter(
-    (r) => (r.usd && r.usd.left < r.bal.right - 0.5) || (r.chg && r.usd && r.chg.left < r.usd.right - 0.5) || (r.chg && r.chg.left < r.bal.right - 0.5),
+    // 1.6.2: the 24h chip sits under the NAME (left column), the fiat value
+    // under the AMOUNT (right column). The chip must end before either number.
+    (r) => r.chg && (r.chg.right > r.bal.left + 0.5 || (r.usd && r.chg.right > r.usd.left + 0.5)),
   );
   epixCheck(
     rowGeometry.length > 0 && overlapping.length === 0,
@@ -1526,7 +1530,7 @@ try {
     `note: side-panel density at 420x900 -> row ${panelDensity.rowH}px (pitch ${panelDensity.pitch}px, mark ${panelDensity.mark}px), symbol ${panelDensity.symbol}px, amount ${panelDensity.amount}px, fiat ${panelDensity.fiat}px, hero ${panelDensity.hero}px, body ${panelDensity.body}px`,
   );
   check(
-    panelDensity.body === 14 && panelDensity.symbol === 13 && panelDensity.amount === 13 && panelDensity.mark === 26,
+    panelDensity.body === 14 && panelDensity.symbol === 14 && panelDensity.amount === 14 && panelDensity.mark === 32,
     `the side panel keeps the ROOMY scale (body ${panelDensity.body}px, symbol ${panelDensity.symbol}px, amount ${panelDensity.amount}px, mark ${panelDensity.mark}px)`,
   );
   check(
@@ -1857,10 +1861,9 @@ try {
     !!layout.heroValueFont && layout.heroValueFont >= 18 && layout.heroValueFont >= loudest.font + 4,
     `the hero balance is still clearly the largest thing on the screen (${layout.heroValueFont}px vs ${loudest.font}px for "${loudest.sample}")`,
   );
-  check(
-    !!layout.heroMark && layout.heroMark.h >= 32,
-    `the coin mark is still the coin mark (${layout.heroMark?.h}px)`,
-  );
+  // 1.6.3: on a chain with an asset list the coin is the list's first row, so
+  // the hero carries no second copy of its mark.
+  check(!layout.heroMark, `no coin mark over the hero on a chain with an asset list (${layout.heroMark ? layout.heroMark.h + 'px' : 'none'})`);
   // The legibility floor the density was bought against: nothing the density
   // pass touched goes under 10px. Owner's rule, and the reason the list stops
   // where it does rather than squeezing a seventh row out of the type.
@@ -1889,16 +1892,17 @@ try {
     })`,
   );
   const collide = layout.rowParts.flatMap((r) => {
-    const lane = [r.symbol, r.amount, r.fiat, r.chip].filter(Boolean);
+    // 1.6.2: two lines. Line 1 is the name then the amount; line 2 is the 24h
+    // chip (under the name) then the fiat value (under the amount).
     const bad = [];
-    for (let i = 1; i < lane.length; i++) {
-      if (lane[i].left < lane[i - 1].right - 0.5) bad.push(`${r.name}[${i}]`);
-    }
+    if (r.symbol && r.amount && r.amount.left < r.symbol.right - 0.5) bad.push(`${r.name}[name/amount]`);
+    if (r.chip && r.fiat && r.fiat.left < r.chip.right - 0.5) bad.push(`${r.name}[chip/fiat]`);
+    if (r.chip && r.amount && r.amount.left < r.chip.right - 0.5) bad.push(`${r.name}[chip/amount]`);
     return bad;
   });
   check(
     collide.length === 0,
-    `symbol, amount, fiat and 24h chip keep to one line without overlapping${collide.length ? ` (overlaps: ${collide.join(', ')})` : ''}`,
+    `name and amount, and the 24h chip and fiat value under them, do not overlap${collide.length ? ` (overlaps: ${collide.join(', ')})` : ''}`,
   );
   check(
     layout.panelOverflows === false,
@@ -2350,7 +2354,9 @@ try {
       const q = (s) => document.querySelector(s);
       const panel = q('[data-testid="live-tab-panel-assets"]');
       const status = q('[data-testid="live-home-status"]');
-      const mark = q('[data-testid="live-hero-mark"]');
+      // 1.6.3: no coin mark over the hero on a chain with an asset list, so the
+      // hero block itself is what is measured.
+      const mark = q('.hero');
       const banner = q('[data-testid="live-notification"]');
       const counter = q('[data-testid="live-notification-count"]');
       if (!panel || !status || !mark) return null;
@@ -2960,7 +2966,9 @@ try {
       const status = q('[data-testid="live-home-status"]');
       const hero = q('.home-hero-wrap');
       const scroll = q('.home-scroll');
-      const mark = q('[data-testid="live-hero-mark"]');
+      // 1.6.3: no coin mark over the hero on a chain with an asset list, so the
+      // hero block itself is what is measured.
+      const mark = q('.hero');
       const banner = q('[data-testid="live-notification"]');
       if (!panel || !status || !hero || !scroll || !mark) return null;
       const cs = getComputedStyle(panel);

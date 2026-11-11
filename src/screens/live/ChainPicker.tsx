@@ -13,6 +13,7 @@
 // or omitted in a build without the EVM engine), not a store read, so this stays
 // exactly as store-free as before.
 
+import { useLayoutEffect, useRef, useState } from 'react';
 import { Info } from 'lucide-react';
 import { Segmented, type SegmentedOption } from '../../components/Segmented';
 import { TokenIcon } from '../../components/BrandLogo';
@@ -165,6 +166,9 @@ function chainIdOf(value: UtxoChainChoice): string {
   return CHAIN_OPTIONS_BY_VALUE[value];
 }
 
+/** From this many chains on, the picker is a scrolling box with a filter. */
+const LONG_LIST = 6;
+
 export interface ChainPickerProps {
   /** Chains hidden in expert Settings: canonical UTXO chainIds and `evm:<key>`
    *  targets. Passed in rather than read from the store so this component
@@ -215,16 +219,51 @@ export function ChainPicker({
           (isEvmChainTarget(o.value) ? !hidden.includes(o.value) : !hidden.includes(chainIdOf(o.value as UtxoChainChoice))),
       )
     : allOptions;
+  // A LONG list is a short box that scrolls, with a filter over it (1.6.7): the
+  // grid of every chain had grown to a whole screen and pushed the recovery
+  // phrase field out of sight. Every option is still a button in the page (a
+  // filter only narrows them, and never hides the selected one), so nothing
+  // about choosing a chain changed, only how much room the list takes.
+  const long = options.length > LONG_LIST;
+  const [query, setQuery] = useState('');
+  const q = query.trim().toLowerCase();
+  const shown = long && q ? options.filter((o) => o.value === value || o.label.toLowerCase().includes(q)) : options;
+  const boxRef = useRef<HTMLDivElement>(null);
+  // Bring the selected chain into the box's view, without moving the page.
+  useLayoutEffect(() => {
+    const box = boxRef.current;
+    const sel = box?.querySelector<HTMLElement>('button[aria-pressed="true"]');
+    if (!box || !sel) return;
+    const top = sel.offsetTop - box.offsetTop;
+    if (top < box.scrollTop || top + sel.offsetHeight > box.scrollTop + box.clientHeight) {
+      box.scrollTop = Math.max(0, top - sel.offsetHeight);
+    }
+  }, [value, long]);
   return (
     <div className="field" style={{ marginBottom: 13 }}>
       <label>Chain</label>
-      <Segmented<ChainChoice>
-        options={options}
-        value={value}
-        onChange={onChange}
-        testIdPrefix={testIdPrefix}
-        wrap
-      />
+      {long && (
+        <input
+          type="text"
+          className="chain-pick-filter"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search network"
+          aria-label="Search networks"
+          data-testid={`filter-${testIdPrefix}`}
+          autoComplete="off"
+          spellCheck={false}
+        />
+      )}
+      <div ref={boxRef} className={long ? 'chain-pick-box' : undefined}>
+        <Segmented<ChainChoice>
+          options={shown}
+          value={value}
+          onChange={onChange}
+          testIdPrefix={testIdPrefix}
+          wrap
+        />
+      </div>
       {value === 'ravencoin-mainnet' && (
         <div
           className="banner info"
