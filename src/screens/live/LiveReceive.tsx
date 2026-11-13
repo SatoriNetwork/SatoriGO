@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { QRCodeView } from '../../components/QRCodeView';
 import { SyncStatusPill } from '../../components/SyncStatusPill';
 import { CopyButton } from '../../components/CopyButton';
@@ -26,7 +26,9 @@ function shortAddr(address: string): string {
 
 export function LiveReceive({ onBack }: LiveReceiveProps) {
   const address = useLiveStore((s) => s.address);
-  const addresses = useLiveStore((s) => s.addresses);
+  // Change-chain addresses are counted and spendable but never offered here.
+  const allAddresses = useLiveStore((s) => s.addresses);
+  const addresses = useMemo(() => allAddresses.filter((a) => !a.change), [allAddresses]);
   const wallets = useLiveStore((s) => s.wallets);
   const activeWalletId = useLiveStore((s) => s.activeWalletId);
   const addReceiveAddress = useLiveStore((s) => s.addReceiveAddress);

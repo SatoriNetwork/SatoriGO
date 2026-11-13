@@ -18,6 +18,7 @@ export type LogoSlot =
   | 'doge'
   | 'neox'
   | 'btcb2'
+  | 'xfer'
   | 'xmr'
   | 'zec'
   | 'tao'

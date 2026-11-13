@@ -103,6 +103,9 @@ function scanResult(over: Partial<{
   highestUsedIndex: number;
   addressCountBefore: number;
   addressCountAfter: number;
+  changeCountBefore: number;
+  changeCountAfter: number;
+  changeScanned: number;
   failedReads: number;
   complete: boolean;
 }>) {
@@ -111,6 +114,9 @@ function scanResult(over: Partial<{
     highestUsedIndex: -1,
     addressCountBefore: 1,
     addressCountAfter: 1,
+    changeCountBefore: 0,
+    changeCountAfter: 0,
+    changeScanned: 20,
     failedReads: 0,
     complete: true,
     ...over,

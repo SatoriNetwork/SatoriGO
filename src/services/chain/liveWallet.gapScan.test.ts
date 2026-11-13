@@ -38,6 +38,10 @@ const VECTOR_MNEMONIC =
  *  scripthash, so this is how a scripted answer finds its index. */
 const addressByIndex: string[] = [];
 const indexByScripthash = new Map<string, number>();
+/** The same for the CHANGE chain (m/44'/coin'/0'/1/i), which the scan walks
+ *  after the receive chain. */
+const changeAddressByIndex: string[] = [];
+const changeIndexByScripthash = new Map<string, number>();
 
 beforeAll(async () => {
   const seed = await mnemonicToSeed(VECTOR_MNEMONIC);
@@ -45,6 +49,9 @@ beforeAll(async () => {
     const { address } = deriveAddress(seed, EVRMORE_MAINNET, 0, 0, i);
     addressByIndex.push(address);
     indexByScripthash.set(addressToElectrumScripthash(address), i);
+    const change = deriveAddress(seed, EVRMORE_MAINNET, 0, 1, i).address;
+    changeAddressByIndex.push(change);
+    changeIndexByScripthash.set(addressToElectrumScripthash(change), i);
   }
 });
 
@@ -62,20 +69,27 @@ type Answer = 'used' | 'empty' | 'fail' | 'too-large';
 
 /** An ElectrumClient that ONLY serves get_history, per the script, and records
  *  every index it was asked about (so a test can prove what was NOT asked). */
-function scanClient(answer: (index: number) => Answer): ElectrumClient & { asked: number[] } {
+function scanClient(
+  answer: (index: number) => Answer,
+  changeAnswer: (index: number) => Answer = () => 'empty',
+): ElectrumClient & { asked: number[]; askedChange: number[] } {
   const asked: number[] = [];
+  const askedChange: number[] = [];
   return {
     asked,
+    askedChange,
     connect: async () => {},
     isConnected: () => true,
     endpoint: () => 'wss://fake',
     close: () => {},
     request: async (method: string, params: unknown[] = []) => {
       if (method !== ELECTRUM_METHODS.getHistory) throw new Error(`unexpected method ${method}`);
-      const index = indexByScripthash.get(params[0] as string);
+      const changeIndex = changeIndexByScripthash.get(params[0] as string);
+      const index = changeIndex ?? indexByScripthash.get(params[0] as string);
       if (index === undefined) throw new Error('scripthash outside the scanned range');
-      asked.push(index);
-      switch (answer(index)) {
+      if (changeIndex !== undefined) askedChange.push(index);
+      else asked.push(index);
+      switch (changeIndex !== undefined ? changeAnswer(index) : answer(index)) {
         case 'used':
           return [{ tx_hash: 'a'.repeat(64), height: 1 }] as never;
         case 'empty':
@@ -295,8 +309,78 @@ describe('discoverUsedAddresses — safety', () => {
 
     const res = await svc.discoverUsedAddresses({ onProgress: (p) => seen.push({ ...p }) });
 
-    expect(seen.length).toBe(res.scanned);
+    // One report per index on BOTH chains; the counter runs across them.
+    expect(seen.length).toBe(res.scanned + res.changeScanned);
     expect(seen[0]).toEqual({ scanned: 1, highestUsedIndex: 0 });
-    expect(seen[seen.length - 1].scanned).toBe(res.scanned);
+    expect(seen[seen.length - 1].scanned).toBe(res.scanned + res.changeScanned);
+  });
+});
+
+describe('discoverUsedAddresses — the CHANGE chain (a seed used in a Core-style wallet)', () => {
+  it('finds used change addresses and lists them after the receive ones, marked', async () => {
+    // Another wallet of this phrase paid from index 0 and left change on
+    // internal addresses 0 and 2 (1 was skipped by a failed send).
+    const client = scanClient(
+      (i) => (i === 0 ? 'used' : 'empty'),
+      (i) => (i === 0 || i === 2 ? 'used' : 'empty'),
+    );
+    const svc = await importedWallet(client);
+
+    const res = await svc.discoverUsedAddresses();
+
+    expect(res.addressCountAfter).toBe(1);
+    expect(res.changeCountBefore).toBe(0);
+    expect(res.changeCountAfter).toBe(3);
+    expect(res.changeScanned).toBe(3 + GAP_LIMIT);
+    expect(res.complete).toBe(true);
+
+    const list = await svc.listAddresses();
+    expect(list).toEqual([
+      { index: 0, address: addressByIndex[0] },
+      { index: 0, address: changeAddressByIndex[0], change: true },
+      { index: 1, address: changeAddressByIndex[1], change: true },
+      { index: 2, address: changeAddressByIndex[2], change: true },
+    ]);
+    // Receiving never moves: the primary address is still receive index 0.
+    expect(svc.getAddress(0)).toBe(addressByIndex[0]);
+
+    // Persisted, like the receive count.
+    const again = new LiveWalletService(scanClient(() => 'empty'));
+    await again.unlock('pw');
+    expect((await again.listAddresses()).filter((a) => a.change).length).toBe(3);
+  });
+
+  it('leaves a wallet that was only ever used here with no change addresses', async () => {
+    const client = scanClient((i) => (i === 0 ? 'used' : 'empty'));
+    const svc = await importedWallet(client);
+    const res = await svc.discoverUsedAddresses();
+    expect(res.changeCountAfter).toBe(0);
+    expect(res.changeScanned).toBe(GAP_LIMIT);
+    expect((await svc.listAddresses()).some((a) => a.change)).toBe(false);
+  });
+
+  it('never lowers a change count already found, and reports a failed change read as incomplete', async () => {
+    const first = scanClient(() => 'empty', (i) => (i === 4 ? 'used' : 'empty'));
+    const svc = await importedWallet(first);
+    expect((await svc.discoverUsedAddresses()).changeCountAfter).toBe(5);
+
+    // Second run: the server now fails on a change index. Nothing is lowered,
+    // and the answer is flagged as a lower bound.
+    const second = new LiveWalletService(scanClient(() => 'empty', (i) => (i === 1 ? 'fail' : 'empty')));
+    await second.unlock('pw');
+    const res = await second.discoverUsedAddresses();
+    expect(res.changeCountBefore).toBe(5);
+    expect(res.changeCountAfter).toBe(5);
+    expect(res.failedReads).toBe(1);
+    expect(res.complete).toBe(false);
+  });
+
+  it('skips the change chain when the receive scan lost its connection', async () => {
+    const client = scanClient(() => 'fail');
+    const svc = await importedWallet(client);
+    const res = await svc.discoverUsedAddresses();
+    expect(res.changeScanned).toBe(0);
+    expect(client.askedChange).toEqual([]);
+    expect(res.complete).toBe(false);
   });
 });

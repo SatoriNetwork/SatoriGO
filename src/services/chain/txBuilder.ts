@@ -430,6 +430,18 @@ export function isP2wpkhScript(script: Uint8Array): boolean {
  * trailer, which the legacy sighash substitutes wholesale, so "not plain P2PKH"
  * must not be treated as "unknown/unspendable".
  */
+/**
+ * True for a pay-to-pubkey scriptPubKey: <push 33|65> <pubkey> OP_CHECKSIG.
+ * Spent with the legacy sighash over this very script, and a scriptSig that
+ * carries the signature ALONE (the key is already in the output).
+ */
+export function isP2pkScript(script: Uint8Array): boolean {
+  return (
+    (script.length === 35 && script[0] === 0x21 && script[34] === 0xac) ||
+    (script.length === 67 && script[0] === 0x41 && script[66] === 0xac)
+  );
+}
+
 export function spendKindOf(scriptPubKeyHex: string): InputSpendKind {
   return isP2wpkhScript(hexToBytes(scriptPubKeyHex)) ? 'p2wpkh' : 'p2pkh';
 }
@@ -974,6 +986,15 @@ function signAllInputs(tx: Tx, utxos: SignableUtxo[], scheme: SighashScheme = 'l
     }
 
     const sighash = legacySighash(tx, i, prevoutScript);
+    if (isP2pkScript(prevoutScript)) {
+      // The output names the key itself. Signing it with any other key gives a
+      // transaction no node accepts, so a wrong pairing is caught here.
+      if (bytesToHex(prevoutScript.slice(1, -1)) !== bytesToHex(utxo.publicKey)) {
+        throw new Error(`input ${i}: pay-to-pubkey output names a different key; wrong key for this UTXO`);
+      }
+      tx.inputs[i].scriptSig = pushData(signDigest(sighash, utxo.privateKey));
+      continue;
+    }
     tx.inputs[i].scriptSig = signInput(sighash, utxo.privateKey, utxo.publicKey);
   }
 }
@@ -1009,6 +1030,11 @@ function signAllInputsUnified(tx: Tx, utxos: SignableUtxo[]): void {
       continue;
     }
 
+    if (isP2pkScript(prevoutScript)) {
+      // No chain with the unified sighash pays to a bare pubkey; refuse rather
+      // than produce a P2PKH-shaped scriptSig for it.
+      throw new Error(`input ${i}: pay-to-pubkey inputs are not supported with the unified sighash`);
+    }
     // Bare P2PKH: scriptCode is the prevout script itself (script type 0).
     const digest = unifiedSighash(tx, spent, i, hashType, 0, prevoutScript, mid);
     tx.inputs[i].scriptSig = signInput(digest, utxo.privateKey, utxo.publicKey, hashType);

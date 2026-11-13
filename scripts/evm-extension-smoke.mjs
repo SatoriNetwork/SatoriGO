@@ -1435,14 +1435,23 @@ try {
       const q = (s) => document.querySelector(s);
       const panel = q('[data-testid="live-tab-panel-assets"]');
       const status = q('[data-testid="live-home-status"]');
-      const hero = q('.home-hero-wrap');
+      const wrap = q('.home-hero-wrap');
       const scroll = q('.home-scroll');
-      if (!panel || !status || !hero || !scroll) return null;
+      // 1.7.23: the wrapper and the scroll region GROW to share the leftover
+      // height (the footer rests at the bottom), so the free space is no longer
+      // outside the two boxes. It is measured from the content instead: above
+      // the wrapper's first child, and between the last thing in the list and
+      // the footer.
+      const hero = wrap?.firstElementChild;
+      const footer = scroll?.querySelector(':scope > .home-footer');
+      const lastInList = footer?.previousElementSibling;
+      if (!panel || !status || !hero || !scroll || !footer || !lastInList) return null;
       const cs = getComputedStyle(panel);
       const p = panel.getBoundingClientRect();
       const s = status.getBoundingClientRect();
       const h = hero.getBoundingClientRect();
       const sc = scroll.getBoundingClientRect();
+      const f = footer.getBoundingClientRect();
       const statusMb = parseFloat(getComputedStyle(status).marginBottom) || 0;
       const rows = [...document.querySelectorAll('[data-testid^="live-asset-row-"]')];
       return {
@@ -1450,7 +1459,8 @@ try {
         rows: rows.length,
         viewportH: window.innerHeight,
         above: Math.round(h.top - s.bottom - statusMb),
-        below: Math.round(p.bottom - parseFloat(cs.paddingBottom) - sc.bottom),
+        below: Math.round(f.top - lastInList.getBoundingClientRect().bottom),
+        footerToEdge: Math.round(p.bottom - parseFloat(cs.paddingBottom) - f.bottom),
         heroTop: Math.round(h.top),
         heroBottom: Math.round(h.bottom),
         scrollTop: Math.round(scroll.scrollTop),
@@ -1482,6 +1492,10 @@ try {
   check(
     !!centered && centered.above > 40 && centered.below > 40 && Math.abs(centered.above - centered.below) <= 1,
     `short home is DEAD CENTRED at 420x900: ${centered?.above}px free above the block, ${centered?.below}px below (${centered?.rows} asset row(s))`,
+  );
+  check(
+    !!centered && Math.abs(centered.footerToEdge) <= 1,
+    `and the identity footer rests on the bottom edge (${centered?.footerToEdge}px off it)`,
   );
   check(
     !!centered && centered.scrollH <= centered.clientH + 1,
@@ -2292,7 +2306,9 @@ try {
       await popup.waitForTimeout(250);
       canvasHeight = h;
       popupScroll = await scrollGeometry();
-      if (popupScroll && popupScroll.scrollH > popupScroll.clientH) break;
+      // More than the cue's own 2px tolerance (EPSILON in ScrollMoreCue.tsx): a
+      // 1px overflow is one the cue rightly calls a rounding artefact.
+      if (popupScroll && popupScroll.scrollH > popupScroll.clientH + 2) break;
     }
   }
   check(
@@ -2964,17 +2980,18 @@ try {
       const q = (s) => document.querySelector(s);
       const panel = q('[data-testid="live-tab-panel-assets"]');
       const status = q('[data-testid="live-home-status"]');
-      const hero = q('.home-hero-wrap');
+      const wrap = q('.home-hero-wrap');
       const scroll = q('.home-scroll');
       // 1.6.3: no coin mark over the hero on a chain with an asset list, so the
       // hero block itself is what is measured.
       const mark = q('.hero');
       const banner = q('[data-testid="live-notification"]');
-      if (!panel || !status || !hero || !scroll || !mark) return null;
-      const cs = getComputedStyle(panel);
-      const p = panel.getBoundingClientRect();
+      // 1.7.23: measured from the content, see homeGeometry above.
+      const hero = wrap?.firstElementChild;
+      const footer = scroll?.querySelector(':scope > .home-footer');
+      const lastInList = footer?.previousElementSibling;
+      if (!panel || !status || !hero || !scroll || !mark || !footer || !lastInList) return null;
       const h = hero.getBoundingClientRect();
-      const sc = scroll.getBoundingClientRect();
       // `above` must be the AUTO MARGIN alone, so the element it is measured
       // from contributes its own authored margin-bottom and that is subtracted:
       // the status row's 6px, or the banner's 12px when one is up. Without that
@@ -2986,7 +3003,7 @@ try {
         classes: panel.className,
         hasBanner: !!banner,
         above: Math.round(h.top - anchor.bottom - anchorMb),
-        below: Math.round(p.bottom - parseFloat(cs.paddingBottom) - sc.bottom),
+        below: Math.round(footer.getBoundingClientRect().top - lastInList.getBoundingClientRect().bottom),
         gap: Math.round(mark.getBoundingClientRect().top - anchor.bottom),
       };
     });
@@ -3037,7 +3054,7 @@ try {
   );
   check(
     !!tallNotice && tallNotice.below > 40,
-    `and the bottom margin still absorbs all the slack (${tallNotice?.below}px below the block)`,
+    `and all the slack sits between the list and the footer (${tallNotice?.below}px)`,
   );
   await tall.screenshot({ path: path.join(shotsDir, 'panel-notification-spacing.png') });
   await tall.close();

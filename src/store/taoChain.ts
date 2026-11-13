@@ -60,8 +60,9 @@ export interface TaoChainInfo {
   defaultNodeSet: string;
   /** Never a thin/new-chain caution banner: Bittensor itself is not new. */
   young: false;
-  /** Always "New" in the switcher: new to THIS wallet (§10). */
-  recentlyAdded: true;
+  /** The "New" chip in the switcher. Cleared 2026-11-13 (owner): the chip
+   *  marks the newest chain only. */
+  recentlyAdded: boolean;
 }
 
 export const TAO_HOMEPAGE = 'https://bittensor.com';
@@ -91,7 +92,7 @@ export const TAO_CHAIN: TaoChainInfo = {
   nodeSets: ['main'],
   defaultNodeSet: 'main',
   young: false,
-  recentlyAdded: true,
+  recentlyAdded: false,
 };
 
 /** Explorer link for an extrinsic hash, same helper shape as

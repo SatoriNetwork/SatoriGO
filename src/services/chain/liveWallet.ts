@@ -19,6 +19,7 @@ import {
   BITCOIN_BLAKE2B_MAINNET,
   DOGECOIN_MAINNET,
   NEOXA_MAINNET,
+  XFER_MAINNET,
   supportsAssets,
   feePolicyFor,
   type EvrmoreNetwork,
@@ -34,6 +35,8 @@ import {
 import {
   deriveAddress,
   addressToElectrumScripthash,
+  p2pkScript,
+  scriptToElectrumScripthash,
   addressToHash160,
   isSpendableAddress,
   isP2pkhAddress,
@@ -150,7 +153,8 @@ export type LiveNetworkId =
   // missing case here would make a Neoxa wallet sign with Evrmore's params
   // rather than fail. That exact bug shipped once, for Dogecoin.
   | 'neoxa-mainnet'
-  | 'bitcoinblake2b-mainnet';
+  | 'bitcoinblake2b-mainnet'
+  | 'xfer-mainnet';
 
 /** Re-exported from engine.ts (its home): the `network` sentinel of an EVM account. */
 export { EVM_NETWORK, MONERO_NETWORK, ZCASH_NETWORK, TAO_NETWORK };
@@ -241,6 +245,12 @@ export interface WalletEntry {
   /** How many receive addresses (m/44'/coin'/0'/0/0..N-1) this seed wallet has
    *  derived. Absent/legacy = 1. Always 1 for kind:'pk'. */
   addressCount?: number;
+  /** How many CHANGE-chain addresses (m/44'/coin'/0'/1/0..N-1) hold history for
+   *  this seed wallet. Absent = 0, which is every wallet that was only ever used
+   *  here: this wallet sends its own change to the primary receive address. It
+   *  grows only when discoverUsedAddresses() proves an internal address was used
+   *  by another wallet of the same phrase. Never set for kind:'pk'. */
+  changeCount?: number;
   /** Chain family. ABSENT MEANS 'utxo': every wallet stored before the EVM
    *  engine keeps working with no migration and no store version bump. Read it
    *  through walletFamily() (engine.ts), never by direct comparison. An 'evm'
@@ -363,6 +373,11 @@ export interface AddressScanResult {
   addressCountBefore: number;
   /** The count after (never lower than before, never above the cap). */
   addressCountAfter: number;
+  /** Change-chain addresses covered before and after (see changeCount). */
+  changeCountBefore: number;
+  changeCountAfter: number;
+  /** How many change-chain indices were queried (0 when that scan was skipped). */
+  changeScanned: number;
   /** Indices whose history could not be read. Counted, never treated as empty. */
   failedReads: number;
   /** True ONLY when the scan reached the BIP44 gap limit with every index
@@ -864,6 +879,11 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** Blocks a block reward must age before it can be spent. Consensus is 100
+ *  (COINBASE_MATURITY) on the Ravencoin family; one more is kept as margin
+ *  against a tip the server reports a block ahead of its peers. */
+export const COINBASE_MATURITY_BLOCKS = 101;
+
 export class LiveWalletService implements WalletEngine {
   /** This engine is the UTXO family; the EVM engine sits beside it (engine.ts). */
   readonly family = 'utxo' as const;
@@ -1360,6 +1380,8 @@ export class LiveWalletService implements WalletEngine {
         return NEOXA_MAINNET;
       case 'bitcoinblake2b-mainnet':
         return BITCOIN_BLAKE2B_MAINNET;
+      case 'xfer-mainnet':
+        return XFER_MAINNET;
       case 'mainnet':
       default:
         return EVRMORE_MAINNET;
@@ -3377,9 +3399,10 @@ export class LiveWalletService implements WalletEngine {
 
   // --- addresses / reads ---------------------------------------------------
 
-  /** Derive the signing key. Seed-wallets derive m/44'/coin'/0'/0/index; pk-wallets
-   *  have exactly ONE key so `index` is ignored. */
-  deriveKey(index = 0): DerivedKey {
+  /** Derive the signing key. Seed-wallets derive m/44'/coin'/0'/change/index
+   *  (change 0 = receive chain, 1 = the internal change chain of a seed used in
+   *  another wallet); pk-wallets have exactly ONE key so both are ignored. */
+  deriveKey(index = 0, change: 0 | 1 = 0): DerivedKey {
     if (this.activeFamily === 'evm') {
       // UTXO key material (WIF, P2PKH address) has no meaning for an EVM account.
       throw new Error('deriveKey is a UTXO operation; the active wallet is an EVM account');
@@ -3395,9 +3418,17 @@ export class LiveWalletService implements WalletEngine {
     }
     if (this.activeKind === 'pk') {
       if (!this.pk) throw new Error('Live wallet is locked');
-      return privateKeyToDerived(this.pk, this.net, this.pkCompressed);
+      return this.notePubkey(privateKeyToDerived(this.pk, this.net, this.pkCompressed));
     }
-    return deriveAddress(this.requireSeed(), this.net, 0, 0, index);
+    return this.notePubkey(deriveAddress(this.requireSeed(), this.net, 0, change, index));
+  }
+
+  /** On a chain that pays rewards to a bare pubkey, hand the provider each
+   *  derived key's PUBLIC key so balance, history and the address scan also
+   *  cover that key's pay-to-pubkey outputs. A no-op everywhere else. */
+  private notePubkey(key: DerivedKey): DerivedKey {
+    if (this.net.coinbaseToPubkey === true) this.provider.registerPubkey(key.address, key.publicKey);
+    return key;
   }
 
   getAddress(index = 0): string {
@@ -4425,8 +4456,11 @@ export class LiveWalletService implements WalletEngine {
     };
   }
 
-  /** All receive keys of the ACTIVE wallet (one per derived address; a pk wallet
-   *  has exactly one). Requires the wallet to be unlocked. */
+  /** Every key of the ACTIVE wallet that can hold funds: the receive keys first
+   *  (index 0 = primary, always keys[0]), then the change-chain keys a discovery
+   *  scan found in use. A pk wallet has exactly one. Balance reads, UTXO
+   *  gathering and signing all iterate this list, so a key listed here is both
+   *  visible and spendable. Requires the wallet to be unlocked. */
   private async allKeys(): Promise<DerivedKey[]> {
     if (this.activeFamily === 'evm') throw new Error('allKeys is a UTXO operation');
     if (this.activeKind === 'pk') return [this.deriveKey(0)];
@@ -4435,17 +4469,33 @@ export class LiveWalletService implements WalletEngine {
     const count = Math.max(1, Math.min(entry?.addressCount ?? 1, MAX_RECEIVE_ADDRESSES));
     const keys: DerivedKey[] = [];
     for (let i = 0; i < count; i++) keys.push(this.deriveKey(i));
+    const changeCount = Math.max(0, Math.min(entry?.changeCount ?? 0, MAX_RECEIVE_ADDRESSES));
+    for (let i = 0; i < changeCount; i++) keys.push(this.deriveKey(i, 1));
     return keys;
   }
 
-  /** All receive addresses of the ACTIVE wallet, in derivation order. */
-  async listAddresses(): Promise<{ index: number; address: string }[]> {
+  /** How many of allKeys() are RECEIVE keys (they come first). */
+  private async receiveKeyCount(): Promise<number> {
+    if (this.activeKind === 'pk') return 1;
+    const entry = this.sessionEntry(await this.loadStore());
+    return Math.max(1, Math.min(entry?.addressCount ?? 1, MAX_RECEIVE_ADDRESSES));
+  }
+
+  /** Every address of the ACTIVE wallet, receive chain first in derivation
+   *  order, then the used change-chain addresses marked `change: true` (their
+   *  `index` is the index ON THAT CHAIN, so it repeats the receive numbering). */
+  async listAddresses(): Promise<{ index: number; address: string; change?: true }[]> {
     // One account = one address on the EVM family (design decision, evm-engine.md, section 1).
     if (this.activeFamily === 'evm') return [{ index: 0, address: this.evmAddress() }];
     // One primary address on Monero too (subaddresses live in the scanner).
     if (this.activeFamily === 'monero') return [{ index: 0, address: this.getAddress(0) }];
     const keys = await this.allKeys();
-    return keys.map((k, i) => ({ index: i, address: k.address }));
+    const receiveCount = await this.receiveKeyCount();
+    return keys.map((k, i) =>
+      i < receiveCount
+        ? { index: i, address: k.address }
+        : { index: i - receiveCount, address: k.address, change: true as const },
+    );
   }
 
   /**
@@ -4561,6 +4611,9 @@ export class LiveWalletService implements WalletEngine {
         highestUsedIndex: -1,
         addressCountBefore: 1,
         addressCountAfter: 1,
+        changeCountBefore: 0,
+        changeCountAfter: 0,
+        changeScanned: 0,
         failedReads: 0,
         complete: true,
       };
@@ -4574,84 +4627,126 @@ export class LiveWalletService implements WalletEngine {
     // happens to be active at the end would raise a DIFFERENT seed's count.
     const scannedWalletId = entry.id;
     const addressCountBefore = Math.max(1, entry.addressCount ?? 1);
+    const changeCountBefore = Math.max(0, entry.changeCount ?? 0);
 
-    let highestUsedIndex = -1;
     let scanned = 0;
+    let changeScanned = 0;
     let failedReads = 0;
-    let consecutiveEmpty = 0;
-    let consecutiveFailures = 0;
-    let endedOnGapLimit = false;
 
-    for (let index = 0; index <= MAX_SCAN_INDEX; index++) {
-      const { address } = this.deriveKey(index);
-      scanned++;
+    // One BIP44 chain, walked from index 0 under the gap rule. `change` is the
+    // chain: 0 = receive (external), 1 = change (internal).
+    const scanChain = async (change: 0 | 1): Promise<{ highestUsedIndex: number; endedOnGapLimit: boolean }> => {
+      let highestUsedIndex = -1;
+      let consecutiveEmpty = 0;
+      let consecutiveFailures = 0;
+      let endedOnGapLimit = false;
 
-      // true = has history, false = provably empty, null = could not be read.
-      let used: boolean | null;
-      try {
-        const history = await this.provider.getAddressHistory(address);
-        used = history.length > 0;
-        consecutiveFailures = 0;
-      } catch (err) {
-        if (err instanceof AddressHistoryRefusedError && err.tooLarge) {
-          // "history too large" is the server telling us this address HAS
-          // history, just more than it will serve. Treating that as empty would
-          // hide the most heavily used address of all.
-          used = true;
+      for (let index = 0; index <= MAX_SCAN_INDEX; index++) {
+        const { address } = this.deriveKey(index, change);
+        if (change === 0) scanned++;
+        else changeScanned++;
+
+        // true = has history, false = provably empty, null = could not be read.
+        let used: boolean | null;
+        try {
+          const history = await this.provider.getAddressHistory(address);
+          used = history.length > 0;
           consecutiveFailures = 0;
-        } else {
-          used = null;
-          failedReads++;
-          consecutiveFailures++;
+        } catch (err) {
+          if (err instanceof AddressHistoryRefusedError && err.tooLarge) {
+            // "history too large" is the server telling us this address HAS
+            // history, just more than it will serve. Treating that as empty would
+            // hide the most heavily used address of all.
+            used = true;
+            consecutiveFailures = 0;
+          } else {
+            used = null;
+            failedReads++;
+            consecutiveFailures++;
+          }
+        }
+
+        if (used === true) {
+          highestUsedIndex = index;
+          consecutiveEmpty = 0;
+        } else if (used === false) {
+          consecutiveEmpty++;
+        }
+        // used === null deliberately touches neither counter.
+
+        opts?.onProgress?.({
+          scanned: scanned + changeScanned,
+          highestUsedIndex: change === 0 ? highestUsedIndex : receive.highestUsedIndex,
+        });
+
+        if (used === false && consecutiveEmpty >= GAP_LIMIT) {
+          endedOnGapLimit = true;
+          break;
+        }
+        if (used === null && consecutiveFailures >= MAX_CONSECUTIVE_READ_FAILURES) {
+          break; // the connection is gone; keep whatever was proven before it died
         }
       }
+      return { highestUsedIndex, endedOnGapLimit };
+    };
 
-      if (used === true) {
-        highestUsedIndex = index;
-        consecutiveEmpty = 0;
-      } else if (used === false) {
-        consecutiveEmpty++;
-      }
-      // used === null deliberately touches neither counter.
-
-      opts?.onProgress?.({ scanned, highestUsedIndex });
-
-      if (used === false && consecutiveEmpty >= GAP_LIMIT) {
-        endedOnGapLimit = true;
-        break;
-      }
-      if (used === null && consecutiveFailures >= MAX_CONSECUTIVE_READ_FAILURES) {
-        break; // the connection is gone; keep whatever was proven before it died
-      }
-    }
+    let receive = { highestUsedIndex: -1, endedOnGapLimit: false };
+    receive = await scanChain(0);
+    // THE CHANGE CHAIN (m/44'/coin'/0'/1/i). This wallet never sends change
+    // there, but a seed that was used in a Core-style desktop wallet has: every
+    // payment made from that wallet left its change on the next internal
+    // address, so most of an imported balance can sit on this chain. Scanned
+    // under the same rules as the receive chain. Skipped when the receive scan
+    // lost its connection, because that scan's answer is already a lower bound
+    // and a second run of dead round-trips adds nothing.
+    const changeScan = receive.endedOnGapLimit || receive.highestUsedIndex >= 0
+      ? await scanChain(1)
+      : { highestUsedIndex: -1, endedOnGapLimit: false };
 
     // Decided from the store the write is based on: the scan is many round-trips
     // long, and an addReceiveAddress() that landed meanwhile must not be undone.
     // Found BY ID, not by "whichever is active now", per scannedWalletId above.
     let addressCountAfter = addressCountBefore;
+    let changeCountAfter = changeCountBefore;
     await this.updateStore((fresh) => {
       const freshEntry = fresh.wallets.find((w) => w.id === scannedWalletId);
       const currentCount = Math.max(1, freshEntry?.addressCount ?? addressCountBefore);
+      const currentChange = Math.max(0, freshEntry?.changeCount ?? changeCountBefore);
       addressCountAfter = currentCount;
-      const wanted = Math.max(currentCount, highestUsedIndex + 1);
+      changeCountAfter = currentChange;
+      const wanted = Math.max(currentCount, receive.highestUsedIndex + 1);
+      const wantedChange = Math.max(currentChange, changeScan.highestUsedIndex + 1);
       // Clamp with min() only where it can RAISE nothing: a corrupt stored count
       // above the cap must be left alone, not silently reduced.
       const capped = Math.min(wanted, MAX_RECEIVE_ADDRESSES);
-      if (!freshEntry || capped <= currentCount) return NO_WRITE;
-      freshEntry.addressCount = capped;
-      addressCountAfter = capped;
-      return true as const;
+      const cappedChange = Math.min(wantedChange, MAX_RECEIVE_ADDRESSES);
+      if (!freshEntry) return NO_WRITE;
+      let wrote = false;
+      if (capped > currentCount) {
+        freshEntry.addressCount = capped;
+        addressCountAfter = capped;
+        wrote = true;
+      }
+      if (cappedChange > currentChange) {
+        freshEntry.changeCount = cappedChange;
+        changeCountAfter = cappedChange;
+        wrote = true;
+      }
+      return wrote ? (true as const) : NO_WRITE;
     });
 
     return {
       scanned,
-      highestUsedIndex,
+      highestUsedIndex: receive.highestUsedIndex,
       addressCountBefore,
       addressCountAfter,
+      changeCountBefore,
+      changeCountAfter,
+      changeScanned,
       failedReads,
-      // A gap-limit finish with every address answered is the only authoritative
-      // outcome. The ceiling and a dead connection both leave a lower bound.
-      complete: endedOnGapLimit && failedReads === 0,
+      // A gap-limit finish on BOTH chains with every address answered is the only
+      // authoritative outcome. The ceiling and a dead connection leave a lower bound.
+      complete: receive.endedOnGapLimit && changeScan.endedOnGapLimit && failedReads === 0,
     };
   }
 
@@ -4731,12 +4826,12 @@ export class LiveWalletService implements WalletEngine {
     return buildFeeEstimate(this.net.chainId, policy, ratesByTarget);
   }
 
-  private toSignable(utxos: ElectrumUtxo[], key: DerivedKey): SignableUtxo[] {
+  private toSignable(utxos: ElectrumUtxo[], key: DerivedKey, scriptHex?: string): SignableUtxo[] {
     // The prevout script must match the address's ACTUAL type: a native-segwit
     // wallet's own addresses are bech32, which addressToHash160 cannot decode at
     // all. addressToScript handles both, and the builder routes each input to
     // legacy or BIP143 signing based on exactly these bytes.
-    const scriptPubKeyHex = bytesToHex(addressToScript(key.address));
+    const scriptPubKeyHex = scriptHex ?? bytesToHex(addressToScript(key.address));
     return utxos.map((u) => {
       // Harden against untrusted server data: a float or out-of-safe-range value
       // would throw or silently lose precision before reaching the fee/change
@@ -4760,10 +4855,31 @@ export class LiveWalletService implements WalletEngine {
    *  sign correctly without any txBuilder change. */
   private async gatherEvrUtxos(keys: DerivedKey[]): Promise<SignableUtxo[]> {
     const all: SignableUtxo[] = [];
+    let tip: number | null = null;
     for (const key of keys) {
       const sh = addressToElectrumScripthash(key.address);
       const utxos = await electrumListUnspent(this.client, sh);
       all.push(...this.toSignable(utxos, key));
+      if (this.net.coinbaseToPubkey !== true) continue;
+      // PAY-TO-PUBKEY outputs of the same key (block rewards). Each is treated
+      // as a coinbase output: the server does not say which ones are, and a
+      // reward spent before COINBASE_MATURITY_BLOCKS is rejected by every
+      // node. Holding back a mature non-reward output for the same wait costs
+      // nothing but time. If the tip cannot be read the gather FAILS rather
+      // than guess which rewards are mature.
+      const script = p2pkScript(key.publicKey);
+      const rewards = await electrumListUnspent(this.client, scriptToElectrumScripthash(script));
+      if (rewards.length === 0) continue;
+      if (tip === null) {
+        const header = await this.client.request<{ height: number }>(ELECTRUM_METHODS.headersSubscribe, []);
+        if (!Number.isSafeInteger(header?.height) || header.height <= 0) throw new Error('tip-height-unavailable');
+        tip = header.height;
+      }
+      const tipHeight = tip;
+      const mature = rewards.filter(
+        (u) => Number.isSafeInteger(u.height) && u.height > 0 && tipHeight - u.height >= COINBASE_MATURITY_BLOCKS,
+      );
+      all.push(...this.toSignable(mature, key, bytesToHex(script)));
     }
     return all;
   }

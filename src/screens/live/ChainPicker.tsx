@@ -30,6 +30,7 @@ import {
   BITCOIN_MAINNET,
   DOGECOIN_MAINNET,
   NEOXA_MAINNET,
+  XFER_MAINNET,
   BITCOIN_BLAKE2B_MAINNET,
 } from '../../services/chain/chainParams';
 // evmChains is plain data + string helpers (no store import, no service import),
@@ -57,6 +58,7 @@ export type UtxoChainChoice = Extract<
   | 'dogecoin-mainnet'
   | 'neoxa-mainnet'
   | 'bitcoinblake2b-mainnet'
+  | 'xfer-mainnet'
 >;
 
 /** A pickable chain: any UTXO chain above, OR the `evm:<key>` target of an EVM
@@ -98,6 +100,7 @@ export const CHAIN_OPTIONS_BY_VALUE: Record<UtxoChainChoice, string> = {
   'dogecoin-mainnet': DOGECOIN_MAINNET.chainId,
   'neoxa-mainnet': NEOXA_MAINNET.chainId,
   'bitcoinblake2b-mainnet': BITCOIN_BLAKE2B_MAINNET.chainId,
+  'xfer-mainnet': XFER_MAINNET.chainId,
 };
 
 /** UTXO chain rows only, kept exported as before for callers that only ever
@@ -118,6 +121,8 @@ export const CHAIN_OPTIONS: SegmentedOption<UtxoChainChoice>[] = (
     ['neoxa-mainnet', NEOXA_MAINNET],
     // Bitcoin BLAKE2b is appended for the same reason (2026-09-07).
     ['bitcoinblake2b-mainnet', BITCOIN_BLAKE2B_MAINNET],
+    // X Coin is appended for the same reason (2026-11-13).
+    ['xfer-mainnet', XFER_MAINNET],
   ] as const
 ).map(([value, net]) => ({
   value,

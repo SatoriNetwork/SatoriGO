@@ -33,7 +33,7 @@ describe('TAO_CHAIN', () => {
     expect(TAO_CHAIN.nativeDecimals).toBe(9);
     expect(TAO_CHAIN.homepage).toBe(TAO_HOMEPAGE);
     expect(TAO_CHAIN.young).toBe(false);
-    expect(TAO_CHAIN.recentlyAdded).toBe(true);
+    expect(TAO_CHAIN.recentlyAdded).toBe(false);
   });
 
   it('ships exactly one node set: main (test is smoke-only, never offered)', () => {

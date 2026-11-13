@@ -29,7 +29,7 @@ describe('ZCASH_CHAIN', () => {
     expect(ZCASH_CHAIN.nativeDecimals).toBe(8);
     expect(ZCASH_CHAIN.homepage).toBe('https://z.cash');
     expect(ZCASH_CHAIN.young).toBe(false);
-    expect(ZCASH_CHAIN.recentlyAdded).toBe(true);
+    expect(ZCASH_CHAIN.recentlyAdded).toBe(false);
     expect(ZCASH_CHAIN.nodeSets).toEqual(['main']);
     expect(ZCASH_CHAIN.defaultNodeSet).toBe('main');
   });

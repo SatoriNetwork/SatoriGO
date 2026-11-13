@@ -58,7 +58,7 @@ describe('moneroChains', () => {
       coinType: 128,
       scheme: 'cake-exodus',
       young: false,
-      recentlyAdded: true,
+      recentlyAdded: false,
     });
     expect(chain?.homepage).toMatch(/^https:\/\//);
     expect(chain?.explorerTxUrl).toContain('{txid}');

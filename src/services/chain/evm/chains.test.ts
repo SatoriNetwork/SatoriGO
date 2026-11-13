@@ -87,7 +87,7 @@ describe('3d. avalanche: an ordinary Alchemy-served EVM row (docs/design/avalanc
     expect(avax.indexer).toBeUndefined();
     expect(avax.staking).toBeUndefined();
     // New to this wallet, not a thin network.
-    expect(avax.recentlyAdded).toBe(true);
+    expect(avax.recentlyAdded).toBeUndefined();
     expect(avax.young).toBeUndefined();
     expect(evmChainIdHex(avax)).toBe('0xa86a');
     // symbol()/decimals() as the contracts answered them (Tether's is "USDt").
@@ -117,7 +117,7 @@ describe('3e. robinhood: an Arbitrum Nitro L2 row (docs/design/robinhood.md)', (
     expect(rh.l1DataFee).toBeUndefined();
     expect(rh.indexer).toBeUndefined();
     expect(rh.staking).toBeUndefined();
-    expect(rh.recentlyAdded).toBe(true);
+    expect(rh.recentlyAdded).toBeUndefined();
     expect(rh.young).toBeUndefined();
     expect(evmChainIdHex(rh)).toBe('0x1237');
     // symbol()/decimals() as the contract answered them.

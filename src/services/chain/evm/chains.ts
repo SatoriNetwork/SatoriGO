@@ -404,9 +404,6 @@ export const EVM_CHAINS: readonly EvmChain[] = Object.freeze([
       { address: '0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E', symbol: 'USDC', decimals: 6 },
       { address: '0x9702230A8Ea53601f5cD2dc00fDBc13d4dF4A8c7', symbol: 'USDt', decimals: 6 },
     ],
-    // "New" chip without the thin-chain caution: an established network, new
-    // to this wallet.
-    recentlyAdded: true,
   }),
   // Robinhood Chain (docs/design/robinhood.md), an Ethereum L2 on Arbitrum
   // Nitro (Arbitrum Orbit), public mainnet since 2026-07-01. Added 2026-10-02
@@ -450,9 +447,6 @@ export const EVM_CHAINS: readonly EvmChain[] = Object.freeze([
     // at this address. symbol()/decimals() answered "USDG"/6 on 2026-10-02,
     // totalSupply about 6.9e8. No USDC: neither list carries one.
     defaultTokens: [{ address: '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168', symbol: 'USDG', decimals: 6 }],
-    // "New" chip without the thin-chain caution: new to this wallet, not
-    // a thin network.
-    recentlyAdded: true,
   }),
 ]);
 

@@ -1,7 +1,6 @@
-// The "New" chip marks only the chains added in the current release (owner,
-// 2026-09-29: 1.5.0 = Monero, Zcash, Bittensor, Avalanche; Robinhood Chain joined it
-// 2026-10-02). Young chains keep
-// their caution notice but no longer get the chip.
+// The "New" chip marks only the newest chain (owner, 2026-11-13: X Coin alone;
+// Monero, Zcash, Bittensor, Avalanche and Robinhood Chain lost it then). Young
+// chains keep their caution notice but do not get the chip for that.
 import { describe, expect, it } from 'vitest';
 import { describeChain } from '../../store/liveStore';
 import type { EvmChainInfo } from '../../store/evmChains';
@@ -19,11 +18,12 @@ const evm = EVM_CHAINS.map((c) => ({
   recentlyAdded: c.recentlyAdded === true,
 })) as unknown as EvmChainInfo[];
 
-const NEW_IN_RELEASE = ['zec:mainnet', 'tao:mainnet', 'evm:avalanche', 'evm:robinhood'];
+const NEW_IN_RELEASE = ['xfer-mainnet'];
 const OLDER = [
   'mainnet', 'ravencoin-mainnet', 'bitcoin-mainnet', 'litecoin-mainnet', 'dogecoin-mainnet',
   'bitcoingold-mainnet', 'wojakcoin-mainnet', 'neoxa-mainnet', 'bitcoinblake2b-mainnet',
   'evm:base', 'evm:bsc', 'evm:ethereum', 'evm:epix',
+  'zec:mainnet', 'tao:mainnet', 'evm:avalanche', 'evm:robinhood',
 ];
 
 describe('New chip', () => {

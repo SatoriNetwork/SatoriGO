@@ -26,6 +26,7 @@ import {
   EVRMORE_TESTNET,
   LITECOIN_MAINNET,
   NEOXA_MAINNET,
+  XFER_MAINNET,
   NO_ACCEPTED_P2SH,
   RAVENCOIN_MAINNET,
   WOJAKCOIN_MAINNET,
@@ -354,6 +355,24 @@ export function p2pkhScript(h160: Uint8Array): Uint8Array {
 }
 
 /**
+ * Pay-to-pubkey scriptPubKey: <push pubkey> OP_CHECKSIG. The output form a
+ * Core-style node pays block rewards to (X Coin's lottery winnings). It has no
+ * address of its own; the same key's P2PKH address is a DIFFERENT script, so a
+ * server indexes the two under different scripthashes.
+ */
+export function p2pkScript(publicKey: Uint8Array): Uint8Array {
+  if (publicKey.length !== 33 && publicKey.length !== 65) {
+    throw new Error(`public key must be 33 or 65 bytes, got ${publicKey.length}`);
+  }
+  return concatBytes(Uint8Array.of(publicKey.length), publicKey, Uint8Array.of(0xac));
+}
+
+/** Electrum scripthash of an arbitrary scriptPubKey (sha256, reversed, hex). */
+export function scriptToElectrumScripthash(script: Uint8Array): string {
+  return bytesToHexLower(sha256(script).slice().reverse());
+}
+
+/**
  * P2WPKH (native segwit v0) scriptPubKey:
  *   OP_0 <20-byte push> <hash160(pubkey)>
  *   0x00 0x14           ...
@@ -428,6 +447,7 @@ const KNOWN_NETWORKS: readonly EvrmoreNetwork[] = [
   DOGECOIN_MAINNET,
   NEOXA_MAINNET,
   BITCOIN_BLAKE2B_MAINNET,
+  XFER_MAINNET,
 ];
 
 /**

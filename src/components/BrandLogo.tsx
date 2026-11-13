@@ -44,6 +44,11 @@ import dogeLogoUrl from '../assets/dogecoin-logo.png';
 // (KomodoPlatform/coins has no NEOX entry at all -- the same absence that left
 // this chain without an ElectrumX server, see network.ts).
 import neoxLogoUrl from '../assets/neoxa-logo.png';
+// X Coin (XFER) mark. Source: the project's OWN repository, NiftyRaven/x-coin
+// (MIT, "Copyright (c) 2026 The X Coin developers"), file
+// src/qt/res/icons/xcoin.png -- the icon its own Qt wallet ships. Downscaled
+// 1024x1024 -> 256x256 to match the other marks, nothing else changed.
+import xferLogoUrl from '../assets/xfer-logo.png';
 // EVM family marks (phase 3 of the EVM rollout). Ether (ETH), BNB, USD Coin
 // (USDC) and Tether (USDT) come from KomodoPlatform/coins, icons/{eth,bnb,usdc,
 // usdt}.png, resized 128x128 -> 256x256 like the Bitcoin/Litecoin/Dogecoin
@@ -103,6 +108,7 @@ export function officialLogoUrl(slot: LogoSlot): string {
   if (slot === 'doge') return dogeLogoUrl;
   if (slot === 'neox') return neoxLogoUrl;
   if (slot === 'btcb2') return btcb2LogoUrl;
+  if (slot === 'xfer') return xferLogoUrl;
   if (slot === 'xmr') return moneroLogoUrl;
   if (slot === 'zec') return zcashLogoUrl;
   if (slot === 'tao') return bittensorLogoUrl;
@@ -246,6 +252,7 @@ export function TokenIcon({ assetId, size = 38 }: TokenIconProps) {
   if (name === 'BTC') return <BrandLogo slot="btc" size={size} alt="BTC" />;
   if (name === 'DOGE') return <BrandLogo slot="doge" size={size} alt="DOGE" />;
   if (name === 'NEOX') return <BrandLogo slot="neox" size={size} alt="NEOX" />;
+  if (name === 'XFER') return <BrandLogo slot="xfer" size={size} alt="XFER" />;
   // XBT since 1.5.0; BTCB2 kept so a name stored by an older build still gets the mark.
   if (name === 'XBT' || name === 'BTCB2') return <BrandLogo slot="btcb2" size={size} alt="XBT" />;
   if (name === 'XMR') return <BrandLogo slot="xmr" size={size} alt="XMR" />;

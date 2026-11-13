@@ -18,6 +18,7 @@ import {
   DEFAULT_EXPLORER_URL_WJK,
   DEFAULT_EXPLORER_URL_NEOX,
   DEFAULT_EXPLORER_URL_BTCB2,
+  DEFAULT_EXPLORER_URL_XFER,
 } from './liveStore';
 import { resolveExplorerUrl } from '../screens/live/LiveTxDetail';
 
@@ -32,6 +33,7 @@ const CHAINS: { chainId: string; template: string }[] = [
   { chainId: 'dogecoin-mainnet', template: DEFAULT_EXPLORER_URL_DOGE },
   { chainId: 'neoxa-mainnet', template: DEFAULT_EXPLORER_URL_NEOX },
   { chainId: 'bitcoinblake2b-mainnet', template: DEFAULT_EXPLORER_URL_BTCB2 },
+  { chainId: 'xfer-mainnet', template: DEFAULT_EXPLORER_URL_XFER },
 ];
 
 const TXID = '8d393b5a304d2ba25b9a50aaf817a784b992025fa7aec173943e268120790356';

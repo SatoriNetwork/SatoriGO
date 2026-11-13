@@ -9,6 +9,28 @@ and release commits.
 
 ---
 
+## 1.7.23
+
+- A calmer look: flat buttons with no gradients or glow, and a plainer header
+  with the network name, its status dot and your wallet and address centred.
+- The balance is larger and bolder.
+- When staking rewards are waiting, Claim sits on the SATORI row itself.
+- The Satori Network line at the bottom of Home stays at the bottom, and
+  follows the last row when the list is long.
+- The screen that asks you to set an app password is easier to read.
+
+## 1.7.22
+
+- New network: X Coin (XFER). Receive and send XFER and its tokens. X Coin is a
+  young network and the wallet marks it as such.
+- X Coin lottery rewards count in your balance and can be sent. A reward can be
+  spent about 100 minutes after it was won; until then it shows in the balance
+  but is left out of a send.
+- Importing a recovery phrase that was used in a desktop wallet now also finds
+  coins left on its change addresses, on every coin network. Settings, "Scan for
+  used addresses" runs the same search for a wallet you already imported.
+- The New label in the network list now marks X Coin only.
+
 ## 1.7.1
 
 - Fixed: some websites, Uniswap among them, could stay blank the first time you

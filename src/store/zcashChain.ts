@@ -44,8 +44,9 @@ export interface ZcashChainInfo {
   defaultNodeSet: string;
   /** Never a thin/new-chain caution banner: Zcash itself is not new. */
   young: false;
-  /** Always "New" in the switcher: new to THIS wallet (§10). */
-  recentlyAdded: true;
+  /** The "New" chip in the switcher. Cleared 2026-11-13 (owner): the chip
+   *  marks the newest chain only. */
+  recentlyAdded: boolean;
 }
 
 export const ZCASH_HOMEPAGE = 'https://z.cash';
@@ -75,7 +76,7 @@ export const ZCASH_CHAIN: ZcashChainInfo = Object.freeze({
   nodeSets: ['main'],
   defaultNodeSet: 'main',
   young: false,
-  recentlyAdded: true,
+  recentlyAdded: false,
 });
 
 export function zcashChainInfo(): ZcashChainInfo {

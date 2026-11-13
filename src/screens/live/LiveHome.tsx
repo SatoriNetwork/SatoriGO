@@ -9,6 +9,7 @@ import { deriveSyncStatus, formatSyncBannerText, pillStateFor } from './syncStat
 import { TokenIcon, BrandLogo } from '../../components/BrandLogo';
 import { NotificationBanner } from '../../components/NotificationBanner';
 import { ScrollMoreCue, useMoreBelow } from '../../components/ScrollMoreCue';
+import { useFitText } from '../../components/useFitText';
 import { UntrustedTokenBadge } from '../../components/UntrustedTokenBadge';
 import { displaySymbol } from '../../services/displaySymbol';
 import { Skeleton, TokenRowSkeleton } from '../../components/Skeleton';
@@ -1192,6 +1193,10 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
   // never guessed: the popup is a fixed 400x600 box, so whether the list
   // overflows depends on how many tokens this wallet holds.
   const { ref: assetScrollRef, more: moreAssetsBelow } = useMoreBelow();
+  // The big balance steps its size down when the figure is wider than the
+  // screen (a long unpriced balance in a narrow side panel). 68 is the room
+  // `.hero .hero-value` already keeps free for the eye beside it.
+  const heroFitRef = useFitText({ reserve: 68, ignore: '.hero-eye' });
   // Fetch notifications when Home mounts. FORCED (bypasses the throttle): the
   // popup remounts Home on every open, so opening the wallet after the owner
   // edits a notice shows the change at once. The auto-refresh tick keeps a
@@ -2435,7 +2440,7 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
                   {/* Priced: the big figure is what the wallet is worth, and the
                       coin's own balance sits under it (MetaMask's order). The
                       testids are the ones these two figures always had. */}
-                  <div className="hero-value" data-testid="live-total-usd">
+                  <div className="hero-value" data-testid="live-total-usd" ref={heroFitRef}>
                     <span data-testid="total-balance" style={{ fontVariantNumeric: 'tabular-nums' }}>
                       {hideBalances || !totalFiat ? MASKED : formatFiatValue(totalFiat)}
                     </span>
@@ -2447,7 +2452,7 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
                   </div>
                 </>
               ) : (
-                <div className="hero-value" data-testid="live-balance-hero" title={heroNativeTitle}>
+                <div className="hero-value" data-testid="live-balance-hero" title={heroNativeTitle} ref={heroFitRef}>
                   {heroNativeText}
                   {/* Ticker scales with the roomy hero so it stays proportional. */}
                   <span

@@ -1,6 +1,6 @@
 # Known limitations
 
-Current, honest limitations of the wallet (v1.7.2).
+Current, honest limitations of the wallet (v1.7.23).
 
 Satori GO is a non-custodial multi-chain wallet. Eight coin networks and four
 EVM networks ship in this version, and every one of them has had a funded send
@@ -104,6 +104,26 @@ confirmed by the owner on mainnet (item 7). Nothing below is marketing.
     know: coin selection treats every UTXO as ordinary money**, so an inscription
     held on a wallet address could be spent as an input. Do not hold inscriptions
     on a Satori GO address.
+14a. **X Coin (XFER) is new here and has three limits of its own.**
+    - **Lottery rewards: read and signed, with two caveats.** The chain pays a
+      lottery winner to a pay-to-pubkey script of a key of the winner's wallet.
+      Since 1.7.22 every X Coin key is read under that second script too, the
+      address scan counts a key whose only history is rewards, and the send
+      path signs those outputs (the signature was checked byte for byte
+      against the X Coin node on a test key). Caveat one: the balance includes
+      rewards younger than 101 blocks, which cannot be spent yet, so right
+      after a win the amount you can send is lower than the balance shown.
+      Caveat two: only keys of the recovery phrase are covered. A node that
+      ran before its wallet existed pays a separate key kept in the node's
+      `lottery-payout.key` file, which no recovery phrase can derive.
+    - **No owner-verified funded send yet.** Parameters, derivation, address
+      validation, asset scripts and the fee policy are verified against the
+      chain's source and live data, but item 7 does not cover this chain until
+      a real send has been confirmed. Test small first.
+    - **One server.** The wallet reaches X Coin through the Satori GO gateway
+      and the owner's own node; no public server exists to fall back to. The
+      chain itself depends on a single block-signing node, which is why it
+      carries the young-network notice.
 
 ## Derivation and history
 
@@ -113,6 +133,11 @@ confirmed by the owner on mainnet (item 7). Nothing below is marketing.
     for receive addresses that already have history, stopping after 20
     consecutive empty ones, and Settings has a "Scan for used addresses" button
     to run it again. Coins on those addresses are found, shown and spendable.
+    Since 1.7.21 the same scan also walks the CHANGE chain, which is where a
+    desktop wallet of the same phrase leaves the change of every payment. Change
+    addresses found in use are counted in the balance, spendable, and listed in
+    Settings as "Change address"; they are never offered for receiving, and
+    this wallet still returns its own change to your first address.
     What is still NOT discovered: a different account (`.../1'/...`) or a
     different purpose than the one this wallet uses for that chain, so a seed
     used elsewhere under BIP44 on a chain where this wallet uses BIP84 will

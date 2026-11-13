@@ -297,6 +297,48 @@
 //   could mislead. Dogecoin is unchanged.
 //   The P2PKH prefixes do NOT collide: Dogecoin 'D' (30) vs BTGS 'G' (38).
 
+// X COIN (XFER) — NiftyRaven/x-coin, verified 2026-11-13 against tag v1.0.27
+// (commit 6d422e0b), the release the owner's own node runs. A Ravencoin 4.8.0
+// fork WITHOUT MINING: one block a minute goes to a lottery winner, and today
+// ONE seed node signs every block (the project's own docs say so).
+//
+//   src/chainparams.cpp (CMainParams):
+//     line 219  base58Prefixes[PUBKEY_ADDRESS] = 76   -> addresses begin with 'X'
+//     line 220  base58Prefixes[SCRIPT_ADDRESS] = 139  -> 'x' or 'y'
+//     line 221  base58Prefixes[SECRET_KEY]     = 204
+//     line 222/223  EXT_PUBLIC_KEY 0x0488B21E / EXT_SECRET_KEY 0x0488ADE4 (STANDARD)
+//     line 226  nExtCoinType = 3844
+//     line 197  pchMessageStart = 58 46 45 52 ("XFER")
+//     genesis 7c790cdb7a233c020cb71346082709a185eb6577643a327349112d425a712beb
+//       (matched by the owner's node AND by server.features of his ElectrumX)
+//   src/validation.cpp  strMessageMagic = "X Coin Signed Message:\n"
+//   src/validation.h:69 DEFAULT_MIN_RELAY_TX_FEE = 1000000 sat/kB (Ravencoin's)
+//   Assets: src/script/script.h:188 OP_RVN_ASSET = 0xc0 and src/assets/assets.h
+//     RVN_R/V/N = 114/118/110. THE ASSET LAYER IS RAVENCOIN'S VERBATIM, so
+//     assetMarkerPrefix is 'rvn', exactly as for Neoxa.
+//   Signing: script/interpreter.h carries SIGHASH_ALL/NONE/SINGLE/ANYONECANPAY
+//     only. No fork id and no replay field; a P2PKH spend signs the LEGACY
+//     digest like Ravencoin. consensus.nSegwitEnabled is true, but the chain
+//     defines NO bech32 address form, so this wallet stays P2PKH.
+//   FORK.md: "Send and receive do not require a Sign in with X session."
+//
+//   NONE OF 76 / 139 / 204 / 3844 IS USED BY ANOTHER CHAIN HERE, so both address
+//   prefixes are accepted as this chain's own and one phrase derives keys shared
+//   with no other chain.
+//
+//   WHAT THIS WALLET DOES NOT SEE: LOTTERY REWARDS. The coinbase pays the winner
+//   with a pay-to-pubkey script (<pubkey> OP_CHECKSIG), which ElectrumX indexes
+//   under a different scripthash than the P2PKH script of the same key. Measured
+//   on the live chain 2026-11-12: address XfYQwr555g… held 975,000 XFER, all of
+//   it P2PK, and its P2PKH scripthash answered 0. Reading and spending those
+//   needs a second scripthash per key and a P2PK signer; it is recorded in
+//   KNOWN_LIMITATIONS.md and is not done here.
+//
+//   ITS BACKEND IS THE OWNER'S OWN: xcoind built from source plus an ElectrumX
+//   patched for this chain (satorigo-gateway nodes/README.md), bridged at
+//   /electrum/xfer. Verified 2026-11-12 against the node: header hashes at five
+//   heights, 40 P2PKH balances and asset metadata.
+
 // NEOXA (NEOX) — NeoxaChain/Neoxa, verified 2026-08-25 against `main` (the repo's
 // default branch; `master` was fetched too and is byte-identical for this file).
 //
@@ -425,7 +467,7 @@
 //      chain from validating its own addresses.
 
 /** Ticker of a chain's native coin. Widen this (and networkFor) to add a chain. */
-export type NativeTicker = 'EVR' | 'RVN' | 'BTGS' | 'LTC' | 'WJK' | 'BTC' | 'DOGE' | 'NEOX' | 'XBT';
+export type NativeTicker = 'EVR' | 'RVN' | 'BTGS' | 'LTC' | 'WJK' | 'BTC' | 'DOGE' | 'NEOX' | 'XBT' | 'XFER';
 
 /** Canonical identity of a supported chain+network. */
 export type ChainId =
@@ -438,7 +480,8 @@ export type ChainId =
   | 'bitcoin-mainnet'
   | 'dogecoin-mainnet'
   | 'neoxa-mainnet'
-  | 'bitcoinblake2b-mainnet';
+  | 'bitcoinblake2b-mainnet'
+  | 'xfer-mainnet';
 
 /**
  * `scriptHash` sentinel meaning "this chain accepts NO P2SH address form".
@@ -578,6 +621,16 @@ export interface EvrmoreNetwork {
    * demonstrably mature, and remove it once that stops being true.
    */
   young?: boolean;
+  /**
+   * Block rewards on this chain are paid to a bare PUBLIC KEY (pay-to-pubkey),
+   * not to an address, and ordinary users receive them (X Coin's minute
+   * lottery pays the winner's wallet key this way). When true, every key of a
+   * wallet is read under a second scripthash, its P2PK script, and those
+   * outputs are spendable once mature. Unset everywhere else: on a mined chain
+   * the reward goes to a miner's address and the extra read would only double
+   * the round trips.
+   */
+  coinbaseToPubkey?: boolean;
   /**
    * Recently added TO THIS WALLET. A fact about Satori GO, not about the chain.
    *
@@ -965,6 +1018,38 @@ export const NEOXA_MAINNET: EvrmoreNetwork = {
   // would be the wrong signal.
 };
 
+// X Coin mainnet. THE FOURTH ASSET-CAPABLE CHAIN (Evrmore, Ravencoin, Neoxa):
+// Ravencoin's asset protocol with byte-identical "rvn?" markers. Every value is
+// from NiftyRaven/x-coin src/chainparams.cpp at v1.0.27; see the X COIN header
+// block for the lines and for the lottery-reward (P2PK) limitation.
+export const XFER_MAINNET: EvrmoreNetwork = {
+  id: 'mainnet',
+  chainId: 'xfer-mainnet',
+  bip32: { public: 0x0488b21e, private: 0x0488ade4 }, // chainparams.cpp:222/223 — STANDARD
+  pubKeyHash: 76, // chainparams.cpp:219 -> 'X'
+  scriptHash: 139, // chainparams.cpp:220 -> 'x'/'y'. Unique here, so accepted as a real prefix.
+  wif: 204, // chainparams.cpp:221
+  coinType: 3844, // chainparams.cpp:226 nExtCoinType (not in the SLIP-44 registry)
+  messageStart: 0x58, // chainparams.cpp:197 pchMessageStart[0] = 0x58 ('X' of "XFER")
+  defaultPort: 38443, // nDefaultPort
+  assetMarkerPrefix: 'rvn', // assets.h RVN_R/V/N = 114/118/110: the bytes are 'r','v','n'
+  // bech32Hrp INTENTIONALLY ABSENT: the chain defines no bech32 address form.
+  addressFormat: 'p2pkh', // legacy addresses -> BIP44 purpose 44'
+  messageMagic: 'X Coin Signed Message:\n', // src/validation.cpp strMessageMagic
+  ticker: 'XFER',
+  decimals: 8,
+  displayName: 'X Coin',
+  homepage: 'https://xferchain.net', // verified 2026-11-12 (the project's own site)
+  // YOUNG, and that is a plain fact here: genesis 2026-09-12, under 90,000
+  // blocks, and one seed node signs every block. If that node stops, the chain
+  // stops, which is exactly what the caution notice is for.
+  young: true,
+  recentlyAdded: true,
+  // Lottery winnings are paid as <pubkey> OP_CHECKSIG to a key of the winner's
+  // HD wallet (wallet.cpp GetScriptForMining), verified on chain 2026-11-13.
+  coinbaseToPubkey: true,
+};
+
 /** Asset script opcode (OP_EVR_ASSET / OP_RVN_ASSET / OP_NEOX_ASSET); marks an
  *  asset transfer/issuance output. All three chains use the SAME value 0xc0. */
 export const OP_EVR_ASSET = 0xc0;
@@ -1083,6 +1168,8 @@ export function networkFor(id: ChainId | EvrmoreNetwork['id']): EvrmoreNetwork {
       return NEOXA_MAINNET;
     case 'bitcoinblake2b-mainnet':
       return BITCOIN_BLAKE2B_MAINNET;
+    case 'xfer-mainnet':
+      return XFER_MAINNET;
     case 'testnet':
     case 'evrmore-testnet':
       return EVRMORE_TESTNET;
@@ -1292,6 +1379,18 @@ export const CHAIN_FEE_POLICIES: Record<ChainId, ChainFeePolicy> = {
     defaultSatPerByte: 1200n, // just above the floor; no measured estimate exists yet
     ceilingSatPerByte: 10_000n, // 10x params floor, same headroom ratio as EVR/RVN/DOGE
     maxTxFeeSats: 100_000_000n, // 1 NEOX >= ceiling x ~3-kB worst-case tx (30M)
+  },
+  // X Coin: values from the chain's OWN SOURCE, the Neoxa footing.
+  //   - src/validation.h:69 DEFAULT_MIN_RELAY_TX_FEE = 1000000 sat/kB -> 1000
+  //     sat/byte, Ravencoin's exact relay floor.
+  //   - The owner's ElectrumX answered relayfee 0.01 and estimatefee(2) 0.01
+  //     (2026-11-12), i.e. the floor: blocks are nearly empty, so there is no
+  //     fee market to sit above. The default keeps the usual margin over it.
+  'xfer-mainnet': {
+    floorSatPerByte: 1000n, // DEFAULT_MIN_RELAY_TX_FEE 1000000/kB (validation.h:69) — NOT server data
+    defaultSatPerByte: 1200n, // just above the floor; measured estimate equals the floor
+    ceilingSatPerByte: 10_000n, // 10x params floor, same headroom ratio as EVR/RVN/NEOX
+    maxTxFeeSats: 100_000_000n, // 1 XFER >= ceiling x ~3-kB worst-case tx (30M)
   },
 };
 

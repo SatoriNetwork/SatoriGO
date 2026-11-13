@@ -47,6 +47,8 @@ const GENESIS = {
   // genesis, and that is the correct answer for this key (verified 2026-09-07,
   // Fulcrum on electrum.bitcoinxor.org). The chain is told apart by its tip.
   btcb2: '000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f',
+  // X Coin: NiftyRaven/x-coin chainparams.cpp, matched by the owner's node.
+  xfer: '7c790cdb7a233c020cb71346082709a185eb6577643a327349112d425a712beb',
   // evr and rvn are ABSENT ON PURPOSE. This repo records no sourced genesis for
   // either, and a value written here from memory is worse than none: the first
   // draft of this file carried a guess that was actually BitcoinGold's, and it
@@ -54,7 +56,7 @@ const GENESIS = {
   // chain's own chainparams.cpp, the way network.ts documents every other one.
 };
 
-const CHAINS = ['evr', 'rvn', 'neox', 'btc', 'ltc', 'doge', 'btgs', 'wjk', 'btcb2'];
+const CHAINS = ['evr', 'rvn', 'neox', 'btc', 'ltc', 'doge', 'btgs', 'wjk', 'btcb2', 'xfer'];
 
 function check(chain) {
   return new Promise((resolve) => {

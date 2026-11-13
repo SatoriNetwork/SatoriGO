@@ -1350,13 +1350,13 @@ export function LiveSettings({ onBack, onOpenAddressBook, onImportMonero }: Live
               <div className="stack" data-testid="live-addresses-list">
                 {addresses.map((a) => (
                   <div
-                    key={a.index}
+                    key={a.change ? `c${a.index}` : a.index}
                     className="list-row"
-                    data-testid={`live-address-item-${a.index}`}
+                    data-testid={a.change ? `live-change-address-item-${a.index}` : `live-address-item-${a.index}`}
                     style={{ alignItems: 'center', gap: 8 }}
                   >
                     <span className="row-main" style={{ flex: 1, minWidth: 0 }}>
-                      <span className="row-title">Address #{a.index}</span>
+                      <span className="row-title">{a.change ? `Change address #${a.index}` : `Address #${a.index}`}</span>
                       <span className="row-desc mono" style={{ fontSize: 10.5, wordBreak: 'break-all' }}>
                         {a.address}
                       </span>
@@ -1418,7 +1418,7 @@ export function LiveSettings({ onBack, onOpenAddressBook, onImportMonero }: Live
                     ]
                       .filter(Boolean)
                       .join(' ')
-                  : 'Looks ahead for addresses of this recovery phrase that already hold coins. Runs by itself after an import.'}
+                  : 'Looks ahead for addresses of this recovery phrase that already hold coins, change addresses included. Runs by itself after an import.'}
               </p>
               {addrError && (
                 <span

@@ -2822,6 +2822,9 @@ button.list-row:hover, a.list-row:hover { background: var(--card-hover); border-
   font-weight: 700;
   letter-spacing: -0.03em;
 }
+/* 1.7.23: Home's balance is one line, always. A figure too long for the
+   screen is set smaller (components/useFitText.ts), never wrapped or cut. */
+.hero .hero-value { white-space: nowrap; }
 /* The dot-only status is a dot, as in Home's header: no chip around it. */
 .pill.pill-dot { background: none; border-color: transparent; }
 /* Activity and Network tabs: the identity footer rests at the bottom of the

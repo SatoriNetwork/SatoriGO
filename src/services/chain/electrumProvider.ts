@@ -28,7 +28,7 @@ import type {
   ElectrumHistoryItem,
   ElectrumUtxo,
 } from './electrumTypes';
-import { addressToElectrumScripthash } from './keys';
+import { addressToElectrumScripthash, p2pkScript, scriptToElectrumScripthash } from './keys';
 // TYPE ONLY, and it must stay that way: the EVM engine sits behind the build
 // flag, so a VALUE import here would pull it into a package built without --evm
 // (vite.config.ts fails such a build). A type annotation is erased by tsc and
@@ -386,6 +386,46 @@ export class ElectrumWalletDataProvider implements WalletDataProvider {
 
   private readonly prices: Partial<Record<AssetId, { priceUsd: number; change24hPct: number }>>;
 
+  /** address -> scripthash of the SAME key's pay-to-pubkey script. Filled by
+   *  the live wallet for every key it derives; consulted only on a chain whose
+   *  rewards are paid to a bare pubkey (net.coinbaseToPubkey). */
+  private readonly p2pkByAddress = new Map<string, string>();
+
+  /** Tell the provider the public key behind an address, so reads of that
+   *  address also cover the key's pay-to-pubkey outputs. Public data only. */
+  registerPubkey(address: string, publicKey: Uint8Array): void {
+    this.p2pkByAddress.set(address, scriptToElectrumScripthash(p2pkScript(publicKey)));
+  }
+
+  /** The scripthashes that belong to an address BESIDES its own. Empty on
+   *  every chain that does not pay rewards to a bare pubkey. */
+  private extraScripthashes(address: string): string[] {
+    if (this.net.coinbaseToPubkey !== true) return [];
+    const sh = this.p2pkByAddress.get(address);
+    return sh ? [sh] : [];
+  }
+
+  /** History of an address across all of its scripthashes, one row per tx. A
+   *  failed read of any of them fails the whole call: half a history must
+   *  never pass for the full one. */
+  private async historyAcrossScripts(address: string): Promise<ElectrumHistoryItem[]> {
+    const sh = addressToElectrumScripthash(address);
+    const history = (await this.client.request<ElectrumHistoryItem[]>(ELECTRUM_METHODS.getHistory, [sh])) ?? [];
+    const extra = this.extraScripthashes(address);
+    if (extra.length === 0) return history;
+    const seen = new Set(history.map((h) => h.tx_hash));
+    const merged = [...history];
+    for (const x of extra) {
+      const more = (await this.client.request<ElectrumHistoryItem[]>(ELECTRUM_METHODS.getHistory, [x])) ?? [];
+      for (const item of more) {
+        if (seen.has(item.tx_hash)) continue;
+        seen.add(item.tx_hash);
+        merged.push(item);
+      }
+    }
+    return merged;
+  }
+
   /** Native coin name for the ACTIVE chain ('EVR' / 'RVN'). */
   private get nativeName(): string {
     return this.net.ticker;
@@ -569,7 +609,12 @@ export class ElectrumWalletDataProvider implements WalletDataProvider {
       // also the ONLY form a plain (non-asset) server accepts.
       if (!this.isEvrmore) {
         const bal = await this.client.request<ElectrumBalance>(ELECTRUM_METHODS.getBalance, [sh]);
-        const amountBase = toBase((bal.confirmed ?? 0) + (bal.unconfirmed ?? 0));
+        let sats = (bal.confirmed ?? 0) + (bal.unconfirmed ?? 0);
+        for (const x of this.extraScripthashes(address)) {
+          const more = await this.client.request<ElectrumBalance>(ELECTRUM_METHODS.getBalance, [x]);
+          sats += (more.confirmed ?? 0) + (more.unconfirmed ?? 0);
+        }
+        const amountBase = toBase(sats);
         return [{ assetId: this.nativeName as AssetId, amountBase, scale: this.net.decimals }];
       }
 
@@ -612,12 +657,20 @@ export class ElectrumWalletDataProvider implements WalletDataProvider {
         ELECTRUM_METHODS.listUnspent,
         this.hasAssets ? [sh, true] : [sh],
       );
+      // Pay-to-pubkey outputs of the same key (native coin only: an asset
+      // output is always P2PKH-based, so the plain form is asked for).
+      const pubkeyUtxos: ElectrumUtxo[] = [];
+      for (const x of this.extraScripthashes(address)) {
+        const more = await this.client.request<ElectrumUtxo[]>(ELECTRUM_METHODS.listUnspent, [x]);
+        pubkeyUtxos.push(...(more ?? []));
+      }
 
       // Group UTXO sats by asset: native coin (asset null) vs each asset name.
       // On a chain with no asset protocol every UTXO is native by definition, so
       // an `asset` field can only be noise — never let it synthesize an entry.
       let evrSats = 0;
       const satsByAsset = new Map<string, number>();
+      for (const u of pubkeyUtxos) evrSats += typeof u?.value === 'number' ? u.value : 0;
       for (const u of utxos ?? []) {
         const val = typeof u?.value === 'number' ? u.value : 0;
         if (!this.hasAssets || isNativeAssetField(u?.asset)) {
@@ -718,7 +771,14 @@ export class ElectrumWalletDataProvider implements WalletDataProvider {
       // (divisions is display-only), so both divide by ASSET_BASE_UNIT.
       const params = isNative ? [sh] : [sh, normalized];
       const bal = await this.client.request<ElectrumBalance>(ELECTRUM_METHODS.getBalance, params);
-      return ((bal.confirmed ?? 0) + (bal.unconfirmed ?? 0)) / ASSET_BASE_UNIT;
+      let sats = (bal.confirmed ?? 0) + (bal.unconfirmed ?? 0);
+      if (isNative) {
+        for (const x of this.extraScripthashes(address)) {
+          const more = await this.client.request<ElectrumBalance>(ELECTRUM_METHODS.getBalance, [x]);
+          sats += (more.confirmed ?? 0) + (more.unconfirmed ?? 0);
+        }
+      }
+      return sats / ASSET_BASE_UNIT;
     } catch (err) {
       if (err instanceof NetworkOfflineError) throw err;
       throw new NetworkOfflineError();
@@ -734,11 +794,7 @@ export class ElectrumWalletDataProvider implements WalletDataProvider {
         await this.client.connect();
       }
 
-      const sh = addressToElectrumScripthash(address);
-      const history = await this.client.request<ElectrumHistoryItem[]>(
-        ELECTRUM_METHODS.getHistory,
-        [sh],
-      );
+      const history = await this.historyAcrossScripts(address);
 
       // Sort: mempool (height<=0) first, then confirmed newest-first.
       const sorted = sortHistoryMempoolFirst(history);
@@ -814,12 +870,7 @@ export class ElectrumWalletDataProvider implements WalletDataProvider {
       if (!this.client.isConnected()) {
         await this.client.connect();
       }
-      const sh = addressToElectrumScripthash(address);
-      const history = await this.client.request<ElectrumHistoryItem[]>(
-        ELECTRUM_METHODS.getHistory,
-        [sh],
-      );
-      return history ?? [];
+      return await this.historyAcrossScripts(address);
     } catch (err) {
       if (err instanceof NetworkOfflineError) throw err;
       // A JSON-RPC ERROR REPLY is the server ANSWERING: it is reachable and has

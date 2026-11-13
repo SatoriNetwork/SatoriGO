@@ -61,6 +61,8 @@ const GENESIS: Record<string, string> = {
   // a 164-byte v2 header above height 961640, never by block 0.
   'bitcoinblake2b-mainnet': '000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f',
   'neoxa-mainnet': '0000000a50fdaaf22f1c98b8c61559e15ab2269249aa1fb20683180703cdbf07',
+  // X Coin: NiftyRaven/x-coin chainparams.cpp, matched by the owner's node.
+  'xfer-mainnet': '7c790cdb7a233c020cb71346082709a185eb6577643a327349112d425a712beb',
   'wojakcoin-mainnet': '000000004536a4f8fa9d88f0001ca9f9825f8d9fd3ba6383a2f030c0427bf085',
   'bitcoingold-mainnet': '0000000d1c5a497963a46c0348cb4346779c52d9e1d7cc8b5efb1be0a4a0f964',
   'litecoin-mainnet': '12a765e31ffd4059bada1e25190f6e98c99d9714d334efa41a195a7e7e04bfe2',

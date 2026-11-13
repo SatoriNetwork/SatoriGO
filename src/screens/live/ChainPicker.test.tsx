@@ -143,6 +143,7 @@ describe('ChainPicker', () => {
       'wojakcoin-mainnet',
       'neoxa-mainnet',
       'bitcoinblake2b-mainnet',
+      'xfer-mainnet',
     ]);
   });
 
@@ -248,7 +249,7 @@ describe('hidden networks', () => {
     render(
       <ChainPicker value="mainnet" onChange={() => {}} testIdPrefix="test-chain" secretKind="phrase" />,
     );
-    expect(screen.getAllByTestId(/^test-chain-/).length).toBe(9);
+    expect(screen.getAllByTestId(/^test-chain-/).length).toBe(10);
   });
 });
 
@@ -269,7 +270,7 @@ describe('EVM chains', () => {
 
     render(<Harness evmChains={[]} />);
     expect(screen.queryByTestId('test-chain-evm:base')).toBeNull();
-    expect(screen.getAllByTestId(/^test-chain-/).length).toBe(9);
+    expect(screen.getAllByTestId(/^test-chain-/).length).toBe(10);
   });
 
   it('offers a row per EVM chain when evmChains is non-empty, and selecting one emits its evm:<key> target', () => {
@@ -324,6 +325,6 @@ describe('long list (1.6.7): a filter over a scrolling box', () => {
     expect([...left].sort()).toEqual(['test-chain-litecoin-mainnet', 'test-chain-mainnet']);
     // Clearing the filter brings every chain back.
     fireEvent.change(screen.getByTestId('filter-test-chain'), { target: { value: '' } });
-    expect(screen.getAllByTestId(/^test-chain-/).length).toBe(9);
+    expect(screen.getAllByTestId(/^test-chain-/).length).toBe(10);
   });
 });

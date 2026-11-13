@@ -1196,6 +1196,10 @@ export interface ConnectedSite {
 export interface ReceiveAddress {
   index: number;
   address: string;
+  /** True for an address on the seed's CHANGE chain that another wallet of the
+   *  same phrase used. Counted in balances and spendable, never offered for
+   *  receiving. `index` is then the index on that chain. */
+  change?: true;
 }
 
 /** Live reachability of one Electrum server (for the online/offline dots). */
@@ -1359,6 +1363,14 @@ export const DEFAULT_EXPLORER_URL_NEOX = 'https://explorer.neoxa.net/tx/{txid}';
  *  mempool.space, so a txid resolves at https://mempool.guide/tx/<txid>. */
 export const DEFAULT_EXPLORER_URL_BTCB2 = 'https://mempool.guide/tx/{txid}';
 
+/** Default X COIN block-explorer URL template. VERIFIED LIVE 2026-11-13: the
+ *  project's own explorer is a single-page app routed by hash, and its script
+ *  builds links as `#/tx/<txid>`. Its API answered the same txid
+ *  (45d2b5fb…78ec, the coinbase of block 1) with height 1 at
+ *  https://explorer.xferchain.net/api/tx/<txid>, cross-checked against the
+ *  owner's node. */
+export const DEFAULT_EXPLORER_URL_XFER = 'https://explorer.xferchain.net/#/tx/{txid}';
+
 /** Block-explorer template default for a chain (default = active chain). '' on
  *  a chain with no known explorer (see the WOJAKCOIN comment above) — callers
  *  must treat an empty template as "no explorer available", not fall through
@@ -1381,6 +1393,7 @@ function defaultExplorerFor(chainId: string = activeChainTarget()): string {
   if (ticker === 'WJK') return DEFAULT_EXPLORER_URL_WJK;
   if (ticker === 'NEOX') return DEFAULT_EXPLORER_URL_NEOX;
   if (ticker === 'XBT') return DEFAULT_EXPLORER_URL_BTCB2;
+  if (ticker === 'XFER') return DEFAULT_EXPLORER_URL_XFER;
   if (ticker === 'EVR') return DEFAULT_EXPLORER_URL;
   // A chain with no known explorer fails closed rather than borrowing another
   // chain's, which would resolve a foreign txid on the wrong chain and read to
@@ -1420,6 +1433,7 @@ function explorerKeyForChain(chainId: string = activeChainTarget()): string {
   if (ticker === 'NEOX') return `${EXPLORER_URL_KEY}:neoxa-mainnet`;
   // Bitcoin BLAKE2b (XBT) had no case either and shared Evrmore's slot the same way.
   if (ticker === 'XBT') return `${EXPLORER_URL_KEY}:bitcoinblake2b-mainnet`;
+  if (ticker === 'XFER') return `${EXPLORER_URL_KEY}:xfer-mainnet`;
   return EXPLORER_URL_KEY;
 }
 
@@ -3279,7 +3293,9 @@ export const useLiveStore = create<LiveState>((set, get) => ({
           set((s) => ({ addressScan: { ...s.addressScan, scanned } }));
         },
       });
-      const found = Math.max(0, res.addressCountAfter - res.addressCountBefore);
+      const found =
+        Math.max(0, res.addressCountAfter - res.addressCountBefore) +
+        Math.max(0, res.changeCountAfter - res.changeCountBefore);
       set({
         addressScan: {
           scanning: false,

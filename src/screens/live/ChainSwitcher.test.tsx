@@ -130,6 +130,13 @@ const CHAIN_INFO = vi.hoisted(
         recentlyAdded: true,
         young: true,
       },
+      'xfer-mainnet': {
+        ticker: 'XFER',
+        displayName: 'X Coin',
+        homepage: 'https://xferchain.net',
+        recentlyAdded: true,
+        young: true,
+      },
     }) as Record<
       string,
       {
@@ -281,6 +288,7 @@ vi.mock('../../services/chain/chainParams', () => ({
   DOGECOIN_MAINNET: { id: 'dogecoin-mainnet', ...CHAIN_INFO['dogecoin-mainnet'] },
   NEOXA_MAINNET: { id: 'neoxa-mainnet', ...CHAIN_INFO['neoxa-mainnet'] },
   BITCOIN_BLAKE2B_MAINNET: { id: 'bitcoinblake2b-mainnet', ...CHAIN_INFO['bitcoinblake2b-mainnet'] },
+  XFER_MAINNET: { id: 'xfer-mainnet', ...CHAIN_INFO['xfer-mainnet'] },
 }));
 
 import { ChainSwitcher } from './ChainSwitcher';
@@ -978,6 +986,7 @@ describe('grouping: Your networks on top, Add a network below', () => {
         'dogecoin-mainnet',
         'neoxa-mainnet',
         'bitcoinblake2b-mainnet',
+        'xfer-mainnet',
         'zec:mainnet',
         'tao:mainnet',
       ],

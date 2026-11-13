@@ -790,6 +790,62 @@ describe('LiveWalletService', () => {
     await expect(svcPk.addReceiveAddress()).rejects.toThrow('single-address-wallet');
   });
 
+  it('buildEvrSend spends a UTXO sitting on a discovered CHANGE-chain address', async () => {
+    // A seed used in a Core-style wallet: 0.6 on receive 0 and 0.6 of change on
+    // internal address 0 (m/44'/coin'/0'/1/0). A 1.0 send needs BOTH, so the
+    // change key must be gathered and must sign its own input.
+    const seed = await mnemonicToSeed(VECTOR_MNEMONIC);
+    const addr0 = deriveAddress(seed, EVRMORE_MAINNET, 0, 0, 0).address;
+    const change0 = deriveAddress(seed, EVRMORE_MAINNET, 0, 1, 0).address;
+    const { addressToElectrumScripthash } = await import('./keys');
+    const raws = new Map<string, string>();
+    const p2pkh0 = bytesToHex(p2pkhScript(addressToHash160(addr0).hash));
+    const p2pkhC = bytesToHex(p2pkhScript(addressToHash160(change0).hash));
+    const u0 = coherentUtxos([{ tx_hash: 'a'.repeat(64), tx_pos: 0, height: 1, value: 60_000_000 }], raws, p2pkh0)[0];
+    const uC = coherentUtxos([{ tx_hash: 'c'.repeat(64), tx_pos: 0, height: 1, value: 60_000_000 }], raws, p2pkhC)[0];
+    const shChange = addressToElectrumScripthash(change0);
+    const utxosBySh: Record<string, Utxo[]> = {
+      [addressToElectrumScripthash(addr0)]: [u0],
+      [shChange]: [uC],
+    };
+    const client: ElectrumClient = {
+      connect: async () => {},
+      isConnected: () => true,
+      endpoint: () => 'wss://fake',
+      close: () => {},
+      request: async (method: string, params: unknown[] = []) => {
+        if (method === ELECTRUM_METHODS.estimateFee) return 0.001 as never;
+        if (method === ELECTRUM_METHODS.getHistory) {
+          return (params[0] === shChange ? [{ tx_hash: 'c'.repeat(64), height: 1 }] : []) as never;
+        }
+        if (method === ELECTRUM_METHODS.listUnspent) {
+          return (params[1] ? [] : utxosBySh[params[0] as string] ?? []) as never;
+        }
+        if (method === ELECTRUM_METHODS.txGet) {
+          const raw = raws.get(params[0] as string);
+          if (!raw) throw new Error(`no prevout for ${String(params[0])}`);
+          return raw as never;
+        }
+        throw new Error(`unexpected ${method}`);
+      },
+    };
+    const svc = new LiveWalletService(client);
+    await svc.import(VECTOR_MNEMONIC, 'pw');
+
+    // Before discovery the change coin is invisible: 1.0 cannot be built.
+    await expect(svc.buildEvrSend(RECIPIENT, 100_000_000n)).rejects.toThrow('insufficient-funds');
+
+    const scan = await svc.discoverUsedAddresses();
+    expect(scan.changeCountAfter).toBe(1);
+
+    const plan = await svc.buildEvrSend(RECIPIENT, 100_000_000n);
+    const reverseHex = (h: string) => (h.match(/../g) as string[]).reverse().join('');
+    expect(plan.built.rawHex).toContain(reverseHex(u0.tx_hash));
+    expect(plan.built.rawHex).toContain(reverseHex(uC.tx_hash));
+    // Change of THIS send still returns to the primary receive address.
+    expect(plan.built.rawHex).toContain(p2pkh0);
+  });
+
   it('buildEvrSend spends UTXOs gathered across ALL derived addresses', async () => {
     // Two addresses, each with 0.6 EVR. A 1.0 EVR send needs BOTH (either alone
     // is insufficient), proving multi-address gathering + per-UTXO key signing.

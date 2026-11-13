@@ -49,6 +49,9 @@ const MEASURED_ESTIMATE_SAT_PER_BYTE: Partial<Record<ChainId, number>> = {
   // BELOW Dogecoin's 1000 sat/byte params floor either day, which is exactly
   // why the DOGE policy must never take its floor from the server.
   'dogecoin-mainnet': 967.35,
+  // X Coin, measured 2026-11-12 on the owner's own ElectrumX: estimatefee(2) =
+  // 0.01 XFER/kB, which is exactly the relay floor (blocks are nearly empty).
+  'xfer-mainnet': 1000.0,
 };
 
 /** Measured 2026-08-14: `blockchain.relayfee` in sat/byte. BTC, LTC and DOGE
@@ -62,6 +65,7 @@ const MEASURED_RELAY_FLOOR_SAT_PER_BYTE: Partial<Record<ChainId, number>> = {
   'ravencoin-mainnet': 1000.0,
   'evrmore-mainnet': 1000.0,
   'evrmore-testnet': 1000.0,
+  'xfer-mainnet': 1000.0, // relayfee 0.01 XFER/kB, same probe
 };
 
 /** Invert the wallet's conversion: sat/byte -> the coin/kB a server would send. */
@@ -74,7 +78,7 @@ describe('CHAIN_FEE_POLICIES invariants (all nine chains + testnet)', () => {
   it('covers every ChainId exactly once', () => {
     // Record<ChainId, …> already enforces this at compile time; this pins the
     // runtime count so a type-system workaround would still fail a test.
-    expect(ALL_CHAIN_IDS).toHaveLength(10);
+    expect(ALL_CHAIN_IDS).toHaveLength(11);
   });
 
   it('has a measured estimate for every chain except the closed unmeasurable list', () => {
