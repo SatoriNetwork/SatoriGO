@@ -2266,6 +2266,30 @@ button.list-row:hover, a.list-row:hover { background: var(--card-hover); border-
   text-align: left;
 }
 .live-scope .force-pw-text:last-child { margin-bottom: 0; }
+/* 1.7.2: the blocking screen reads as one column. Only the brand and the
+   title are centred; everything under them shares the left edge, field labels
+   and the backup card's title included. */
+.live-scope .force-pw .field label,
+.live-scope .force-pw .card { text-align: left; }
+.live-scope .force-pw .field ~ .field { margin-top: 14px; }
+/* Full width WITHOUT width:100%: the paragraphs carry a 2px side margin, and
+   100% plus that margin made the whole screen scroll sideways by 4px. */
+.live-scope .force-pw .force-pw-text { width: auto; align-self: stretch; }
+.live-scope .force-pw-why {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  align-self: stretch;
+  margin: 0 2px 10px;
+  text-align: left;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.live-scope .force-pw-why svg { flex-shrink: 0; margin-top: 1px; color: var(--warning); }
+.live-scope .force-pw-why p { margin: 0; }
+.live-scope .force-pw-backup { width: 100%; margin: 6px 0 4px; padding: 14px; }
+.live-scope .force-pw-backup .row-title { display: block; margin-bottom: 2px; font-weight: 600; }
+.live-scope .force-pw-note { margin-top: 12px; }
 
 /* The one wallet the password below opens. Same visual language as a picker
    row, one step larger, with the "Change" affordance on the right. */
@@ -2526,6 +2550,24 @@ button.list-row:hover, a.list-row:hover { background: var(--card-hover); border-
 .asset-badge { flex-shrink: 0; font-size: 9.5px; font-weight: 600; padding: 1px 6px; border-radius: 999px; }
 .asset-badge.warning { color: var(--warning); background: var(--warning-bg); }
 .asset-badge.success { color: var(--success); background: var(--success-bg); }
+/* "Claim" on the SATORI row: the badge's size, but an action, so it takes the
+   accent and a hover instead of a status colour. */
+.asset-claim {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 7px;
+  border-radius: 999px;
+  font-size: 9.5px;
+  font-weight: 600;
+  line-height: 14px;
+  color: var(--accent-text);
+  background: var(--accent-soft);
+  transition: background-color var(--dur) var(--ease);
+}
+.asset-claim:hover { background: color-mix(in srgb, var(--accent) 26%, transparent); }
+.asset-claim:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 /* Lock-screen "or create / import a new wallet" alternatives. */
 .live-scope .lock-alt { margin-top: 18px; width: 100%; }

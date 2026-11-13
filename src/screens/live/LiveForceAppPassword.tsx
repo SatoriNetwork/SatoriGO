@@ -210,23 +210,25 @@ export function LiveForceAppPassword() {
   return (
     <div className="app-frame screen-enter" data-testid="live-force-app-password">
       <ConstellationField variant="calm" />
-      <div className="lock-screen" style={{ justifyContent: 'flex-start', paddingTop: 22 }}>
+      <div className="lock-screen force-pw" style={{ justifyContent: 'flex-start', paddingTop: 22 }}>
         <div className="lock-brand" style={{ marginBottom: 12 }}>
           <BrandLogo slot="satori" size={56} alt="Satori Network" />
           <span className="brand-title">Satori GO</span>
         </div>
 
-        <h2 style={{ marginBottom: 8 }}>Set a password for Satori GO</h2>
+        <h2 style={{ marginBottom: 14 }}>Set a password for Satori GO</h2>
 
-        <div
-          className="banner warning"
-          style={{ alignItems: 'flex-start', marginBottom: 10 }}
-          data-testid="live-force-app-password-why"
-        >
-          <ShieldAlert size={15} style={{ flexShrink: 0 }} />
-          <span>
-            {headline} Anyone who can use this computer can open Satori GO and spend from {them}.
-          </span>
+        {/* The problem, stated once, as text with a warning mark rather than a
+            filled amber box: the screen already blocks everything else, it does
+            not need to shout as well. */}
+        <div className="force-pw-why" data-testid="live-force-app-password-why">
+          <ShieldAlert size={16} aria-hidden="true" />
+          <p>
+            {headline}{' '}
+            <span className="text-dim">
+              Anyone who can use this computer can open Satori GO and spend from {them}.
+            </span>
+          </p>
         </div>
 
         <p className="text-dim force-pw-text">
@@ -251,7 +253,7 @@ export function LiveForceAppPassword() {
         {/* THE BACKUP, OFFERED BEFORE IT IS TAKEN AWAY. Always here, never behind
             a step the user has to finish first: a screen that demands a password
             and hides the way to the phrase is the one thing this must not be. */}
-        <div className="card" data-testid="live-force-app-password-backup" style={{ marginTop: 4 }}>
+        <div className="card force-pw-backup" data-testid="live-force-app-password-backup">
           <span className="row-title">Back up first</span>
           <p className="text-dim force-pw-text" style={{ margin: '3px 0 8px' }}>
             Right now you can still see the {backupNoun(unprotected)} of{' '}
@@ -305,21 +307,13 @@ export function LiveForceAppPassword() {
           />
 
           {/* The SAME sentences the Settings setup screen has always said, in the
-              same order: what losing it costs, and that it cannot be removed. */}
-          <div
-            className="banner warning"
-            data-testid="live-force-app-password-warning"
-            style={{ marginTop: 10, alignItems: 'flex-start' }}
-          >
-            <AlertTriangle size={14} />
-            <span>
-              If you lose this password, the wallets it protects can only be restored from their
-              recovery phrases.
-            </span>
-          </div>
-          <p className="text-faint force-pw-text" style={{ margin: '8px 2px 0' }}>
-            Removing the app password is not supported in this release. You can change it at any
-            time in Settings.
+              same order: what losing it costs, and that it cannot be removed.
+              One quiet note under the fields they are about, not a second
+              amber box. */}
+          <p className="text-dim force-pw-text force-pw-note" data-testid="live-force-app-password-warning">
+            If you lose this password, the wallets it protects can only be restored from their
+            recovery phrases. Removing the app password is not supported in this release. You can
+            change it at any time in Settings.
           </p>
 
           {error && (

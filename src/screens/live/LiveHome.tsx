@@ -504,11 +504,15 @@ function BalanceRow({
   masked,
   onSelect,
   staked,
+  onClaim,
   nativeTicker,
   compact,
   edit,
   pricesLoaded,
 }: {
+  /** Set on the SATORI row while staking rewards are waiting: a "Claim" button
+   *  in the row's second line, beside the "staked" tag it belongs to. */
+  onClaim?: () => void;
   asset: LiveAssetBalance;
   /** The price feed has answered for this wallet (some row is priced), so a
    *  row with no price is a token the feed does not carry, not one still
@@ -667,6 +671,23 @@ function BalanceRow({
             >
               staked
             </span>
+          )}
+          {showSecondary && onClaim && (
+            <button
+              type="button"
+              className="asset-claim"
+              data-testid="live-home-claim"
+              onClick={(e) => {
+                // The row itself is a button surface: claiming must not also
+                // open the asset's detail screen.
+                e.stopPropagation();
+                onClaim();
+              }}
+              onKeyDown={(e) => e.stopPropagation()}
+            >
+              <Gift size={11} aria-hidden="true" />
+              Claim
+            </button>
           )}
         </span>
       </div>
@@ -1459,6 +1480,8 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
     () => (dragOrder ? applyManualOrder(visibleAssets, dragOrder) : visibleAssets),
     [visibleAssets, dragOrder],
   );
+  // Whether the SATORI row is in the list, i.e. whether "Claim" can sit on it.
+  const satoriRowShown = canHoldAssets && listAssets.some((a) => a.name === 'SATORI');
   // Names in the order the list currently shows them, native excluded (the
   // native coin is first by construction and is not part of any arrangement).
   const orderableVisible = useMemo(() => orderableNames(listAssets), [listAssets]);
@@ -2369,7 +2392,11 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
                   sizes its frame inline), so the compact figure lives here
                   beside the class that names the same state. 36 keeps the coin
                   recognisable while giving the list back 28px of its 74. */}
-              {pendingRewards && officialSatori && onRewards && (
+              {/* Normally the claim lives ON the SATORI row (see BalanceRow's
+                  onClaim). This pill above the balance is only the fallback for
+                  when that row is not on screen (hidden as a zero balance, or a
+                  chain with no list), so rewards are never unreachable. */}
+              {pendingRewards && officialSatori && onRewards && !firstLoad && !satoriRowShown && (
                 <button
                   type="button"
                   className="reward-pulse"
@@ -2795,6 +2822,7 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
                             }
                           : undefined
                       }
+                      onClaim={asset.name === 'SATORI' && pendingRewards && officialSatori && onRewards ? onRewards : undefined}
                       staked={
                         asset.name === 'SATORI' && officialSatori && isStakedSatori && stakedPoolAddress
                           ? { poolAlias: stakedPoolAlias, poolAddress: stakedPoolAddress }
