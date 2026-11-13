@@ -1,6 +1,6 @@
 # Known limitations
 
-Current, honest limitations of the wallet (v1.7.23).
+Current, honest limitations of the wallet (v1.7.24).
 
 Satori GO is a non-custodial multi-chain wallet. Eight coin networks and four
 EVM networks ship in this version, and every one of them has had a funded send
@@ -113,13 +113,22 @@ confirmed by the owner on mainnet (item 7). Nothing below is marketing.
       against the X Coin node on a test key). Caveat one: the balance includes
       rewards younger than 101 blocks, which cannot be spent yet, so right
       after a win the amount you can send is lower than the balance shown.
+      Since 1.7.24 a line under the balance on Home names the amount that is
+      still maturing and about how long is left; the time is the block count
+      at one block a minute, so it is an estimate. Every pay-to-pubkey output
+      is held for the full 101 blocks, a reward or not, because the server
+      does not say which is which.
       Caveat two: only keys of the recovery phrase are covered. A node that
       ran before its wallet existed pays a separate key kept in the node's
       `lottery-payout.key` file, which no recovery phrase can derive.
-    - **No owner-verified funded send yet.** Parameters, derivation, address
-      validation, asset scripts and the fee policy are verified against the
-      chain's source and live data, but item 7 does not cover this chain until
-      a real send has been confirmed. Test small first.
+    - **One kind of send is owner-verified, two are not.** A send of XFER paid
+      from lottery rewards was confirmed by the owner on mainnet on 2026-11-13
+      (1.7.23), which is the pay-to-pubkey signing path. A send paid from coins
+      on an ordinary address, and a send of an X Coin token, have not had a
+      funded test: they use the same code as the other Ravencoin-family
+      networks, and parameters, derivation, address validation, asset scripts
+      and the fee policy are verified against the chain's source and live
+      data. Test small first.
     - **One server.** The wallet reaches X Coin through the Satori GO gateway
       and the owner's own node; no public server exists to fall back to. The
       chain itself depends on a single block-signing node, which is why it

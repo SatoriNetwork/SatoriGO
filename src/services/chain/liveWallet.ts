@@ -884,6 +884,63 @@ function sleep(ms: number): Promise<void> {
  *  against a tip the server reports a block ahead of its peers. */
 export const COINBASE_MATURITY_BLOCKS = 101;
 
+/** Blocks left before a reward output confirmed at `height` can be spent, with
+ *  the chain at `tip`. 0 means spendable now. An output with no usable height
+ *  (unconfirmed, or a value the server made up) waits the full term: the one
+ *  rule both the send path and the "maturing" note on Home go by. */
+export function blocksUntilMature(height: number, tip: number): number {
+  if (!Number.isSafeInteger(height) || height <= 0) return COINBASE_MATURITY_BLOCKS;
+  return Math.max(0, COINBASE_MATURITY_BLOCKS - (tip - height));
+}
+
+/** What a wallet's not-yet-spendable rewards add up to. */
+export interface ImmatureRewards {
+  /** Sum of the rewards that cannot be spent yet. */
+  totalSats: bigint;
+  /** How many rewards that is. */
+  count: number;
+  /** Blocks until the FIRST of them can be spent, and how much that one frees. */
+  nextBlocks: number;
+  nextSats: bigint;
+  /** Blocks until ALL of them can be spent. */
+  allBlocks: number;
+  /** The chain's target block time, when it is known (for "about N min"). */
+  blockSeconds: number | null;
+}
+
+/** Pure summary of a list of reward outputs at a given tip. Null when every
+ *  one of them is already spendable. */
+export function summarizeImmatureRewards(
+  outputs: Array<{ value: number; height: number }>,
+  tip: number,
+  blockSeconds: number | null,
+): ImmatureRewards | null {
+  let totalSats = 0n;
+  let count = 0;
+  let nextBlocks = Infinity;
+  let nextSats = 0n;
+  let allBlocks = 0;
+  for (const o of outputs) {
+    const left = blocksUntilMature(o.height, tip);
+    if (left === 0) continue;
+    if (!Number.isSafeInteger(o.value) || o.value < 0) {
+      throw new Error(`Untrusted UTXO value is not a safe integer: ${String(o.value)}`);
+    }
+    const value = BigInt(o.value);
+    totalSats += value;
+    count += 1;
+    if (left < nextBlocks) {
+      nextBlocks = left;
+      nextSats = value;
+    } else if (left === nextBlocks) {
+      nextSats += value;
+    }
+    if (left > allBlocks) allBlocks = left;
+  }
+  if (count === 0) return null;
+  return { totalSats, count, nextBlocks, nextSats, allBlocks, blockSeconds };
+}
+
 export class LiveWalletService implements WalletEngine {
   /** This engine is the UTXO family; the EVM engine sits beside it (engine.ts). */
   readonly family = 'utxo' as const;
@@ -4876,12 +4933,31 @@ export class LiveWalletService implements WalletEngine {
         tip = header.height;
       }
       const tipHeight = tip;
-      const mature = rewards.filter(
-        (u) => Number.isSafeInteger(u.height) && u.height > 0 && tipHeight - u.height >= COINBASE_MATURITY_BLOCKS,
-      );
+      const mature = rewards.filter((u) => blocksUntilMature(u.height, tipHeight) === 0);
       all.push(...this.toSignable(mature, key, bytesToHex(script)));
     }
     return all;
+  }
+
+  /**
+   * The wallet's rewards that are in the balance but cannot be spent yet, on a
+   * chain that pays rewards to a bare pubkey. Null on every other chain and
+   * when nothing is waiting. Reads the same outputs, under the same maturity
+   * rule, as the send path: what this reports as waiting is exactly what a
+   * send leaves out.
+   */
+  async getImmatureRewards(): Promise<ImmatureRewards | null> {
+    if (this.net.coinbaseToPubkey !== true) return null;
+    const keys = await this.allKeys();
+    const outputs: Array<{ value: number; height: number }> = [];
+    for (const key of keys) {
+      const rewards = await electrumListUnspent(this.client, scriptToElectrumScripthash(p2pkScript(key.publicKey)));
+      for (const u of rewards) outputs.push({ value: u.value, height: u.height });
+    }
+    if (outputs.length === 0) return null;
+    const header = await this.client.request<{ height: number }>(ELECTRUM_METHODS.headersSubscribe, []);
+    if (!Number.isSafeInteger(header?.height) || header.height <= 0) throw new Error('tip-height-unavailable');
+    return summarizeImmatureRewards(outputs, header.height, this.net.targetBlockSeconds ?? null);
   }
 
   /** Build + sign an EVR payment spending from ALL the wallet's addresses.

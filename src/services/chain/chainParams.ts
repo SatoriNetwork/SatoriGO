@@ -632,6 +632,12 @@ export interface EvrmoreNetwork {
    */
   coinbaseToPubkey?: boolean;
   /**
+   * The chain's target seconds between blocks, where the wallet turns a block
+   * count into a time for the user (how long until a reward can be spent).
+   * Only ever shown as "about": blocks do not arrive on a clock.
+   */
+  targetBlockSeconds?: number;
+  /**
    * Recently added TO THIS WALLET. A fact about Satori GO, not about the chain.
    *
    * IT EXISTS BECAUSE `young` IS A CLAIM, AND THE TWO ARE NOT THE SAME THING.
@@ -1048,6 +1054,8 @@ export const XFER_MAINNET: EvrmoreNetwork = {
   // Lottery winnings are paid as <pubkey> OP_CHECKSIG to a key of the winner's
   // HD wallet (wallet.cpp GetScriptForMining), verified on chain 2026-11-13.
   coinbaseToPubkey: true,
+  // chainparams.cpp: consensus.nPowTargetSpacing = 1 * 60 (the minute lottery).
+  targetBlockSeconds: 60,
 };
 
 /** Asset script opcode (OP_EVR_ASSET / OP_RVN_ASSET / OP_NEOX_ASSET); marks an

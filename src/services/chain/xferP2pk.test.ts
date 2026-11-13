@@ -11,7 +11,8 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { sha256 } from '@noble/hashes/sha256';
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
-import { LiveWalletService } from './liveWallet';
+import { LiveWalletService, blocksUntilMature, summarizeImmatureRewards } from './liveWallet';
+import { aboutDuration, immatureRewardsText } from '../../screens/live/ImmatureRewardsNote';
 import { MemoryStorageAdapter, setStorageForTests } from '../storage';
 import { ELECTRUM_METHODS } from './network';
 import {
@@ -242,5 +243,79 @@ describe('X Coin wallet with lottery winnings', () => {
     }
     expect(w.asked.some((sh) => p2pkOfAnyKey.has(sh))).toBe(false);
     expect(w.asked).toContain(addressToElectrumScripthash(w.key0.address));
+  });
+});
+
+describe('rewards that are still maturing', () => {
+  it('counts the blocks left under the rule the send path uses', () => {
+    expect(blocksUntilMature(TIP - 101, TIP)).toBe(0);
+    expect(blocksUntilMature(TIP - 100, TIP)).toBe(1);
+    expect(blocksUntilMature(TIP - 10, TIP)).toBe(91);
+    expect(blocksUntilMature(TIP, TIP)).toBe(101);
+    // No usable height: the full wait, never "spendable".
+    expect(blocksUntilMature(0, TIP)).toBe(101);
+    expect(blocksUntilMature(Number.NaN, TIP)).toBe(101);
+  });
+
+  it('sums what is waiting, and says when the first and the last are free', () => {
+    const r = summarizeImmatureRewards(
+      [
+        { value: 5000 * COIN, height: TIP - 500 }, // mature: not counted
+        { value: 5000 * COIN, height: TIP - 90 }, // 11 blocks left
+        { value: 5000 * COIN, height: TIP - 10 }, // 91 blocks left
+      ],
+      TIP,
+      60,
+    );
+    expect(r).toEqual({
+      totalSats: BigInt(10_000 * COIN),
+      count: 2,
+      nextBlocks: 11,
+      nextSats: BigInt(5000 * COIN),
+      allBlocks: 91,
+      blockSeconds: 60,
+    });
+    expect(summarizeImmatureRewards([{ value: COIN, height: TIP - 500 }], TIP, 60)).toBeNull();
+    expect(() => summarizeImmatureRewards([{ value: 1.5, height: TIP }], TIP, 60)).toThrow();
+  });
+
+  it('the wallet reports exactly what a send leaves out', async () => {
+    const w = await lotteryWorld();
+    const svc = new LiveWalletService(w.client);
+    await svc.import(MNEMONIC, 'pw', 'xfer-mainnet');
+    await svc.discoverUsedAddresses();
+
+    const waiting = await svc.getImmatureRewards();
+    expect(waiting?.totalSats).toBe(BigInt(5000 * COIN));
+    expect(waiting?.count).toBe(1);
+    expect(waiting?.nextBlocks).toBe(91);
+    expect(waiting?.blockSeconds).toBe(60);
+    // Balance 10,000 = 5,000 that can be sent now + the 5,000 reported waiting.
+    const max = await svc.estimateMaxEvr();
+    expect(max.totalSats + (waiting?.totalSats ?? 0n)).toBe(BigInt(10_000 * COIN));
+  });
+
+  it('is silent on a chain without pubkey rewards', async () => {
+    const w = await lotteryWorld(EVRMORE_MAINNET);
+    const svc = new LiveWalletService(w.client);
+    await svc.import(MNEMONIC, 'pw');
+    expect(await svc.getImmatureRewards()).toBeNull();
+  });
+
+  it('words it for one reward, for several, and with the balance hidden', () => {
+    expect(aboutDuration(37, 60)).toBe('about 37 min');
+    expect(aboutDuration(95, 60)).toBe('about 1 h 35 min');
+    expect(aboutDuration(120, 60)).toBe('about 2 h');
+    expect(aboutDuration(5, null)).toBeNull();
+    const one = { totalSats: BigInt(5000 * COIN), count: 1, nextBlocks: 37, nextSats: BigInt(5000 * COIN), allBlocks: 37, blockSeconds: 60 };
+    expect(immatureRewardsText(one, 'XFER', 8, false)).toBe('5,000 XFER maturing, can be sent in about 37 min (37 blocks)');
+    const three = { ...one, totalSats: BigInt(15_000 * COIN), count: 3, nextBlocks: 12, allBlocks: 95 };
+    expect(immatureRewardsText(three, 'XFER', 8, false)).toBe(
+      '15,000 XFER maturing in 3 rewards. Next in about 12 min, all in about 1 h 35 min.',
+    );
+    expect(immatureRewardsText(three, 'XFER', 8, true)).not.toContain('15,000');
+    expect(immatureRewardsText({ ...one, blockSeconds: null }, 'XFER', 8, false)).toBe(
+      '5,000 XFER maturing, can be sent in 37 blocks',
+    );
   });
 });

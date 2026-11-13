@@ -9,6 +9,11 @@ and release commits.
 
 ---
 
+## 1.7.24
+
+- X Coin: Home now says how much of your balance is lottery rewards that are
+  still maturing, and about how long until they can be sent.
+
 ## 1.7.23
 
 - A calmer look: flat buttons with no gradients or glow, and a plainer header

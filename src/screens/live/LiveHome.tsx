@@ -10,6 +10,7 @@ import { TokenIcon, BrandLogo } from '../../components/BrandLogo';
 import { NotificationBanner } from '../../components/NotificationBanner';
 import { ScrollMoreCue, useMoreBelow } from '../../components/ScrollMoreCue';
 import { useFitText } from '../../components/useFitText';
+import { ImmatureRewardsNote } from './ImmatureRewardsNote';
 import { UntrustedTokenBadge } from '../../components/UntrustedTokenBadge';
 import { displaySymbol } from '../../services/displaySymbol';
 import { Skeleton, TokenRowSkeleton } from '../../components/Skeleton';
@@ -2467,6 +2468,17 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
                   </span>
                   {heroEye}
                 </div>
+              )}
+              {/* Rewards still maturing (X Coin's lottery): in the balance above,
+                  not spendable yet. Renders nothing on any other chain. */}
+              {activeFamily() === 'utxo' && !firstLoad && (
+                <ImmatureRewardsNote
+                  address={address}
+                  balanceKey={nativeRow ? nativeRow.amountBase.toString() : ''}
+                  ticker={nativeTicker}
+                  scale={nativeRow?.scale ?? 8}
+                  hide={hideBalances}
+                />
               )}
               {/* What this account has STAKED, under the balance it can spend.
                   The hero figure above is untouched: it is the spendable

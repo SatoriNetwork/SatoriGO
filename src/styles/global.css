@@ -2825,6 +2825,16 @@ button.list-row:hover, a.list-row:hover { background: var(--card-hover); border-
 /* 1.7.23: Home's balance is one line, always. A figure too long for the
    screen is set smaller (components/useFitText.ts), never wrapped or cut. */
 .hero .hero-value { white-space: nowrap; }
+/* 1.7.24: rewards still maturing, one quiet line under the balance. It may
+   wrap (two sentences in a narrow panel); the balance above never does. */
+.immature-note {
+  margin: 5px auto 0;
+  max-width: 300px;
+  font-size: 11.5px;
+  line-height: 1.4;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
 /* The dot-only status is a dot, as in Home's header: no chip around it. */
 .pill.pill-dot { background: none; border-color: transparent; }
 /* Activity and Network tabs: the identity footer rests at the bottom of the
