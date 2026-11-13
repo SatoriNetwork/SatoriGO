@@ -1,6 +1,6 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import './styles/fonts.css'; // bundled Inter (latin + latin-ext only) — see the file
+import './styles/fonts.css'; // bundled Inter + Sora (latin + latin-ext only), see the file
 import { App } from './App';
 import { isDetachedWindow } from './services/detachWindow';
 import { isSidePanelWindow } from './services/sidePanel';

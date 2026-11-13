@@ -498,7 +498,7 @@ body {
    top padding either, so the two are separated by the action circles' own
    breathing room rather than by a band of nothing. */
 .app-content.home-pinned.home-tight .hero { padding: 0; }
-.live-scope .home-tight .hero-value { font-size: 21px; }
+.live-scope .home-tight .hero-value { font-size: 24px; }
 .app-content.home-pinned.home-tight .hero .hero-value { margin-top: 0; line-height: 1.1; }
 .app-content.home-pinned.home-tight .hero-mark { margin-bottom: 2px; }
 /* The gap over the "Total balance" line is an INLINE style in LiveHome (a
@@ -2078,13 +2078,13 @@ button.list-row:hover, a.list-row:hover { background: var(--card-hover); border-
    The wallet surface felt oversized, so trim its biggest text ~10–15%. These
    rules are scoped to `.live-scope` (the wrapper LiveApp puts around every
    screen) — only additions here, never edits to the base rules above. */
-.live-scope .hero-value { font-size: 27px; }
+.live-scope .hero-value { font-size: 34px; }
 /* Roomy home: a chain with no asset protocol has no token rows, so instead of
    leaving the screen half-empty the balance grows a little and the whole
    balance + actions block is centred in the space the list would have used.
    The action buttons keep their normal size on purpose. Presentational only,
    the markup is identical on every chain. */
-.live-scope .home-roomy .hero-value { font-size: 32px; }
+.live-scope .home-roomy .hero-value { font-size: 38px; }
 /* Takes the leftover height and centres the block inside it. `min-height: 0`
    lets it shrink, and a centred flex column that has been shrunk below its
    content spills out of BOTH ends and paints over whatever follows: with two
@@ -2773,7 +2773,13 @@ button.list-row:hover, a.list-row:hover { background: var(--card-hover); border-
 .app-content.home-pinned.home-tight .actions-row { margin-top: 6px; }
 /* One weight for a big amount wherever it is drawn (the asset screen's figure
    sat outside .hero and fell back to a thin regular). */
-.live-scope .hero-value { font-weight: 750; letter-spacing: -0.02em; }
+/* 1.7.2: the balance is set in Sora, a bolder display face than the Inter
+   around it, and a size larger (34px, 38px roomy, 24px in the dense popup). */
+.live-scope .hero-value {
+  font-family: 'Sora Variable', 'Inter Variable', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+}
 /* The dot-only status is a dot, as in Home's header: no chip around it. */
 .pill.pill-dot { background: none; border-color: transparent; }
 /* Activity and Network tabs: the identity footer rests at the bottom of the
