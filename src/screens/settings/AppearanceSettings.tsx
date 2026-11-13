@@ -3,18 +3,16 @@ import { useSettingsStore } from '../../store/settingsStore';
 import { useT } from '../../i18n/useT';
 import type { AccentId } from '../../services/settings';
 
-/** Swatch previews. Each is a TONAL gradient inside one hue — matching how the
- *  Satori neuron renders its accent. The old two-hue previews (blue→violet,
- *  rose→purple) were the loudest part of the generic look. 'satori' is first
- *  because it is the brand accent and the default. */
+/** Swatch previews: the flat accent itself, matching the --accent tokens in
+ *  global.css. 'satori' is first because it is the brand accent and the default. */
 export const ACCENT_PREVIEW: Record<AccentId, string> = {
-  satori: 'linear-gradient(135deg, #5a5aff, #3a3acc)',
-  azure: 'linear-gradient(135deg, #4f7dff, #3355cc)',
-  violet: 'linear-gradient(135deg, #8b5cf6, #6d28d9)',
-  cyan: 'linear-gradient(135deg, #22d3ee, #0e7490)',
-  emerald: 'linear-gradient(135deg, #34d399, #047857)',
-  amber: 'linear-gradient(135deg, #f59e0b, #b45309)',
-  rose: 'linear-gradient(135deg, #fb7185, #be123c)',
+  satori: '#5a5aff',
+  azure: '#4f7dff',
+  violet: '#8b5cf6',
+  cyan: '#22d3ee',
+  emerald: '#34d399',
+  amber: '#f59e0b',
+  rose: '#fb7185',
 };
 
 /** Accent-color picker. Used by the live Settings → Appearance section. */

@@ -46,10 +46,11 @@ h1, h2, h3, h4 { font-weight: 650; }
 :root[data-accent='amber']  { --accent: #f59e0b; --accent-2: #f59e0b; --accent-deep: #b45309; }
 :root[data-accent='rose']   { --accent: #fb7185; --accent-2: #fb7185; --accent-deep: #be123c; }
 
-/* The neuron's own accent treatment: a TONAL shift inside one hue
-   (#5a5aff -> #3a3acc), never a two-hue rainbow. */
+/* Buttons are FLAT: one accent fill, a slightly darker shade on hover and a
+   darker one again while pressed. No gradients, no glow. */
 :root {
-  --accent-gradient: linear-gradient(135deg, var(--accent) 0%, var(--accent-deep) 100%);
+  --accent-hover: color-mix(in srgb, var(--accent) 88%, #000000);
+  --accent-press: color-mix(in srgb, var(--accent) 78%, #000000);
 }
 
 /* ----- Theme tokens ------------------------------------------------------ */
@@ -76,7 +77,6 @@ h1, h2, h3, h4 { font-weight: 650; }
   --accent-soft: color-mix(in srgb, var(--accent) 16%, transparent);
   --accent-text: color-mix(in srgb, var(--accent) 70%, #ffffff);
   --shadow-card: 0 4px 24px rgba(0, 0, 0, 0.4);   /* neuron --shadow */
-  --glow: 0 2px 8px rgba(0, 0, 0, 0.3);           /* neuron --shadow-sm; NOT an accent glow */
   --qr-bg: #ffffff;
 }
 :root[data-theme='light'] {
@@ -102,7 +102,6 @@ h1, h2, h3, h4 { font-weight: 650; }
   --accent-soft: color-mix(in srgb, var(--accent) 12%, transparent);
   --accent-text: color-mix(in srgb, var(--accent) 88%, #000000);
   --shadow-card: 0 4px 24px rgba(0, 0, 0, 0.08);
-  --glow: 0 2px 8px rgba(0, 0, 0, 0.05);
   --qr-bg: #ffffff;
 }
 
@@ -1047,29 +1046,28 @@ button.list-row:hover, a.list-row:hover { background: var(--card-hover); border-
   padding: 11px 18px;
   border-radius: var(--r-md);
   font-size: 13.5px;
-  font-weight: 650;
+  font-weight: 600;
+  line-height: 1.2;
   border: 1px solid transparent;
-  transition: filter var(--dur) var(--ease), transform var(--dur) var(--ease), background var(--dur) var(--ease);
+  transition: background-color var(--dur) var(--ease), border-color var(--dur) var(--ease), color var(--dur) var(--ease);
   user-select: none;
 }
-.btn:active { transform: scale(0.98); }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
-.btn-primary {
-  background: var(--accent-gradient);
-  color: #fff;
-  box-shadow: var(--glow);
-}
-.btn-primary:hover:not(:disabled) { filter: brightness(1.09); }
+.btn-primary { background: var(--accent); color: #fff; }
+.btn-primary:hover:not(:disabled) { background: var(--accent-hover); }
+.btn-primary:active:not(:disabled) { background: var(--accent-press); }
+/* Secondary is an outline on the canvas, not a second filled slab. */
 .btn-secondary {
-  background: var(--card);
+  background: transparent;
   border-color: var(--border-strong);
   color: var(--text);
 }
 .btn-secondary:hover:not(:disabled) { background: var(--card-hover); }
+.btn-secondary:active:not(:disabled) { background: var(--card); }
 .btn-ghost { color: var(--text-dim); }
 .btn-ghost:hover:not(:disabled) { background: var(--card); color: var(--text); }
 .btn-danger { background: var(--danger-bg); color: var(--danger); border-color: color-mix(in srgb, var(--danger) 30%, transparent); }
-.btn-danger:hover:not(:disabled) { filter: brightness(1.1); }
+.btn-danger:hover:not(:disabled) { background: color-mix(in srgb, var(--danger) 22%, transparent); }
 /* Destructive ghost buttons (the small trash "Remove" rows in Settings). */
 .btn-ghost.danger { color: var(--danger); }
 .btn-ghost.danger:hover:not(:disabled) { background: var(--danger-bg); color: var(--danger); }
@@ -1167,13 +1165,12 @@ button.list-row:hover, a.list-row:hover { background: var(--card-hover); border-
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--accent-gradient);
+  background: var(--accent);
   color: #fff;
-  box-shadow: var(--glow);
-  transition: filter var(--dur) var(--ease), transform var(--dur) var(--ease);
+  transition: background-color var(--dur) var(--ease);
 }
-.action-round:hover .action-circle { filter: brightness(1.1); transform: translateY(-1px); }
-.action-round:active .action-circle { transform: scale(0.96); }
+.action-round:hover .action-circle { background: var(--accent-hover); }
+.action-round:active .action-circle { background: var(--accent-press); }
 
 /* ----- Account bar ------------------------------------------------------------- */
 .account-bar {
@@ -1368,7 +1365,7 @@ button.list-row:hover, a.list-row:hover { background: var(--card-hover); border-
   transition: transform var(--dur) var(--ease);
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
 }
-.toggle[aria-checked='true'] { background: var(--accent-gradient); }
+.toggle[aria-checked='true'] { background: var(--accent); }
 .toggle[aria-checked='true']::after { transform: translateX(18px); }
 /* A locked switch must not look like one the user simply has not flipped: the
    networks list disables the home network's toggle, and rendering it identically
@@ -1390,13 +1387,13 @@ button.list-row:hover, a.list-row:hover { background: var(--card-hover); border-
   padding: 8px 6px;
   border-radius: calc(var(--r-md) - 4px);
   font-size: 12.5px;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--text-dim);
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
-  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+  transition: background-color var(--dur) var(--ease), color var(--dur) var(--ease);
 }
 /* Wrapping variant for controls whose option count grows (the chain picker).
    A single equal-width row silently overflows once the labels stop fitting; a
@@ -1419,10 +1416,11 @@ button.list-row:hover, a.list-row:hover { background: var(--card-hover); border-
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.seg button:hover:not([aria-pressed='true']) { color: var(--text); }
 .seg button[aria-pressed='true'] {
-  background: var(--accent-gradient);
-  color: #fff;
-  box-shadow: var(--glow);
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
 }
 
 /* ----- Swatches -------------------------------------------------------------------------- */
@@ -2683,19 +2681,15 @@ button.list-row:hover, a.list-row:hover { background: var(--card-hover); border-
 @keyframes switchingLate { from { opacity: 0; } to { opacity: 1; } }
 /* PRESSED states: everything tappable answers the press itself, at once,
    before whatever the tap starts has had time to show. */
-.live-scope .action-round:active .action-circle { transform: scale(0.93); filter: brightness(0.9); }
-.live-scope .action-round .action-circle { transition: transform 0.08s ease, filter 0.08s ease; }
+.live-scope .action-round .action-circle { transition: background-color 0.08s ease; }
 .live-scope .token-row.asset-row:not(.token-row-edit):active { background: var(--card-hover); }
 .live-scope [data-testid^='live-tx-row-']:hover { background: var(--card); }
 .live-scope [data-testid^='live-tx-row-']:active { background: var(--card-hover); }
 .live-scope .nav-item:active { transform: scale(0.96); }
-.live-scope .btn:active:not(:disabled) { transform: scale(0.985); filter: brightness(0.94); }
 .live-scope .chip[type='button']:active, .live-scope button.chip:active { filter: brightness(0.85); }
 .live-scope .list-row:active { background: var(--card-hover); }
 @media (prefers-reduced-motion: reduce) {
-  .live-scope .action-round:active .action-circle,
-  .live-scope .nav-item:active,
-  .live-scope .btn:active:not(:disabled) { transform: none; }
+  .live-scope .nav-item:active { transform: none; }
   .switching-late { animation: none; }
 }
 /* The Satori tab, labelled like the other three. */
