@@ -428,11 +428,28 @@ body {
    .home-hero-wrap GROWS and centres its own content and the footer stays at
    the bottom, and since a grow factor consumes the free space before alignment
    runs, these two rules would be no-ops there anyway. */
-.app-content.home-pinned.home-centered .home-hero-wrap { margin-top: auto; }
-.app-content.home-pinned.home-centered .home-scroll {
-  flex: 0 1 auto;
-  margin-bottom: auto;
+/* 1.7.2: the identity footer (Satori Network, version) now rests at the BOTTOM
+   of the screen instead of floating under a short list, and the block above it
+   stays centred. Same idea as the auto margins above, done with equal grow
+   factors instead: the leftover height is split between the top of the hero
+   wrapper (which pushes its content down with flex-end) and the gap between the
+   last row and the footer (margin-top: auto inside the scroll region). So:
+     - few tokens: hero + list centred, footer on the bottom edge;
+     - many tokens: no leftover height, both grows give nothing, and the footer
+       is simply the last thing in the scrolling list, after the last row. It
+       can never sit on top of a row, because it is IN the list's flow. */
+.app-content.home-pinned.home-centered .home-hero-wrap {
+  flex: 1 0 auto;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
 }
+.app-content.home-pinned.home-centered .home-scroll {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+}
+.app-content.home-pinned.home-centered .home-scroll > .home-footer { margin-top: auto; }
 
 /* HOME, COMPACT: the hero gives its height to the LIST (owner, live testing
    2026-08-25: "you can see only one token and have to scroll it, it looks very
@@ -546,7 +563,9 @@ body {
    bit of the slack. With no notice the class is absent and yesterday's
    behaviour is byte-for-byte what it was: dead-centred when short, both
    margins collapsed and top-anchored the moment it overflows. */
-.app-content.home-pinned.home-centered.has-notice .home-hero-wrap { margin-top: 0; }
+/* With a notice the hero hugs it: the wrapper takes no share of the leftover
+   height, so all of it goes above the footer. */
+.app-content.home-pinned.home-centered.has-notice .home-hero-wrap { flex-grow: 0; }
 
 /* Send form only: the primary CTA must never slide under the bottom nav. The
    nav is an IN-FLOW flex sibling of .app-content (not an overlay), so padding
