@@ -462,6 +462,19 @@ confirmed by the owner on mainnet (item 7). Nothing below is marketing.
     slippage you chose, and the swap fails (the fee is still paid) when it
     cannot be met. Token names found by search come from a public token list;
     the symbol and decimals shown are then read from the contract itself.
+    On Ethereum and BNB Chain a pending swap is public before it confirms, and
+    trading bots can move the price against it, up to the slippage chosen; the
+    wallet says so there and offers no slippage above 1%, but it does not send
+    swaps through a private relay. The quote, like a balance, is what the
+    network node reports: a node that understated it would set the minimum too
+    low. The deadline is counted from the chain's clock, and a reviewed swap
+    has to be priced again after two minutes. An approval that is confirmed and
+    then not followed by its swap leaves Uniswap's router allowed that exact
+    amount and no more. The wallet cannot tell whether a token it does not
+    vouch for can be sold again after it is bought. The wallet's own swap fee
+    is 0 and switched off in this build; the code for it is present (the fee
+    would come off the token received, through the router's own fee call,
+    which caps it at 1%) and SATORI bought on Base is exempt from it.
 
 Real P2SH output support, taproot key ownership, inscription and BGC-20
 awareness, gap-limit address discovery, BIP39 passphrases at wallet creation,

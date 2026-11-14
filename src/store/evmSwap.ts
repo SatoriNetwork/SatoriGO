@@ -21,7 +21,7 @@ import { planEvmCall, type EvmCallPlan } from './evmCall';
 import { EvmSendError, refuseLockedSatori } from './evmSend';
 import type { EvmWalletDataProvider } from '../services/chain/evm/evmProvider';
 import type { EvmRpcCall, EvmRpcBatchResult } from '../services/chain/evm/rpc';
-import type { SwapHop, UniswapV3Deployment } from '../services/chain/evm/uniswapV3';
+import type { SwapFee, SwapHop, UniswapV3Deployment } from '../services/chain/evm/uniswapV3';
 import type { EvmChainInfo } from './evmChains';
 
 type EvmMods = NonNullable<Awaited<ReturnType<typeof loadEvmModules>>>;
@@ -35,8 +35,48 @@ export const SWAP_IMPACT_WARN_BPS = 300;
 /** From here, and when the impact could not be measured, the user has to say
  *  they have seen it before the swap can be confirmed. */
 export const SWAP_IMPACT_ACK_BPS = 1500;
-/** The router refuses the swap once this long has passed since it was planned. */
+/** The router refuses the swap once this long has passed since it was planned,
+ *  counted from the chain's own clock (the latest block), not the computer's. */
 export const SWAP_DEADLINE_SECONDS = 1200;
+/** A reviewed swap older than this is priced again before it can be confirmed:
+ *  its minimum was taken from a quote that no longer says much. */
+export const SWAP_PLAN_MAX_AGE_MS = 120_000;
+/** Chains whose pending transactions are public, where bots can trade around a
+ *  swap up to its slippage. The screen says so and offers no wide slippage there. */
+export const SWAP_PUBLIC_MEMPOOL_CHAINS: readonly string[] = Object.freeze(['ethereum', 'bsc']);
+
+// --- Satori GO's own fee ------------------------------------------------------
+// OFF: the rate is a 0 placeholder and no treasury address is set. To turn it
+// on, set both constants below, and nothing else: they are compiled in, never
+// read from a server, and the router itself refuses more than 1%. The fee comes
+// off the OUTPUT token inside the swap transaction (uniswapV3.ts, encodeSwap).
+
+/** The wallet's swap fee, in hundredths of a percent (25 = 0.25%). */
+export const SWAP_FEE_BPS = 0;
+/** Where the fee goes: one address the project controls on every swap chain. */
+export const SWAP_FEE_RECIPIENT: string | null = null;
+/** The router's own cap. A rate above it is treated as a mistake and charges nothing. */
+export const SWAP_FEE_MAX_BPS = 100;
+
+export interface SwapFeeConfig {
+  bps: number;
+  recipient: string | null;
+}
+
+/**
+ * The fee one swap pays, or null for none. None when the rate is 0, the address
+ * is missing or the rate is out of range, and none when the token received is
+ * the official SATORI on Base: buying SATORI is free.
+ */
+export function swapFeeFor(
+  chainKey: string,
+  tokenOut: SwapToken,
+  config: SwapFeeConfig = { bps: SWAP_FEE_BPS, recipient: SWAP_FEE_RECIPIENT },
+): SwapFee | null {
+  if (!config.recipient || !Number.isInteger(config.bps) || config.bps < 1 || config.bps > SWAP_FEE_MAX_BPS) return null;
+  if (chainKey === 'base' && tokenOut.address !== null && tokenOut.address.toLowerCase() === SATORI_BASE_TOKEN.toLowerCase()) return null;
+  return { bips: config.bps, recipient: config.recipient };
+}
 
 /** One side of a swap. `address` null is the chain's own coin. */
 export interface SwapToken {
@@ -51,8 +91,11 @@ export interface SwapQuote {
   tokenIn: SwapToken;
   tokenOut: SwapToken;
   amountIn: bigint;
-  /** What the route pays right now, before slippage. */
+  /** What the user receives right now, before slippage and AFTER the wallet's
+   *  fee when there is one. */
   amountOut: bigint;
+  /** The wallet's fee on this swap in hundredths of a percent, 0 for none. */
+  feeBps: number;
   hops: SwapHop[];
   /** Hundredths of a percent, or null when it could not be measured. */
   impactBps: number | null;
@@ -69,8 +112,15 @@ export type SwapPlan = EvmCallPlan &
         tokenIn: SwapToken;
         tokenOut: SwapToken;
         amountIn: bigint;
+        /** After the wallet's fee, like `minimumOut`. */
         amountOut: bigint;
         minimumOut: bigint;
+        /** The wallet's fee: its rate, and what it comes to at this quote, in the
+         *  output token. Both 0 when there is none. */
+        feeBps: number;
+        feeAmount: bigint;
+        /** When this was priced, on this computer's clock (SWAP_PLAN_MAX_AGE_MS). */
+        plannedAt: number;
         slippageBps: number;
         impactBps: number | null;
         hops: SwapHop[];
@@ -219,6 +269,8 @@ export async function quoteSwap(args: {
   tokenIn: SwapToken;
   tokenOut: SwapToken;
   amountIn: bigint;
+  /** Tests only: the compiled-in fee constants are used when absent. */
+  feeConfig?: SwapFeeConfig;
 }): Promise<SwapQuote> {
   const { provider, chain, from, tokenIn, tokenOut, amountIn } = args;
   const { evm, deployment } = setup(await loadEvmModules(), chain);
@@ -258,6 +310,8 @@ export async function quoteSwap(args: {
   }
   const route: { hops: SwapHop[]; out: bigint } = best;
 
+  const fee = swapFeeFor(chain.key, tokenOut, args.feeConfig);
+
   let needsApproval = false;
   if (tokenIn.address !== null) {
     const allowance = read(first.extra[0], (r) => evm.decodeUint256(r as string));
@@ -271,7 +325,8 @@ export async function quoteSwap(args: {
     tokenIn,
     tokenOut,
     amountIn,
-    amountOut: route.out,
+    amountOut: evm.afterSwapFee(route.out, fee?.bips ?? 0),
+    feeBps: fee?.bips ?? 0,
     hops: route.hops,
     impactBps: await measureImpact(evm, provider, chain, deployment, route.hops, amountIn, route.out),
     needsApproval,
@@ -294,6 +349,22 @@ async function refuseLocked(provider: EvmWalletDataProvider, chain: EvmChainInfo
   if (chain.key === 'base' && quote.tokenIn.address !== null && sameAddress(quote.tokenIn.address, SATORI_BASE_TOKEN)) {
     await refuseLockedSatori(provider, quote.from);
   }
+}
+
+/** The route must be one this wallet could have built: from the token paid to
+ *  the token received, through nothing but the pinned intermediates. The quote
+ *  only ever comes from quoteSwap, so this is a second lock, not the first. */
+function refuseForeignRoute(evm: EvmMods, deployment: UniswapV3Deployment, chain: EvmChainInfo, quote: SwapQuote): void {
+  const hops = quote.hops;
+  const ok =
+    hops.length >= 1 &&
+    hops.length <= 2 &&
+    sameAddress(hops[0].tokenIn, poolToken(evm, deployment, quote.tokenIn, chain)) &&
+    sameAddress(hops[hops.length - 1].tokenOut, poolToken(evm, deployment, quote.tokenOut, chain)) &&
+    (hops.length === 1 ||
+      (sameAddress(hops[0].tokenOut, hops[1].tokenIn) &&
+        (sameAddress(hops[0].tokenOut, deployment.wrappedNative) || sameAddress(hops[0].tokenOut, deployment.stable))));
+  if (!ok) throw new EvmSendError('gated', 'This swap route is not one Satori GO built. Start the swap again.');
 }
 
 function noFee(chain: EvmChainInfo): EvmSendError {
@@ -344,7 +415,8 @@ export async function buildSwapPlan(args: {
   quote: SwapQuote;
   slippageBps: number;
   nativeBalanceBase?: bigint;
-  nowMs?: number;
+  /** Tests only: the compiled-in fee constants are used when absent. */
+  feeConfig?: SwapFeeConfig;
 }): Promise<SwapPlan> {
   const { provider, chain, quote, slippageBps, nativeBalanceBase } = args;
   const { evm, deployment } = setup(await loadEvmModules(), chain);
@@ -353,15 +425,22 @@ export async function buildSwapPlan(args: {
   }
   const nativeIn = quote.tokenIn.address === null;
   const nativeOut = quote.tokenOut.address === null;
+  refuseForeignRoute(evm, deployment, chain, quote);
   if (nativeBalanceBase === 0n) throw noFee(chain);
   await refuseLocked(provider, chain, quote);
   await refuseUnfunded(evm, provider, chain, quote);
 
-  const calls = [ethCall(deployment.quoterV2, evm.encodeQuoteExactInput(quote.hops, quote.amountIn))];
+  const calls: EvmRpcCall[] = [
+    ethCall(deployment.quoterV2, evm.encodeQuoteExactInput(quote.hops, quote.amountIn)),
+    { method: 'eth_getBlockByNumber', params: ['latest', false] },
+  ];
   if (!nativeIn) calls.push(ethCall(quote.tokenIn.address as string, evm.encodeAllowance(quote.from, deployment.swapRouter02)));
-  const [quoted, allowed] = await batch(provider, chain, calls);
-  const amountOut = read(quoted, evm.decodeQuoteAmountOut);
-  if (amountOut === null || amountOut <= 0n) {
+  const [quoted, block, allowed] = await batch(provider, chain, calls);
+  const grossOut = read(quoted, evm.decodeQuoteAmountOut);
+  // The chain's clock, so a computer whose own clock is wrong cannot stretch
+  // the deadline. No answer means no plan rather than a guess.
+  const chainTime = read(block, (r) => BigInt((r as { timestamp: string }).timestamp));
+  if (grossOut === null || grossOut <= 0n || chainTime === null || chainTime <= 0n) {
     throw new EvmSendError('quote-failed', 'Uniswap could not quote this swap right now. Try again.');
   }
   if (!nativeIn) {
@@ -370,9 +449,11 @@ export async function buildSwapPlan(args: {
       throw new EvmSendError('gated', `Approve ${quote.tokenIn.symbol} first, then swap.`);
     }
   }
+  const fee = swapFeeFor(chain.key, quote.tokenOut, args.feeConfig);
+  const amountOut = evm.afterSwapFee(grossOut, fee?.bips ?? 0);
   const minimumOut = evm.minimumOut(amountOut, slippageBps);
   if (minimumOut <= 0n) throw new EvmSendError('invalid-amount', 'This amount is too small to swap.');
-  const impactBps = await measureImpact(evm, provider, chain, deployment, quote.hops, quote.amountIn, amountOut);
+  const impactBps = await measureImpact(evm, provider, chain, deployment, quote.hops, quote.amountIn, grossOut);
 
   const plan = await planEvmCall({
     provider,
@@ -387,8 +468,9 @@ export async function buildSwapPlan(args: {
         recipient: quote.from,
         amountIn: quote.amountIn,
         amountOutMinimum: minimumOut,
-        deadline: BigInt(Math.floor((args.nowMs ?? Date.now()) / 1000) + SWAP_DEADLINE_SECONDS),
+        deadline: chainTime + BigInt(SWAP_DEADLINE_SECONDS),
         nativeOut,
+        fee,
       }),
       value: nativeIn ? quote.amountIn : 0n,
       description: `Swap ${amountText(quote.amountIn, quote.tokenIn)} for at least ${amountText(minimumOut, quote.tokenOut)} on Uniswap.`,
@@ -402,6 +484,9 @@ export async function buildSwapPlan(args: {
     amountIn: quote.amountIn,
     amountOut,
     minimumOut,
+    feeBps: fee?.bips ?? 0,
+    feeAmount: grossOut - amountOut,
+    plannedAt: Date.now(),
     slippageBps,
     impactBps,
     hops: quote.hops,

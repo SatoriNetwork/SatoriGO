@@ -26,6 +26,10 @@ import {
   minimumOut,
   midPriceOut,
   priceImpactBps,
+  afterSwapFee,
+  beforeSwapFee,
+  encodeSweepTokenWithFee,
+  encodeUnwrapWETH9WithFee,
 } from './uniswapV3';
 
 const BASE = UNISWAP_V3.base;
@@ -57,6 +61,8 @@ describe('pinned Uniswap v3 deployments', () => {
       exactInput: 'exactInput((bytes,address,uint256,uint256))',
       multicall: 'multicall(uint256,bytes[])',
       unwrapWETH9: 'unwrapWETH9(uint256,address)',
+      sweepTokenWithFee: 'sweepTokenWithFee(address,uint256,address,uint256,address)',
+      unwrapWETH9WithFee: 'unwrapWETH9WithFee(uint256,address,uint256,address)',
       factory: 'factory()',
       WETH9: 'WETH9()',
     };
@@ -173,6 +179,58 @@ describe('swap transaction', () => {
     expect(() => encodeSwap({ ...base, amountIn: 0n })).toThrow(/amountIn/);
     expect(() => encodeSwap({ ...base, nativeOut: true })).toThrow(/wrapped/);
     expect(() => encodeSwap({ ...base, recipient: '0x1234' })).toThrow(/address/);
+  });
+});
+
+describe('swap fee (the router splits it off the output)', () => {
+  const TREASURY = '0x000000000022D473030F116dDEE9F6B43aC78BA3';
+  const treasury = '000000000022d473030f116ddee9f6b43ac78ba3';
+  const FEE = { bips: 25, recipient: TREASURY };
+
+  it('rounds exactly as the router does, and the pre-fee minimum always leaves the user theirs', () => {
+    expect(afterSwapFee(1_000_000n, 25)).toBe(997_500n);
+    expect(afterSwapFee(399n, 25)).toBe(399n); // the fee floors to nothing
+    expect(afterSwapFee(1_000n, 0)).toBe(1_000n);
+    expect(beforeSwapFee(997_500n, 25)).toBe(1_000_000n);
+    expect(beforeSwapFee(5n, 0)).toBe(5n);
+    for (const net of [1n, 7n, 399n, 400n, 997_501n, 10n ** 30n + 3n]) {
+      for (const bips of [1, 25, 99, 100]) {
+        const gross = beforeSwapFee(net, bips);
+        expect(afterSwapFee(gross, bips) >= net, `${net} at ${bips}`).toBe(true);
+        // Never short, and at most one base unit more careful than it has to be.
+        expect(afterSwapFee(gross, bips) - net <= 1n, `${net} at ${bips} is tight`).toBe(true);
+      }
+    }
+  });
+
+  it('refuses a fee above the router cap, a zero fee and a fraction', () => {
+    for (const bips of [101, -1, 0.5]) expect(() => afterSwapFee(1n, bips)).toThrow(/fee/);
+    expect(() => encodeSweepTokenWithFee(USDC, 1n, USER, { bips: 0, recipient: TREASURY })).toThrow(/fee/);
+    expect(() => encodeSweepTokenWithFee(USDC, 1n, USER, { bips: 25, recipient: '0x12' })).toThrow(/address/);
+  });
+
+  it('builds the two fee calls word by word', () => {
+    expect(encodeSweepTokenWithFee(SATORI, 500n, USER, FEE)).toBe(`0xe0e189a0${pad(satori)}${word(500)}${pad(user)}${word(25)}${pad(treasury)}`);
+    expect(encodeUnwrapWETH9WithFee(500n, USER, FEE)).toBe(`0x9b2c0a37${word(500)}${pad(user)}${word(25)}${pad(treasury)}`);
+  });
+
+  it('a token-out swap with a fee pays the router, then sweeps to the user with the pre-fee minimum', () => {
+    const args = { deployment: BASE, hops: ONE_HOP, recipient: USER, amountIn: 10_000_000n, amountOutMinimum: 997_500n, deadline: 9n, nativeOut: false };
+    const data = bytesToHex(encodeSwap({ ...args, fee: FEE }));
+    const swap = encodeExactInput({ hops: ONE_HOP, recipient: BASE.swapRouter02, amountIn: 10_000_000n, amountOutMinimum: 1_000_000n });
+    expect(data).toBe(bytesToHex(encodeMulticall(9n, [swap, encodeSweepTokenWithFee(SATORI, 1_000_000n, USER, FEE)])));
+    // No fee, null or absent: the bytes that shipped before the fee existed.
+    expect(bytesToHex(encodeSwap({ ...args, fee: null }))).toBe(bytesToHex(encodeSwap(args)));
+    expect(bytesToHex(encodeSwap(args))).not.toContain('e0e189a0');
+  });
+
+  it('a coin-out swap with a fee unwraps with the fee instead', () => {
+    const hops = [{ tokenIn: USDC, tokenOut: WETH, fee: 500 }];
+    const data = bytesToHex(
+      encodeSwap({ deployment: BASE, hops, recipient: USER, amountIn: 5n, amountOutMinimum: 997_500n, deadline: 9n, nativeOut: true, fee: FEE }),
+    );
+    expect(data).toContain(encodeUnwrapWETH9WithFee(1_000_000n, USER, FEE).slice(2));
+    expect(data).not.toContain('49404b7c');
   });
 });
 

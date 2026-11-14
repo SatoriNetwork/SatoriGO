@@ -78,6 +78,8 @@ export const UNISWAP_V3_SELECTORS = Object.freeze({
   exactInput: '0xb858183f', // exactInput((bytes,address,uint256,uint256))
   multicall: '0x5ae401dc', // multicall(uint256,bytes[])
   unwrapWETH9: '0x49404b7c', // unwrapWETH9(uint256,address)
+  sweepTokenWithFee: '0xe0e189a0', // sweepTokenWithFee(address,uint256,address,uint256,address)
+  unwrapWETH9WithFee: '0x9b2c0a37', // unwrapWETH9WithFee(uint256,address,uint256,address)
   factory: '0xc45a0155', // factory(), on the router and the quoter
   WETH9: '0x4aa4a4fc', // WETH9(), on the router
 });
@@ -202,6 +204,64 @@ export function encodeUnwrapWETH9(amountMinimum: bigint, recipient: string): str
   return UNISWAP_V3_SELECTORS.unwrapWETH9 + uintWord(amountMinimum) + addressWord(recipient, 'recipient');
 }
 
+/** The most the router's own fee functions accept: 1%, in hundredths of a percent. */
+export const UNISWAP_V3_MAX_FEE_BIPS = 100;
+
+/** A fee the router splits off the OUTPUT, in the same transaction. */
+export interface SwapFee {
+  /** Hundredths of a percent, 1 to UNISWAP_V3_MAX_FEE_BIPS. */
+  bips: number;
+  recipient: string;
+}
+
+function feeBipsWord(bips: number): string {
+  if (!Number.isInteger(bips) || bips < 1 || bips > UNISWAP_V3_MAX_FEE_BIPS) {
+    throw new Error('uniswapV3: fee is out of range');
+  }
+  return uintWord(BigInt(bips));
+}
+
+/** What is left of `amount` after the router takes `bips`, rounded exactly as
+ *  the router rounds (the fee is floored, the rest goes to the user). */
+export function afterSwapFee(amount: bigint, bips: number): bigint {
+  if (bips === 0) return amount;
+  feeBipsWord(bips);
+  return amount - (amount * BigInt(bips)) / 10_000n;
+}
+
+/** The smallest pre-fee amount that still leaves `net` after the fee. The
+ *  router checks ITS minimum before taking the fee, so this is what it is
+ *  given for the user's own minimum to hold. Rounded up. */
+export function beforeSwapFee(net: bigint, bips: number): bigint {
+  if (bips === 0) return net;
+  feeBipsWord(bips);
+  const keep = BigInt(10_000 - bips);
+  return (net * 10_000n + keep - 1n) / keep;
+}
+
+/** Inner call: sweepTokenWithFee(token, amountMinimum, recipient, feeBips, feeRecipient). */
+export function encodeSweepTokenWithFee(token: string, amountMinimum: bigint, recipient: string, fee: SwapFee): string {
+  return (
+    UNISWAP_V3_SELECTORS.sweepTokenWithFee +
+    addressWord(token, 'token') +
+    uintWord(amountMinimum) +
+    addressWord(recipient, 'recipient') +
+    feeBipsWord(fee.bips) +
+    addressWord(fee.recipient, 'fee recipient')
+  );
+}
+
+/** Inner call: unwrapWETH9WithFee(amountMinimum, recipient, feeBips, feeRecipient). */
+export function encodeUnwrapWETH9WithFee(amountMinimum: bigint, recipient: string, fee: SwapFee): string {
+  return (
+    UNISWAP_V3_SELECTORS.unwrapWETH9WithFee +
+    uintWord(amountMinimum) +
+    addressWord(recipient, 'recipient') +
+    feeBipsWord(fee.bips) +
+    addressWord(fee.recipient, 'fee recipient')
+  );
+}
+
 /** The transaction data: multicall(deadline, calls). The router reverts the
  *  whole thing once `deadline` (unix seconds) has passed. */
 export function encodeMulticall(deadline: bigint, calls: readonly string[]): Uint8Array {
@@ -221,10 +281,16 @@ export function encodeMulticall(deadline: bigint, calls: readonly string[]): Uin
 /**
  * The whole swap transaction for a route.
  *
- * `recipient` is always the user's own address. When the output is the chain's
- * coin the swap pays the ROUTER in wrapped coin and unwrapWETH9 forwards it,
- * with the same minimum, so the minimum holds for what the user receives.
+ * `recipient` is always the user's own address, and `amountOutMinimum` is the
+ * least THEY receive. When the output is the chain's coin the swap pays the
+ * ROUTER in wrapped coin and unwrapWETH9 forwards it, with the same minimum.
  * When the input is the chain's coin the caller attaches `amountIn` as value.
+ *
+ * With a `fee`, the swap always pays the router, and one fee call forwards the
+ * output: the fee share to the fee recipient, the rest to the user. The router
+ * checks its minimum BEFORE the fee, so it is given beforeSwapFee(minimum) and
+ * the user's minimum holds after it. Without a fee the bytes are exactly what
+ * they were before the fee existed.
  */
 export function encodeSwap(args: {
   deployment: UniswapV3Deployment;
@@ -234,13 +300,22 @@ export function encodeSwap(args: {
   amountOutMinimum: bigint;
   deadline: bigint;
   nativeOut: boolean;
+  fee?: SwapFee | null;
 }): Uint8Array {
-  const { deployment, hops, recipient, amountIn, amountOutMinimum, deadline, nativeOut } = args;
+  const { deployment, hops, recipient, amountIn, amountOutMinimum, deadline, nativeOut, fee } = args;
   if (amountIn <= 0n) throw new Error('uniswapV3: amountIn must be positive');
   if (amountOutMinimum <= 0n) throw new Error('uniswapV3: a swap needs a minimum output');
   const last = hops[hops.length - 1];
   if (nativeOut && last?.tokenOut.toLowerCase() !== deployment.wrappedNative.toLowerCase()) {
     throw new Error('uniswapV3: a swap to the coin must end in its wrapped token');
+  }
+  if (fee) {
+    const gross = beforeSwapFee(amountOutMinimum, fee.bips);
+    const swap = encodeExactInput({ hops, recipient: deployment.swapRouter02, amountIn, amountOutMinimum: gross });
+    const forward = nativeOut
+      ? encodeUnwrapWETH9WithFee(gross, recipient, fee)
+      : encodeSweepTokenWithFee(last.tokenOut, gross, recipient, fee);
+    return encodeMulticall(deadline, [swap, forward]);
   }
   const swap = encodeExactInput({
     hops,

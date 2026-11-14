@@ -131,6 +131,7 @@ import {
   quoteSwap,
   swapNeedsImpactAck,
   EMPTY_SWAP,
+  SWAP_PLAN_MAX_AGE_MS,
   type SwapPlan,
   type SwapQuote,
   type SwapState,
@@ -6682,6 +6683,9 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     if (swapSending) throw new EvmSendError('gated', 'This is already being sent.');
     if (plan.chainKey !== chain.key) throw new EvmSendError('gated', 'The chain changed since this swap was reviewed.');
     if (plan.from !== get().address) throw new EvmSendError('gated', 'The account changed since this swap was reviewed.');
+    if (plan.kind === 'swap' && Date.now() - plan.plannedAt > SWAP_PLAN_MAX_AGE_MS) {
+      throw new EvmSendError('gated', 'The price is out of date. Review the swap again.');
+    }
     if (plan.kind === 'swap' && swapNeedsImpactAck(plan.impactBps) && !ackImpact) {
       throw new EvmSendError('gated', 'Confirm that you have seen the price impact of this swap first.');
     }

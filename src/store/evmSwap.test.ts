@@ -23,7 +23,10 @@ import {
   buildSwapPlan,
   swapSupported,
   swapNeedsImpactAck,
+  swapFeeFor,
   SWAP_DEADLINE_SECONDS,
+  SWAP_FEE_BPS,
+  SWAP_FEE_RECIPIENT,
   type SwapToken,
 } from './evmSwap';
 import {
@@ -38,6 +41,7 @@ import {
   ERC20_SELECTORS,
   decodeErc20Calldata,
   encodeSwap,
+  encodeSweepTokenWithFee,
   midPriceOut,
   type SwapHop,
 } from '../services/chain/evm';
@@ -93,6 +97,8 @@ interface FakePool {
 }
 
 const Q96 = 1n << 96n;
+/** What the fake chain's clock reads. */
+const BLOCK_TIME = 1_800_000_000n;
 /** The pools most tests share. USDC is token0 against SATORI, WETH is token0
  *  against USDC; a price of 4 and of 1 keep the arithmetic readable. */
 const POOLS: FakePool[] = [
@@ -110,6 +116,8 @@ function fakeBase(
     balance?: bigint;
     estimateReverts?: string;
     satoriLockRound?: bigint;
+    /** The latest block's timestamp; null = the node will not say. */
+    blockTime?: bigint | null;
   } = {},
 ) {
   const pools = opts.pools ?? POOLS;
@@ -135,6 +143,8 @@ function fakeBase(
         });
       case 'eth_gasPrice':
         return ok('0x5b8d80');
+      case 'eth_getBlockByNumber':
+        return opts.blockTime === null ? ok(null) : ok({ timestamp: '0x' + (opts.blockTime ?? BLOCK_TIME).toString(16) });
       case 'eth_call': {
         const call = req.params[0] as { to: string; data: string };
         const to = call.to.toLowerCase();
@@ -331,12 +341,11 @@ describe('buildSwapApprovePlan', () => {
 });
 
 describe('buildSwapPlan', () => {
-  const NOW = 1_800_000_000_000;
 
   it('15. a token swap: the pinned router, no value, the minimum from this moment\'s quote, paid to the sender', async () => {
     const { provider } = fakeBase({ allowance: 1_000_000n });
     const quote = await quoteSwap({ provider, chain: BASE, from: FROM, tokenIn: USDC, tokenOut: SATORI, amountIn: 1_000_000n });
-    const plan = await buildSwapPlan({ provider, chain: BASE, quote, slippageBps: 50, nativeBalanceBase: 10n ** 16n, nowMs: NOW });
+    const plan = await buildSwapPlan({ provider, chain: BASE, quote, slippageBps: 50, nativeBalanceBase: 10n ** 16n });
     if (plan.kind !== 'swap') throw new Error('expected a swap plan');
     expect(plan.to).toBe(D.swapRouter02);
     expect(plan.value).toBe(0n);
@@ -351,7 +360,7 @@ describe('buildSwapPlan', () => {
           recipient: FROM,
           amountIn: 1_000_000n,
           amountOutMinimum: 3_968_060n,
-          deadline: BigInt(NOW / 1000 + SWAP_DEADLINE_SECONDS),
+          deadline: BLOCK_TIME + BigInt(SWAP_DEADLINE_SECONDS),
           nativeOut: false,
         }),
       ),
@@ -363,17 +372,17 @@ describe('buildSwapPlan', () => {
   it('16. coin in: the amount rides as value, and too little coin for amount plus fee is a shortfall', async () => {
     const { provider } = fakeBase();
     const quote = await quoteSwap({ provider, chain: BASE, from: FROM, tokenIn: ETH, tokenOut: SATORI, amountIn: 10n ** 15n });
-    const plan = await buildSwapPlan({ provider, chain: BASE, quote, slippageBps: 100, nativeBalanceBase: 10n ** 16n, nowMs: NOW });
+    const plan = await buildSwapPlan({ provider, chain: BASE, quote, slippageBps: 100, nativeBalanceBase: 10n ** 16n });
     expect(plan.value).toBe(10n ** 15n);
     expect(plan.shortfall).toBeNull();
-    const poor = await buildSwapPlan({ provider, chain: BASE, quote, slippageBps: 100, nativeBalanceBase: 10n ** 15n, nowMs: NOW });
+    const poor = await buildSwapPlan({ provider, chain: BASE, quote, slippageBps: 100, nativeBalanceBase: 10n ** 15n });
     expect(poor.shortfall).not.toBeNull();
   });
 
   it('17. coin out: the router is paid and unwraps to the sender', async () => {
     const { provider } = fakeBase({ allowance: 10n ** 30n });
     const quote = await quoteSwap({ provider, chain: BASE, from: FROM, tokenIn: SATORI, tokenOut: ETH, amountIn: 4_000_000_000n });
-    const plan = await buildSwapPlan({ provider, chain: BASE, quote, slippageBps: 50, nowMs: NOW });
+    const plan = await buildSwapPlan({ provider, chain: BASE, quote, slippageBps: 50 });
     if (plan.kind !== 'swap') throw new Error('expected a swap plan');
     const data = bytesToHex(plan.data);
     expect(data).toContain(UNISWAP_V3_SELECTORS.unwrapWETH9.slice(2) + word(plan.minimumOut) + word(lower(FROM)));
@@ -430,5 +439,93 @@ describe('buildSwapPlan', () => {
     expect(decoded.tx.to?.toLowerCase()).toBe(D.swapRouter02.toLowerCase());
     expect(bytesToHex(decoded.tx.data)).toBe(bytesToHex(plan.data));
     expect(sent.txid).toMatch(/^0x[0-9a-f]{64}$/);
+  });
+});
+
+describe('safety locks on the plan', () => {
+  it('23. the deadline runs on the chain\'s clock, and no clock means no plan', async () => {
+    const late = fakeBase({ allowance: 10n ** 30n, blockTime: 2_000_000_000n });
+    const quote = await quoteSwap({ provider: late.provider, chain: BASE, from: FROM, tokenIn: USDC, tokenOut: SATORI, amountIn: 1_000_000n });
+    const plan = await buildSwapPlan({ provider: late.provider, chain: BASE, quote, slippageBps: 50 });
+    expect(bytesToHex(plan.data).slice(8, 72)).toBe(word(2_000_000_000n + BigInt(SWAP_DEADLINE_SECONDS)));
+    if (plan.kind !== 'swap') throw new Error('expected a swap plan');
+    expect(Math.abs(Date.now() - plan.plannedAt)).toBeLessThan(5_000);
+
+    const silent = fakeBase({ allowance: 10n ** 30n, blockTime: null });
+    await expect(buildSwapPlan({ provider: silent.provider, chain: BASE, quote, slippageBps: 50 })).rejects.toMatchObject({ code: 'quote-failed' });
+    expect(silent.seen.some((r) => r.method === 'eth_estimateGas')).toBe(false);
+  });
+
+  it('24. refuses a route the wallet could not have built', async () => {
+    const { provider, seen } = fakeBase({ allowance: 10n ** 30n });
+    const quote = await quoteSwap({ provider, chain: BASE, from: FROM, tokenIn: ETH, tokenOut: SATORI, amountIn: 10n ** 12n });
+    const through = (middle: string) => [hop(WETH_ADDR, middle, 500), hop(middle, SATORI_ADDR, 3000)];
+    const bad = [
+      [hop(USDC_ADDR, SATORI_ADDR, 3000)], // does not start at the token paid
+      [hop(WETH_ADDR, USDC_ADDR, 500)], // does not end at the token received
+      through(OTHER_ADDR), // through a token that is not a pinned intermediate
+      [hop(WETH_ADDR, USDC_ADDR, 500), hop(WETH_ADDR, SATORI_ADDR, 3000)], // hops do not chain
+      [],
+    ];
+    for (const hops of bad) {
+      await expect(buildSwapPlan({ provider, chain: BASE, quote: { ...quote, hops }, slippageBps: 50 })).rejects.toMatchObject({ code: 'gated' });
+    }
+    expect(seen.some((r) => r.method === 'eth_estimateGas')).toBe(false);
+    await expect(buildSwapPlan({ provider, chain: BASE, quote, slippageBps: 50 })).resolves.toMatchObject({ kind: 'swap' });
+  });
+});
+
+describe('the wallet fee', () => {
+  const TREASURY = '0x000000000022D473030F116dDEE9F6B43aC78BA3';
+  const ON = { bps: 25, recipient: TREASURY };
+
+  it('25. ships switched off: a 0 rate and no address, so nothing is charged', async () => {
+    expect(SWAP_FEE_BPS).toBe(0);
+    expect(SWAP_FEE_RECIPIENT).toBeNull();
+    expect(swapFeeFor('base', USDC)).toBeNull();
+    const { provider } = fakeBase({ allowance: 10n ** 30n });
+    const quote = await quoteSwap({ provider, chain: BASE, from: FROM, tokenIn: SATORI, tokenOut: USDC, amountIn: 4_000_000n });
+    expect(quote.feeBps).toBe(0);
+    const plan = await buildSwapPlan({ provider, chain: BASE, quote, slippageBps: 50 });
+    expect(plan).toMatchObject({ feeBps: 0, feeAmount: 0n });
+    expect(bytesToHex(plan.data)).not.toContain(UNISWAP_V3_SELECTORS.sweepTokenWithFee.slice(2));
+  });
+
+  it('26. needs a rate within the router cap AND an address, and buying SATORI on Base is free', () => {
+    expect(swapFeeFor('base', USDC, ON)).toEqual({ bips: 25, recipient: TREASURY });
+    expect(swapFeeFor('base', ETH, ON)).toEqual({ bips: 25, recipient: TREASURY });
+    expect(swapFeeFor('base', SATORI, ON)).toBeNull();
+    expect(swapFeeFor('ethereum', SATORI, ON)).not.toBeNull(); // only the official token, only on Base
+    expect(swapFeeFor('base', USDC, { bps: 25, recipient: null })).toBeNull();
+    for (const bps of [0, 101, -5, 2.5, Number.NaN]) expect(swapFeeFor('base', USDC, { bps, recipient: TREASURY })).toBeNull();
+  });
+
+  it('27. switched on: every figure shown is after the fee, and the router is given the pre-fee minimum', async () => {
+    const { provider } = fakeBase({ allowance: 10n ** 30n });
+    const quote = await quoteSwap({ provider, chain: BASE, from: FROM, tokenIn: SATORI, tokenOut: USDC, amountIn: 4_000_000_000n, feeConfig: ON });
+    // 4e9 / 4 = 1e9, less the 0.3% pool fee = 997_000_000, less the 0.25% wallet fee.
+    expect(quote.feeBps).toBe(25);
+    expect(quote.amountOut).toBe(994_507_500n);
+    expect(quote.impactBps).toBe(0); // the wallet fee is not price impact
+    const plan = await buildSwapPlan({ provider, chain: BASE, quote, slippageBps: 100, feeConfig: ON });
+    if (plan.kind !== 'swap') throw new Error('expected a swap plan');
+    expect(plan.amountOut).toBe(994_507_500n);
+    expect(plan.feeAmount).toBe(2_492_500n);
+    expect(plan.minimumOut).toBe(984_562_425n);
+    expect(plan.description).toBe('Swap 0.000000004 SATORI for at least 984.562425 USDC on Uniswap.');
+    const data = bytesToHex(plan.data);
+    // The router's minimum is before the fee, so the user's holds after it.
+    const gross = 987_030_000n; // less 0.25% is exactly the 984_562_425 minimum
+    expect(gross - (gross * 25n) / 10_000n >= plan.minimumOut).toBe(true);
+    expect(data).toContain(encodeSweepTokenWithFee(USDC_ADDR, gross, FROM, { bips: 25, recipient: TREASURY }).slice(2));
+    expect(data).toContain(word(128) + word(lower(D.swapRouter02)));
+  });
+
+  it('28. switched on, a SATORI buy still carries no fee call', async () => {
+    const { provider } = fakeBase({ allowance: 10n ** 30n });
+    const quote = await quoteSwap({ provider, chain: BASE, from: FROM, tokenIn: USDC, tokenOut: SATORI, amountIn: 1_000_000n, feeConfig: ON });
+    expect(quote).toMatchObject({ feeBps: 0, amountOut: 3_988_000n });
+    const plan = await buildSwapPlan({ provider, chain: BASE, quote, slippageBps: 50, feeConfig: ON });
+    expect(bytesToHex(plan.data)).not.toContain(UNISWAP_V3_SELECTORS.sweepTokenWithFee.slice(2));
   });
 });

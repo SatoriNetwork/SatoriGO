@@ -219,6 +219,26 @@ describe('in-wallet swap on Base', () => {
     expect(sentRaw).toHaveLength(1);
   });
 
+  it('a swap reviewed more than two minutes ago is refused until it is priced again', async () => {
+    world.allowance = 10n ** 30n;
+    await state().quoteSwap(USDC, SATORI, 2_000_000n);
+    await state().planSwap(50);
+    const real = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(real + 121_000);
+    try {
+      state().arm(true);
+      await expect(state().confirmSwap()).rejects.toThrow(/out of date/);
+      expect(sentRaw).toHaveLength(0);
+      // Priced again at the new time, it goes.
+      await state().planSwap(50);
+      state().arm(true);
+      await state().confirmSwap();
+      expect(sentRaw).toHaveLength(1);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   it('a failed quote lands as an error, and a new quote discards the plan under review', async () => {
     expect(await state().quoteSwap(USDC, { address: `0x${'11'.repeat(20)}`, symbol: 'NOPE', decimals: 18 }, 1n)).toBe(null);
     expect(swap().error).toMatch(/no route from USDC to NOPE on Base/);

@@ -59,6 +59,7 @@ const QUOTE: SwapQuote = {
   tokenOut: SATORI,
   amountIn: 2_000_000n,
   amountOut: 6_500_000_000_000_000_000n,
+  feeBps: 0,
   hops: [{ tokenIn: USDC_ADDR, tokenOut: SATORI_ADDR, fee: 3000 }],
   impactBps: 40,
   needsApproval: false,
@@ -91,6 +92,9 @@ const swapPlan = (impactBps: number | null): SwapPlan =>
     amountIn: 2_000_000n,
     amountOut: 6_500_000_000_000_000_000n,
     minimumOut: 6_400_000_000_000_000_000n,
+    feeBps: 0,
+    feeAmount: 0n,
+    plannedAt: Date.now(),
     slippageBps: 50,
     impactBps,
     hops: QUOTE.hops,
@@ -269,6 +273,62 @@ describe('LiveSwap', () => {
     expect(onBack).not.toHaveBeenCalled();
     cleanup();
     expect(spies.clearSwap).toHaveBeenCalled();
+  });
+
+  it('a look-alike token is named with its address and never borrows the real token\'s balance', () => {
+    setup();
+    // The same tracked, unvouched contract, now calling itself USDC.
+    storeMod.useLiveStore.setState({
+      evmTokens: { tracked: [{ address: JUNK_ADDR, symbol: 'USDC', decimals: 6, trusted: false }], discovered: [] },
+    } as never);
+    cleanup();
+    render(
+      <NavProvider value={NAV_VALUE}>
+        <LiveSwap onBack={() => {}} />
+      </NavProvider>,
+    );
+    const labels = Array.from((screen.getByTestId('live-swap-token-in') as HTMLSelectElement).options).map((o) => o.textContent);
+    expect(labels).toContain('USDC');
+    expect(labels).toContain('USDC (0xfB69…d359)');
+    pick('live-swap-token-in', JUNK_ADDR.toLowerCase());
+    expect(screen.queryByText(/Balance:/)).toBeNull();
+    expect(screen.queryByTestId('live-swap-max')).toBeNull();
+    // The real one still shows its own.
+    pick('live-swap-token-in', USDC_ADDR.toLowerCase());
+    expect(screen.getByText('Balance: 5 USDC')).toBeTruthy();
+  });
+
+  it('review: a swap priced more than two minutes ago cannot be confirmed until it is priced again', () => {
+    setup({ quote: QUOTE, plan: { ...swapPlan(40), plannedAt: Date.now() - 121_000 } as SwapPlan });
+    fireEvent.click(screen.getByTestId('live-swap-arm'));
+    expect((screen.getByTestId('live-swap-confirm') as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId('live-swap-stale').textContent).toContain('out of date');
+    fireEvent.click(screen.getByTestId('live-swap-replan'));
+    expect(spies.planSwap).toHaveBeenCalledWith(50);
+  });
+
+  it('where pending swaps are public it says so and offers no wide slippage', () => {
+    setup({}, { ...BASE, key: 'ethereum', displayName: 'Ethereum' });
+    expect(screen.getByTestId('live-swap-mempool-note').textContent).toContain('trading bots');
+    expect(screen.queryByTestId('live-swap-slippage-300')).toBeNull();
+    expect(screen.getByTestId('live-swap-slippage-100')).toBeTruthy();
+    cleanup();
+    setup();
+    expect(screen.queryByTestId('live-swap-mempool-note')).toBeNull();
+    expect(screen.getByTestId('live-swap-slippage-300')).toBeTruthy();
+  });
+
+  it('shows the wallet fee only when there is one, and stops saying there is none', () => {
+    setup({ quote: QUOTE });
+    expect(screen.queryByTestId('live-swap-quote-wallet-fee')).toBeNull();
+    expect(screen.getByTestId('live-swap').textContent).toContain('takes no fee');
+    cleanup();
+    setup({ quote: { ...QUOTE, feeBps: 25 } });
+    expect(screen.getByTestId('live-swap-quote-wallet-fee').textContent).toContain('0.25%');
+    expect(screen.getByTestId('live-swap').textContent).not.toContain('takes no fee');
+    cleanup();
+    setup({ quote: QUOTE, plan: { ...swapPlan(40), feeBps: 25, feeAmount: 16_000_000_000_000_000n } as SwapPlan });
+    expect(screen.getByTestId('live-swap-review-wallet-fee').textContent).toContain('0.016 SATORI');
   });
 
   it('the coin has no Max, a token does', () => {

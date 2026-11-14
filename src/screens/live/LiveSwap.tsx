@@ -15,6 +15,8 @@ import { displaySymbol } from '../../services/displaySymbol';
 import { activeEvmChain, useLiveStore } from '../../store/liveStore';
 import {
   SWAP_IMPACT_WARN_BPS,
+  SWAP_PLAN_MAX_AGE_MS,
+  SWAP_PUBLIC_MEMPOOL_CHAINS,
   SWAP_SLIPPAGE_DEFAULT_BPS,
   swapNeedsImpactAck,
   type SwapToken,
@@ -33,6 +35,10 @@ const SLIPPAGE_CHOICES: readonly number[] = [10, 50, 100, 300];
 const QUOTE_DEBOUNCE_MS = 500;
 /** How often the allowance is looked at again while an approval confirms. */
 const APPROVAL_POLL_MS = 4000;
+/** After this long the screen stops asking and says the approval has not landed. */
+const APPROVAL_WAIT_MS = 180_000;
+/** The widest slippage offered where pending transactions are public. */
+const PUBLIC_MEMPOOL_MAX_SLIPPAGE_BPS = 100;
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 
 const tokenKey = (t: SwapToken) => t.address?.toLowerCase() ?? 'native';
@@ -68,21 +74,25 @@ export function LiveSwap({ onBack }: LiveSwapProps) {
 
   // Tokens found by search or pasted address, for this visit only.
   const [found, setFound] = useState<SwapToken[]>([]);
-  const { options, vouched } = useMemo(() => {
+  const { options, vouched, held } = useMemo(() => {
     const native: SwapToken = { address: null, symbol: ticker, decimals: nativeDecimals };
     const list: SwapToken[] = [native];
     const trusted = new Set<string>(['native']);
-    const add = (t: { address: string; symbol?: string; decimals?: number }, vouch: boolean) => {
+    // Tokens that have a balance row of their own on Home: everything but the
+    // ones only found on this screen.
+    const rows = new Set<string>(['native']);
+    const add = (t: { address: string; symbol?: string; decimals?: number }, vouch: boolean, hasRow: boolean) => {
       if (!t.symbol || t.decimals === undefined) return;
       const key = t.address.toLowerCase();
       if (vouch) trusted.add(key);
+      if (hasRow) rows.add(key);
       if (!list.some((x) => tokenKey(x) === key)) list.push({ address: t.address, symbol: t.symbol, decimals: t.decimals });
     };
-    (chain?.defaultTokens ?? []).forEach((t) => add(t, true));
-    evmTokens.tracked.forEach((t) => add(t, t.trusted === true));
-    evmTokens.discovered.filter((t) => t.trusted === true).forEach((t) => add(t, true));
-    found.forEach((t) => add(t as { address: string; symbol: string; decimals: number }, false));
-    return { options: list, vouched: trusted };
+    (chain?.defaultTokens ?? []).forEach((t) => add(t, true, true));
+    evmTokens.tracked.forEach((t) => add(t, t.trusted === true, true));
+    evmTokens.discovered.filter((t) => t.trusted === true).forEach((t) => add(t, true, true));
+    found.forEach((t) => add(t as { address: string; symbol: string; decimals: number }, false, false));
+    return { options: list, vouched: trusted, held: rows };
   }, [chain, evmTokens, found, ticker, nativeDecimals]);
 
   const [inKey, setInKey] = useState('native');
@@ -101,6 +111,10 @@ export function LiveSwap({ onBack }: LiveSwapProps) {
   const [confirming, setConfirming] = useState(false);
   const [confirmError, setConfirmError] = useState('');
   const [waitingApproval, setWaitingApproval] = useState(false);
+  const [waitingSince, setWaitingSince] = useState(0);
+  const [waitTimedOut, setWaitTimedOut] = useState(false);
+  // Ticks while a plan is under review, so an old one is noticed without a click.
+  const [now, setNow] = useState(() => Date.now());
   const [done, setDone] = useState<{ txid: string; explorerUrl: string } | null>(null);
   // State only reaches the button on the next render; a double click is faster.
   const confirmStarted = useRef(false);
@@ -117,8 +131,15 @@ export function LiveSwap({ onBack }: LiveSwapProps) {
       amountError = err instanceof Error ? err.message : 'Enter a valid amount.';
     }
   }
+  // Balance rows are keyed by SYMBOL, and a symbol is whatever a contract says
+  // it is. So a balance is shown only for a token that has a row of its own,
+  // and only when the wallet vouches for it or no other token here shares the
+  // symbol: a pasted look-alike never borrows the real token's balance.
   const balanceOf = (t: SwapToken | null): bigint | null => {
     if (!t) return null;
+    const key = tokenKey(t);
+    const sharesSymbol = options.some((o) => tokenKey(o) !== key && o.symbol.toUpperCase() === t.symbol.toUpperCase());
+    if (!held.has(key) || (!vouched.has(key) && sharesSymbol)) return null;
     const row = t.address === null
       ? assets.find((a) => a.isNative && a.name === ticker)
       : assets.find((a) => !a.isNative && a.name.toUpperCase() === t.symbol.toUpperCase());
@@ -147,15 +168,33 @@ export function LiveSwap({ onBack }: LiveSwapProps) {
   // After an approval is sent: look again until the chain shows the allowance.
   const { quote, plan, quoting, planning, error } = swap;
   useEffect(() => {
-    if (!waitingApproval || !tokenIn || !tokenOut || amountIn === null) return;
+    if (!waitingApproval || waitTimedOut || !tokenIn || !tokenOut || amountIn === null) return;
     if (quote && !quote.needsApproval) {
       setWaitingApproval(false);
+      return;
+    }
+    if (Date.now() - waitingSince > APPROVAL_WAIT_MS) {
+      setWaitTimedOut(true);
       return;
     }
     const timer = setTimeout(() => void quoteSwap(tokenIn, tokenOut, amountIn as bigint), APPROVAL_POLL_MS);
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [waitingApproval, quote, quoteSwap]);
+  }, [waitingApproval, waitTimedOut, waitingSince, quote, quoteSwap]);
+
+  const startWaiting = () => {
+    setWaitingSince(Date.now());
+    setWaitTimedOut(false);
+    setWaitingApproval(true);
+  };
+
+  const planId = swap.plan ? swap.plan.kind : null;
+  useEffect(() => {
+    if (!planId) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 5000);
+    return () => clearInterval(timer);
+  }, [planId]);
 
   const isPasswordless = wallets.find((w) => w.id === activeWalletId)?.passwordless ?? false;
   const requirePassword = requirePasswordToSend && !isPasswordless;
@@ -171,6 +210,10 @@ export function LiveSwap({ onBack }: LiveSwapProps) {
     clearSwapPlan();
     resetReview();
   };
+
+  /** A token the wallet does not vouch for is never named by symbol alone. */
+  const optionLabel = (t: SwapToken): string =>
+    vouched.has(tokenKey(t)) || t.address === null ? displaySymbol(t.symbol) : `${displaySymbol(t.symbol)} (${shortAddress(t.address)})`;
 
   const symbolOf = (address: string): string => {
     const known = options.find((t) => t.address?.toLowerCase() === address.toLowerCase());
@@ -270,7 +313,9 @@ export function LiveSwap({ onBack }: LiveSwapProps) {
   if (plan) {
     const isApprove = plan.kind === 'approve';
     const needsAck = plan.kind === 'swap' && swapNeedsImpactAck(plan.impactBps);
-    const blocked = !!plan.shortfall || !!plan.capRefusal;
+    // The store refuses an old swap plan as well; this is the same rule, shown.
+    const stale = plan.kind === 'swap' && now - plan.plannedAt > SWAP_PLAN_MAX_AGE_MS;
+    const blocked = !!plan.shortfall || !!plan.capRefusal || stale;
 
     const handleConfirm = async () => {
       if (confirmStarted.current) return;
@@ -286,7 +331,7 @@ export function LiveSwap({ onBack }: LiveSwapProps) {
         arm(true);
         const result = await confirmSwap(ackImpact);
         resetReview();
-        if (result.kind === 'approve') setWaitingApproval(true);
+        if (result.kind === 'approve') startWaiting();
         else setDone({ txid: result.txid, explorerUrl: result.explorerUrl });
       } catch (err) {
         setConfirmError(err instanceof Error ? err.message : String(err));
@@ -332,6 +377,12 @@ export function LiveSwap({ onBack }: LiveSwapProps) {
                     <span className="sum-key">At least ({percent(plan.slippageBps)} slippage)</span>
                     <span className="sum-val">{formatAmount(plan.minimumOut, plan.tokenOut.decimals)} {displaySymbol(plan.tokenOut.symbol)}</span>
                   </div>
+                  {plan.feeBps > 0 && (
+                    <div className="sum-row" data-testid="live-swap-review-wallet-fee">
+                      <span className="sum-key">Satori GO fee ({percent(plan.feeBps)}), already taken off</span>
+                      <span className="sum-val">{formatAmount(plan.feeAmount, plan.tokenOut.decimals)} {displaySymbol(plan.tokenOut.symbol)}</span>
+                    </div>
+                  )}
                   <div className="sum-row" data-testid="live-swap-review-impact">
                     <span className="sum-key">Price impact</span>
                     <span className="sum-val" style={needsAck ? { color: 'var(--danger)' } : undefined}>{impactText(plan.impactBps)}</span>
@@ -389,6 +440,26 @@ export function LiveSwap({ onBack }: LiveSwapProps) {
             <div className="banner danger" style={{ marginBottom: 14 }}>
               <AlertTriangle size={14} />
               {plan.capRefusal}
+            </div>
+          )}
+          {stale && (
+            <div className="banner warning" style={{ marginBottom: 14 }} data-testid="live-swap-stale">
+              <AlertTriangle size={14} />
+              <span>
+                The price is out of date.{' '}
+                <button
+                  type="button"
+                  className="chip neutral"
+                  style={{ cursor: 'pointer' }}
+                  onClick={() => {
+                    resetReview();
+                    void planSwap(plan.slippageBps);
+                  }}
+                  data-testid="live-swap-replan"
+                >
+                  Update price
+                </button>
+              </span>
             </div>
           )}
 
@@ -474,6 +545,8 @@ export function LiveSwap({ onBack }: LiveSwapProps) {
 
   const outUnverified = tokenOut !== null && !vouched.has(tokenKey(tokenOut));
   const canReview = !!quote && !quoting && !planning && !overBalance && !waitingApproval;
+  const publicMempool = SWAP_PUBLIC_MEMPOOL_CHAINS.includes(chain.key);
+  const slippageChoices = SLIPPAGE_CHOICES.filter((bps) => !publicMempool || bps <= PUBLIC_MEMPOOL_MAX_SLIPPAGE_BPS);
 
   return (
     <div className="app-frame screen-enter">
@@ -492,7 +565,7 @@ export function LiveSwap({ onBack }: LiveSwapProps) {
           style={{ width: '100%', marginBottom: 8 }}
         >
           {options.map((t) => (
-            <option key={tokenKey(t)} value={tokenKey(t)}>{displaySymbol(t.symbol)}</option>
+            <option key={tokenKey(t)} value={tokenKey(t)}>{optionLabel(t)}</option>
           ))}
         </select>
         <TextField
@@ -551,7 +624,7 @@ export function LiveSwap({ onBack }: LiveSwapProps) {
         >
           <option value="">Choose a token...</option>
           {options.map((t) => (
-            <option key={tokenKey(t)} value={tokenKey(t)}>{displaySymbol(t.symbol)}</option>
+            <option key={tokenKey(t)} value={tokenKey(t)}>{optionLabel(t)}</option>
           ))}
         </select>
         <TextField
@@ -603,15 +676,16 @@ export function LiveSwap({ onBack }: LiveSwapProps) {
           <div className="banner warning" style={{ marginTop: 12 }} data-testid="live-swap-unverified">
             <AlertTriangle size={14} />
             <span>
-              Satori GO cannot vouch for {displaySymbol(tokenOut.symbol)}. Anyone can create a token with this name, so check its contract
-              address before you swap: <span className="mono" style={{ wordBreak: 'break-all' }}>{tokenOut.address}</span>
+              Satori GO cannot vouch for {displaySymbol(tokenOut.symbol)}. Anyone can create a token with this name, and some tokens can be
+              bought but never sold again, which the wallet cannot tell in advance. Check its contract address before you swap:{' '}
+              <span className="mono" style={{ wordBreak: 'break-all' }}>{tokenOut.address}</span>
             </span>
           </div>
         )}
 
         <div className="section-label">Slippage</div>
         <div style={{ display: 'flex', gap: 6, marginBottom: 14 }}>
-          {SLIPPAGE_CHOICES.map((bps) => (
+          {slippageChoices.map((bps) => (
             <button
               key={bps}
               type="button"
@@ -625,6 +699,12 @@ export function LiveSwap({ onBack }: LiveSwapProps) {
             </button>
           ))}
         </div>
+
+        {publicMempool && (
+          <div className="text-faint" style={{ fontSize: 11, margin: '-6px 0 14px', lineHeight: 1.5 }} data-testid="live-swap-mempool-note">
+            On {chain.displayName}, pending swaps are public and trading bots can move the price against you, up to your slippage. Keep it low.
+          </div>
+        )}
 
         {quoting && !quote && (
           <div className="text-faint" style={{ fontSize: 12, marginBottom: 14 }} data-testid="live-swap-quoting">
@@ -645,6 +725,12 @@ export function LiveSwap({ onBack }: LiveSwapProps) {
                 <span className="sum-key">You receive about</span>
                 <span className="sum-val">{formatListAmount(quote.amountOut, quote.tokenOut.decimals)} {displaySymbol(quote.tokenOut.symbol)}</span>
               </div>
+              {quote.feeBps > 0 && (
+                <div className="sum-row" data-testid="live-swap-quote-wallet-fee">
+                  <span className="sum-key">Satori GO fee</span>
+                  <span className="sum-val">{percent(quote.feeBps)}, already taken off</span>
+                </div>
+              )}
               <div className="sum-row" data-testid="live-swap-quote-impact">
                 <span className="sum-key">Price impact</span>
                 <span
@@ -670,10 +756,21 @@ export function LiveSwap({ onBack }: LiveSwapProps) {
           </div>
         )}
 
-        {waitingApproval && (
+        {waitingApproval && !waitTimedOut && (
           <div className="banner info" style={{ marginBottom: 14 }} data-testid="live-swap-waiting-approval">
             <Info size={14} />
             Approval sent. Waiting for {chain.displayName} to confirm it, then you can review the swap.
+          </div>
+        )}
+        {waitingApproval && waitTimedOut && (
+          <div className="banner warning" style={{ marginBottom: 14 }} data-testid="live-swap-approval-late">
+            <AlertTriangle size={14} />
+            <span>
+              {chain.displayName} has not confirmed the approval yet. It may still be pending; Activity shows it.{' '}
+              <button type="button" className="chip neutral" style={{ cursor: 'pointer' }} onClick={startWaiting} data-testid="live-swap-check-again">
+                Check again
+              </button>
+            </span>
           </div>
         )}
 
@@ -687,7 +784,8 @@ export function LiveSwap({ onBack }: LiveSwapProps) {
           {waitingApproval ? 'Waiting for approval' : quote?.needsApproval ? `Approve ${displaySymbol(quote.tokenIn.symbol)}` : 'Review swap'}
         </Button>
         <div className="text-faint" style={{ fontSize: 11, marginTop: 10, lineHeight: 1.5 }}>
-          Swaps go through Uniswap v3 pools. Satori GO finds the route and builds the transaction itself, and takes no fee.
+          Swaps go through Uniswap v3 pools. Satori GO finds the route and builds the transaction itself
+          {quote && quote.feeBps > 0 ? '.' : ', and takes no fee.'}
         </div>
       </div>
       <LiveNav />

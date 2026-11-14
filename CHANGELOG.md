@@ -25,6 +25,11 @@ and release commits.
 - A swap that would move the price a lot, or whose price impact cannot be
   measured, needs a separate confirmation. A token the wallet cannot vouch for
   is marked, with its contract address.
+- A swap you have reviewed for more than two minutes has to be priced again
+  before it can be confirmed, and its deadline runs on the network's clock, not
+  your computer's.
+- On Ethereum and BNB Chain, where pending swaps are public, the wallet says so
+  and offers no slippage above 1%.
 
 ## 1.7.25
 

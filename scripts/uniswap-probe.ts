@@ -7,7 +7,8 @@
 // For each chain: code exists at every pinned address, the router and the
 // quoter name the pinned factory, the router names the pinned wrapped coin, a
 // wallet-built quote decodes, and a wallet-built coin-in swap simulates
-// (eth_call from the wrapped-coin contract, which always holds coin).
+// (eth_call from the wrapped-coin contract, which always holds coin), with and
+// without the wallet fee.
 //
 // RPC: UNISWAP_PROBE_RPC_<CHAINKEY> overrides the public default below.
 
@@ -19,9 +20,13 @@ import {
   decodeQuoteAmountOut,
   encodeSwap,
   minimumOut,
+  afterSwapFee,
   type SwapHop,
 } from '../src/services/chain/evm/uniswapV3';
 import { bytesToHex } from '@noble/hashes/utils';
+
+/** Stands in for a fee recipient in simulations. Nothing is ever sent. */
+const FEE_PROBE_ADDRESS = '0x00000000000000000000000000000000000000fe';
 
 const DEFAULT_RPC: Record<string, string> = {
   base: 'https://mainnet.base.org',
@@ -86,6 +91,23 @@ async function checkChain(key: string): Promise<boolean> {
     });
     const sim = await call(d.swapRouter02, `0x${bytesToHex(data)}`, { from: d.wrappedNative, value: `0x${amountIn.toString(16)}` });
     check('simulate coin-in swap', typeof sim.result === 'string', sim.error?.message ?? '');
+    // The same swap with the wallet fee switched on: the router pays itself, then
+    // sweeps to the recipient and the fee address. The fee is off in the wallet
+    // (evmSwap.ts); this proves the path is there for the day it is not.
+    for (const bips of [25, 100]) {
+      const withFee = encodeSwap({
+        deployment: d,
+        hops: best.hops,
+        recipient: d.wrappedNative,
+        amountIn,
+        amountOutMinimum: minimumOut(afterSwapFee(best.out, bips), 100),
+        deadline: BigInt(Math.floor(Date.now() / 1000) + 1200),
+        nativeOut: false,
+        fee: { bips, recipient: FEE_PROBE_ADDRESS },
+      });
+      const feeSim = await call(d.swapRouter02, `0x${bytesToHex(withFee)}`, { from: d.wrappedNative, value: `0x${amountIn.toString(16)}` });
+      check(`simulate coin-in swap with a ${bips / 100}% fee`, typeof feeSim.result === 'string', feeSim.error?.message ?? '');
+    }
   }
   return ok;
 }
