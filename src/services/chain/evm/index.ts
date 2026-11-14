@@ -26,3 +26,4 @@ export * from './cosmosStaking';
 export * from './satoriRewards';
 export * from './typedData';
 export * from './dappCall';
+export * from './uniswapV3';

@@ -125,6 +125,17 @@ import {
   type SatoriRewardsState,
 } from './satoriRewards';
 import { withCallGasHeadroom, withEvmCallFeeLevel } from './evmCall';
+import {
+  buildSwapApprovePlan,
+  buildSwapPlan,
+  quoteSwap,
+  swapNeedsImpactAck,
+  EMPTY_SWAP,
+  type SwapPlan,
+  type SwapQuote,
+  type SwapState,
+  type SwapToken,
+} from './evmSwap';
 import type { EvmFeeLevel } from '../services/chain/evm/fees';
 import type { EvmNonceTracker } from '../services/chain/evm/nonce';
 import { checkElectrumServer } from '../services/chain/electrumClient';
@@ -1216,6 +1227,10 @@ export interface ServerStatus {
 let satoriClaimSending = false;
 /** Bumped by each new review and by leaving one: a slower one must not land. */
 let satoriPlanRun = 0;
+/** The same two guards for a swap: one broadcast at a time, and a quote or plan
+ *  that was overtaken by a newer one never lands. */
+let swapSending = false;
+let swapRun = 0;
 
 export interface AddressLenderStatus {
   address: string;
@@ -2011,6 +2026,8 @@ interface LiveState {
    *  waiting for the arming gate, exactly as `evmSend` is for a send. */
   evmStaking: { snapshot: EvmStakingSnapshot | null; loading: boolean; plan: EvmStakePlan | null; planning: boolean };
   satoriRewards: SatoriRewardsState;
+  /** The in-wallet Uniswap swap under way on the active EVM chain. */
+  swap: SwapState;
 
   // --- Monero (family 'monero', the Monero engine design notes §8/§15) ---------
   /** The open Monero wallet of THIS PAGE and what it last reported.
@@ -2255,6 +2272,22 @@ interface LiveState {
   /** Sign and broadcast the claim under review (requires arm(true)). */
   confirmSatoriClaim(): Promise<{ txid: string; explorerUrl: string; chainKey: string }>;
   clearSatoriClaim(): void;
+  /** Read a token contract's own symbol and decimals from the chain, for a
+   *  swap side picked by search or pasted address. Nothing is tracked. */
+  resolveSwapToken(address: string): Promise<{ ok: true; token: SwapToken } | { ok: false; error: string }>;
+  /** Find the best Uniswap route for an exact input on the active EVM chain.
+   *  Sets `swap.quote`, or `swap.error`. */
+  quoteSwap(tokenIn: SwapToken, tokenOut: SwapToken, amountIn: bigint): Promise<SwapQuote | null>;
+  /** Price the next step of the quoted swap for review: the exact-amount
+   *  approval when the quote needs one, else the swap. Sets `swap.plan`. */
+  planSwap(slippageBps: number): Promise<SwapPlan | null>;
+  selectSwapFeeLevel(level: EvmFeeLevel): Promise<void>;
+  /** Sign and broadcast the step under review (requires arm(true)). A swap
+   *  whose price impact is high or unmeasured also needs `ackImpact`. */
+  confirmSwap(ackImpact?: boolean): Promise<{ txid: string; explorerUrl: string; chainKey: string; kind: SwapPlan['kind'] }>;
+  /** Drop the plan under review and keep the quote (Back from the review). */
+  clearSwapPlan(): void;
+  clearSwap(): void;
   /** Unlock the ACTIVE wallet. `password` is that wallet's own password on a v1
    *  vault and the APP password on a migrated one (ignored once the session
    *  holds the master key). `opts.migrate === false` declines the transitional
@@ -2716,6 +2749,7 @@ async function landSeedImport(set: LiveSet, get: LiveGet, evmKey: string | null,
       // account's stake under this one's balance.
       evmStaking: { snapshot: null, loading: false, plan: null, planning: false },
       satoriRewards: EMPTY_SATORI_REWARDS,
+      swap: EMPTY_SWAP,
     });
     void get().loadWallets();
     void get().loadWalletAssets();
@@ -2825,6 +2859,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   loadingEvmSend: false,
   evmStaking: { snapshot: null, loading: false, plan: null, planning: false },
   satoriRewards: EMPTY_SATORI_REWARDS,
+  swap: EMPTY_SWAP,
   monero: { chain: null, ...EMPTY_MONERO },
   zcash: { chain: ZCASH_CHAIN, ...EMPTY_ZCASH },
   tao: { chain: TAO_CHAIN, ...EMPTY_TAO },
@@ -3415,6 +3450,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       evmSend: null,
       evmStaking: { snapshot: null, loading: false, plan: null, planning: false },
       satoriRewards: EMPTY_SATORI_REWARDS,
+      swap: EMPTY_SWAP,
       evmTokens: { tracked: [], discovered: [] },
       error: null,
       syncing: 'idle',
@@ -3552,6 +3588,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
         // Staking is per account AND per chain, exactly like the token lists.
         evmStaking: { snapshot: null, loading: false, plan: null, planning: false },
         satoriRewards: EMPTY_SATORI_REWARDS,
+        swap: EMPTY_SWAP,
         // Token lists are per wallet AND per chain; loadWalletAssets below reads
         // the new account's own, so the old account's must not show meanwhile.
         evmTokens: { tracked: [], discovered: [] },
@@ -3714,6 +3751,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       evmSend: null,
       evmStaking: { snapshot: null, loading: false, plan: null, planning: false },
       satoriRewards: EMPTY_SATORI_REWARDS,
+      swap: EMPTY_SWAP,
       // The manual row order belongs to the chain being left; the new chain's
       // own is read below. Cleared first so the old arrangement cannot briefly
       // reorder the new chain's rows.
@@ -4499,6 +4537,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       evmSend: null,
       evmStaking: { snapshot: null, loading: false, plan: null, planning: false },
       satoriRewards: EMPTY_SATORI_REWARDS,
+      swap: EMPTY_SWAP,
       evmTokens: { tracked: [], discovered: [] },
       assetOrder: [],
       pendingMnemonic: null,
@@ -6547,6 +6586,171 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     svc.allowBroadcast = false;
   },
 
+  // --- in-wallet swap (Uniswap v3) --------------------------------------------
+  // Same shape as a Satori claim: evmSwap.ts builds the calldata against the
+  // pinned contracts, planEvmCall prices it, the arming gate guards it and
+  // broadcastEvmPlan sends it.
+  async resolveSwapToken(address: string) {
+    const chain = activeEvmChain(get());
+    const provider = chain && activeFamily() === 'evm' ? await evmProviderFor(chain.key) : null;
+    if (!chain || !provider) return { ok: false as const, error: 'Swapping needs an EVM network.' };
+    try {
+      const ref = await provider.resolveToken(address.trim());
+      if (!ref || !ref.symbol || ref.decimals === undefined) {
+        return { ok: false as const, error: `No ERC-20 token answers at that address on ${chain.displayName}.` };
+      }
+      return { ok: true as const, token: { address: ref.address, symbol: ref.symbol, decimals: ref.decimals } };
+    } catch {
+      return { ok: false as const, error: `${chain.displayName} is unreachable right now; try again.` };
+    }
+  },
+
+  async quoteSwap(tokenIn: SwapToken, tokenOut: SwapToken, amountIn: bigint) {
+    const run = ++swapRun;
+    const startedOn = get().address;
+    const abandoned = () => run !== swapRun || get().address !== startedOn;
+    set((s) => ({ swap: { ...s.swap, quoting: true, plan: null, planning: false, error: null } }));
+    svc.allowBroadcast = false;
+    try {
+      const chain = activeEvmChain(get());
+      const from = get().address;
+      if (!chain || !from || activeFamily() !== 'evm') throw new EvmSendError('unknown-asset', 'Swapping needs an EVM network.');
+      const provider = await evmProviderFor(chain.key);
+      if (!provider) throw new EvmSendError('no-engine', 'This build of Satori GO has no EVM engine.');
+      const quote = await quoteSwap({ provider, chain, from, tokenIn, tokenOut, amountIn });
+      if (abandoned()) return null;
+      set((s) => ({ swap: { ...s.swap, quote, quoting: false } }));
+      return quote;
+    } catch (err) {
+      if (abandoned()) return null;
+      const error = err instanceof Error ? err.message : String(err);
+      set((s) => ({ swap: { ...s.swap, quote: null, quoting: false, error } }));
+      return null;
+    }
+  },
+
+  async planSwap(slippageBps: number) {
+    const run = ++swapRun;
+    const startedOn = get().address;
+    const abandoned = () => run !== swapRun || get().address !== startedOn;
+    set((s) => ({ swap: { ...s.swap, quoting: false, planning: true, plan: null, error: null } }));
+    svc.allowBroadcast = false;
+    try {
+      const chain = activeEvmChain(get());
+      const quote = get().swap.quote;
+      if (!chain || !quote || activeFamily() !== 'evm') throw new EvmSendError('gated', 'Nothing to swap yet.');
+      if (quote.chainKey !== chain.key || quote.from !== get().address) {
+        throw new EvmSendError('gated', 'The account or network changed since this swap was quoted.');
+      }
+      const provider = await evmProviderFor(chain.key);
+      if (!provider) throw new EvmSendError('no-engine', 'This build of Satori GO has no EVM engine.');
+      const nativeBalanceBase = get().assets.find((a) => a.isNative && a.name === chain.nativeTicker)?.amountBase;
+      const plan = quote.needsApproval
+        ? await buildSwapApprovePlan({ provider, chain, quote, nativeBalanceBase })
+        : await buildSwapPlan({ provider, chain, quote, slippageBps, nativeBalanceBase });
+      if (abandoned()) return null;
+      set((s) => ({ swap: { ...s.swap, plan, planning: false } }));
+      return plan;
+    } catch (err) {
+      if (abandoned()) return null;
+      const error = err instanceof Error ? err.message : String(err);
+      set((s) => ({ swap: { ...s.swap, planning: false, error } }));
+      return null;
+    }
+  },
+
+  async selectSwapFeeLevel(level: EvmFeeLevel) {
+    const plan = get().swap.plan;
+    const chain = activeEvmChain(get());
+    if (!plan || !chain) return;
+    try {
+      const native = get().assets.find((a) => a.isNative && a.name === chain.nativeTicker);
+      const repriced = await withEvmCallFeeLevel(plan, level, chain, native?.amountBase);
+      if (get().swap.plan !== plan) return;
+      // The repriced half is the generic call plan; the swap's own fields ride along.
+      set((s) => ({ swap: { ...s.swap, plan: { ...plan, ...repriced } as SwapPlan } }));
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
+      set((s) => ({ swap: { ...s.swap, error } }));
+    }
+  },
+
+  async confirmSwap(ackImpact = false) {
+    const plan = get().swap.plan;
+    const chain = activeEvmChain(get());
+    if (!plan || !chain) throw new EvmSendError('gated', 'Nothing to confirm.');
+    if (swapSending) throw new EvmSendError('gated', 'This is already being sent.');
+    if (plan.chainKey !== chain.key) throw new EvmSendError('gated', 'The chain changed since this swap was reviewed.');
+    if (plan.from !== get().address) throw new EvmSendError('gated', 'The account changed since this swap was reviewed.');
+    if (plan.kind === 'swap' && swapNeedsImpactAck(plan.impactBps) && !ackImpact) {
+      throw new EvmSendError('gated', 'Confirm that you have seen the price impact of this swap first.');
+    }
+    // Before the first await: both calls of a double click get this far otherwise.
+    swapSending = true;
+    let evm: NonNullable<Awaited<ReturnType<typeof loadEvmModules>>>;
+    let result: Awaited<ReturnType<typeof broadcastEvmPlan>>;
+    try {
+      const provider = await evmProviderFor(chain.key);
+      const modules = await loadEvmModules();
+      if (!provider || !modules) throw new EvmSendError('no-engine', 'This build of Satori GO has no EVM engine.');
+      evm = modules;
+      evmNonces ??= new evm.EvmNonceTracker();
+      result = await broadcastEvmPlan({
+        provider,
+        plan,
+        nonces: evmNonces,
+        sign: (request) => svc.signEvmTransaction(request),
+        allowBroadcast: svc.allowBroadcast,
+      });
+    } finally {
+      swapSending = false;
+    }
+    svc.allowBroadcast = false;
+    const done = { txid: result.txid, explorerUrl: evmExplorerTxUrl(chain, result.txid), chainKey: chain.key, kind: plan.kind };
+    if (plan.kind === 'approve') {
+      // The quote stays: the screen asks for it again until the allowance is
+      // mined, and the swap step opens then.
+      set((s) => ({ swap: { ...s.swap, plan: null } }));
+      return done;
+    }
+    // What left the account, as the indexer will report it for the same txid.
+    const pending = evm.localPendingEvmTx({
+      txid: result.txid,
+      from: plan.from,
+      to: plan.to,
+      asset: plan.tokenIn.address === null ? chain.nativeTicker : plan.tokenIn.symbol,
+      decimals: plan.tokenIn.decimals,
+      amountBase: plan.amountIn,
+      feeBase: plan.quote.estimatedTotal,
+      nativeDecimals: chain.nativeDecimals,
+      nativeTicker: chain.nativeTicker,
+      timestamp: Date.now(),
+    });
+    localPendingTxs = [
+      { address: plan.from, tx: pending, at: Date.now() },
+      ...localPendingTxs.filter((p) => p.tx.txid !== pending.txid),
+    ];
+    set((s) => ({
+      txs: [pending, ...s.txs.filter((t) => t.txid !== pending.txid)].sort(compareLiveTx),
+      swap: EMPTY_SWAP,
+    }));
+    void get().refresh({ silent: true });
+    if (typeof setTimeout !== 'undefined') setTimeout(() => void get().refresh({ silent: true }), 6000);
+    return done;
+  },
+
+  clearSwapPlan() {
+    swapRun++;
+    set((s) => ({ swap: { ...s.swap, plan: null, planning: false, error: null } }));
+    svc.allowBroadcast = false;
+  },
+
+  clearSwap() {
+    swapRun++;
+    set({ swap: EMPTY_SWAP });
+    svc.allowBroadcast = false;
+  },
+
   // --- arm broadcast --------------------------------------------------------
   arm(on: boolean) {
     svc.allowBroadcast = on;
@@ -7173,6 +7377,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       addressScan: emptyAddressScan(),
       evmStaking: { snapshot: null, loading: false, plan: null, planning: false },
       satoriRewards: EMPTY_SATORI_REWARDS,
+      swap: EMPTY_SWAP,
     });
   },
 }));

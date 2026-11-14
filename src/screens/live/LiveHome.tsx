@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type React from 'react';
-import { AlertTriangle, ArrowDownLeft, ArrowUpRight, Check, ChevronDown, Copy, Eye, EyeOff, ExternalLink, Gift, GripVertical, Landmark, Lock, MoreHorizontal, Pencil, Plus, RefreshCw, Search, Trash2, Wifi, WifiOff, X, ListFilter } from 'lucide-react';
+import { AlertTriangle, ArrowDownLeft, ArrowLeftRight, ArrowUpRight, Check, ChevronDown, Copy, Eye, EyeOff, ExternalLink, Gift, GripVertical, Landmark, Lock, MoreHorizontal, Pencil, Plus, RefreshCw, Search, Trash2, Wifi, WifiOff, X, ListFilter } from 'lucide-react';
 import { AccountAvatar } from '../../components/AccountAvatar';
 import { ActivityPager } from '../../components/ActivityPager';
 import { taoExplorerAccountUrl } from '../../store/taoChain';
@@ -117,6 +117,9 @@ interface LiveHomeProps {
   onStake?(): void;
   /** Opens the Satori reward claims. */
   onRewards?(): void;
+  /** Opens the in-wallet swap. Offered only on a chain with a pinned Uniswap
+   *  deployment, which this screen reads off the chain row itself. */
+  onSwap?(): void;
 }
 
 function shortenAddr(addr: string): string {
@@ -750,7 +753,7 @@ function BalanceRow({
   );
 }
 
-export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake, onRewards }: LiveHomeProps) {
+export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake, onRewards, onSwap }: LiveHomeProps) {
   const address = useLiveStore((s) => s.address);
   const assets = useLiveStore((s) => s.assets);
   const pinnedAssets = useLiveStore((s) => s.pinnedAssets);
@@ -1119,6 +1122,7 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
   // no summary line, and the effect below makes no request at all.
   const stakeChain = evmStakingSupported() ? activeEvmChain({ evm }) : null;
   const stakeChainKey = stakeChain?.staking ? stakeChain.key : null;
+  const canSwap = activeFamily() === 'evm' && activeEvmChain({ evm })?.swap === true;
   // A snapshot belongs to ONE chain: the store clears it on a chain or account
   // switch, but a read still in flight when the user leaves would otherwise
   // print another chain's figures under this hero.
@@ -2710,6 +2714,20 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
                   chain whose registry row carries `staking` (owner, 2026-08-24:
                   it belongs on the main screen, not only inside the coin's
                   detail). It opens the SAME screen the asset detail does. */}
+              {/* Swap, on a chain this build pins a Uniswap deployment for. */}
+              {canSwap && onSwap && (
+                <button
+                  type="button"
+                  className="action-round"
+                  onClick={onSwap}
+                  data-testid="live-action-swap"
+                >
+                  <div className="action-circle">
+                    <ArrowLeftRight size={20} />
+                  </div>
+                  Swap
+                </button>
+              )}
               {stakeChainKey && (
                 <button
                   type="button"

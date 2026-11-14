@@ -26,6 +26,8 @@ import {
   encodeName,
   encodeTotalSupply,
   encodeTransfer,
+  encodeApprove,
+  encodeAllowance,
   decodeUint256,
   decodeUint8,
   decodeBool,
@@ -61,6 +63,7 @@ describe('erc20 selectors (1)', () => {
     totalSupply: 'totalSupply()',
     transfer: 'transfer(address,uint256)',
     approve: 'approve(address,uint256)',
+    allowance: 'allowance(address,address)',
   };
 
   it('every pinned selector equals selector(signature)', () => {
@@ -529,5 +532,27 @@ describe('encodeTransfer rejects bad input (8)', () => {
     );
     expect(() => encodeTransfer('', 1n)).toThrow(/not a valid EVM address/);
     expect(() => encodeTransfer(null as unknown as string, 1n)).toThrow(/not a valid EVM address/);
+  });
+});
+
+describe('approve and allowance (the swap path)', () => {
+  it('builds an approve the decoder reads back as the same exact amount', () => {
+    const data = encodeApprove(PERMIT2, 1_500_000n);
+    expect(data.length).toBe(68);
+    expect(decodeErc20Calldata(data)).toEqual({ kind: 'approve', spender: PERMIT2, amount: 1_500_000n, unlimited: false });
+  });
+
+  it('refuses a spender that is not an address', () => {
+    expect(() => encodeApprove('0x1234', 1n)).toThrow();
+  });
+
+  it('builds allowance(owner, spender) as selector plus two address words', () => {
+    expect(encodeAllowance(ADDR_EIP55, PERMIT2)).toBe(
+      '0xdd62ed3e' +
+        '000000000000000000000000' +
+        'fb6916095ca1df60bb79ce92ce3ea74c37c5d359' +
+        '000000000000000000000000' +
+        '000000000022d473030f116ddee9f6b43ac78ba3',
+    );
   });
 });

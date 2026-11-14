@@ -51,6 +51,10 @@ export interface EvmChainInfo {
    *  overwhelming default and `!chain.staking` is the capability test either
    *  way. loadEvmChainInfos always writes it explicitly. */
   staking?: { valoperPrefix: string; accountPrefix: string } | null;
+  /** True when this build pins a Uniswap v3 deployment for the chain
+   *  (services/chain/evm/uniswapV3.ts). The Swap button keys off exactly this.
+   *  Optional for the same reason `staking` is. */
+  swap?: boolean;
 }
 
 export const EVM_TARGET_PREFIX = 'evm:';
@@ -90,6 +94,7 @@ export async function loadEvmChainInfos(): Promise<EvmChainInfo[]> {
     trustWalletChain: c.trustWalletChain ?? null,
     tokenListSlug: c.tokenListSlug ?? null,
     staking: c.staking ? { valoperPrefix: c.staking.valoperPrefix, accountPrefix: c.staking.accountPrefix } : null,
+    swap: evm.uniswapV3For(c.key) !== null,
     defaultTokens: (c.defaultTokens ?? []).map((t) => ({ address: t.address, symbol: t.symbol, decimals: t.decimals })),
   }));
 }

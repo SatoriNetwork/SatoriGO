@@ -9,6 +9,23 @@ and release commits.
 
 ---
 
+## Unreleased
+
+### Swap inside the wallet
+
+- A new Swap button on Base, Ethereum, BNB Chain and Avalanche swaps one token
+  for another through Uniswap, without leaving the wallet. Pick what you pay
+  with and what you want, and the wallet finds the best Uniswap v3 route, shows
+  what you receive, the least you can receive, and how much your swap moves the
+  price.
+- The wallet builds the swap itself and only ever calls Uniswap's own router. No
+  outside service composes the transaction, and Satori GO takes no fee.
+- Swapping a token (not the network's own coin) is two steps: an approval for
+  exactly the amount you are swapping, never an unlimited one, then the swap.
+- A swap that would move the price a lot, or whose price impact cannot be
+  measured, needs a separate confirmation. A token the wallet cannot vouch for
+  is marked, with its contract address.
+
 ## 1.7.25
 
 - Switching to a network this wallet is not on yet now offers a choice: open

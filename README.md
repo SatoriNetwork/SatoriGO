@@ -195,6 +195,12 @@ first**. See the in‑app note under **Settings → About**.
   them; multiple **accounts** per seed on the EVM networks.
 - **Send coins, assets and tokens** with a real signed‑tx review; **quick send between
   your own wallets** by name; **address book**.
+- **Swap** (Base, Ethereum, BNB Chain, Avalanche): swap one token for another through
+  Uniswap v3 inside the wallet. The wallet finds the route and builds the transaction
+  itself against pinned Uniswap contracts (`src/services/chain/evm/uniswapV3.ts`), so no
+  routing service is involved and no fee is added. A token swap approves exactly the
+  amount being swapped, then swaps; the review shows the minimum you receive and the
+  price impact.
 - **Staking** — native staking where the network supports it, with what you have
   staked, what it has earned and a sortable validator list. Satori moved to Base:
   SATORIEVR is marked as the old token, pool staking registers your Base address
@@ -294,6 +300,7 @@ content‑script permission was added for dApp connect).
 | `node scripts/dapp-smoke.mjs` (`npm run qa:dapp`) | End‑to‑end dApp‑connect proof — loads the **Chrome** build only |
 | `npm run build:evm` | Build the EVM development target to `dist/chrome` (the folder you load unpacked) |
 | `node scripts/evm-extension-smoke.mjs` (`npm run qa:evm`) | End‑to‑end against the real EVM networks |
+| `npx vite-node scripts/uniswap-probe.ts` | Read‑only check of the pinned Uniswap v3 contracts against each chain (code present, router and quoter agree with the pins, a wallet‑built quote and swap simulate) |
 | `node scripts/gateway-bridge-check.mjs [chain]` | Is every network reachable through the gateway right now: server, tip, latency, and the chain's identity where it is known |
 | `npx vite-node scripts/electrumx-probe.ts -- <host> <port> <chainId> [tls]` | Is an ElectrumX server usable by this wallet: identity, the calls the wallet makes, and the asset dialect where the chain has one |
 

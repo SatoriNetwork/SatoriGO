@@ -444,6 +444,25 @@ confirmed by the owner on mainnet (item 7). Nothing below is marketing.
     wallet on or off applies when a page is reloaded. `eth_sign`, contract
     deployment and adding networks the wallet does not know are refused.
 
+43. **The in-wallet swap reaches Uniswap v3 pools only, and has had no funded
+    test on mainnet yet.** It is offered on Base, Ethereum, BNB Chain and
+    Avalanche. The wallet does its own routing: the direct pool, or two pools
+    through the chain's wrapped coin or its main dollar token (USDC, or USDT on
+    BNB Chain). Liquidity that exists only on Uniswap v2, v4 or UniswapX, or on
+    another exchange, is not reached, so a better price may exist elsewhere and
+    some tokens have no route at all. Swaps are exact-input only (you choose
+    what you pay, not what you receive). A token that takes a fee on transfer is
+    refused by the simulation. A token that requires its allowance to be reset
+    to zero before it can be changed (USDT on Ethereum) can refuse the approval
+    when an older, smaller allowance to the router is still in place. Swapping a
+    coin for its own wrapped token is not offered. The price impact is measured
+    against the pool's own price, not against the wider market: a pool that is
+    itself mispriced reads as no impact. The "least you receive" protects
+    against the price moving between review and confirmation, up to the
+    slippage you chose, and the swap fails (the fee is still paid) when it
+    cannot be met. Token names found by search come from a public token list;
+    the symbol and decimals shown are then read from the contract itself.
+
 Real P2SH output support, taproot key ownership, inscription and BGC-20
 awareness, gap-limit address discovery, BIP39 passphrases at wallet creation,
 QR-code scanning, 24 h price change, an in-wallet asset explorer,

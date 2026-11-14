@@ -60,9 +60,10 @@ export function selector(signature: string): string {
  * pinning them turns the keccak plumbing itself into something a test can check
  * (erc20.test.ts §1 asserts each equals selector(<signature>)).
  *
- * `approve` is here for DECODING only. Phase 5 has to recognise and explain an
- * allowance; this wallet has no reason to compose one, so no approve encoder
- * exists and none should be added without that being a deliberate decision.
+ * `approve` was decode-only until the in-wallet swap (2026-11-14): a token has
+ * to be allowed to the pinned swap router before it can be swapped, so
+ * encodeApprove exists now. It is called from src/store/evmSwap.ts only, always
+ * for the exact amount being swapped and never for MAX_UINT256.
  */
 export const ERC20_SELECTORS = Object.freeze({
   /** balanceOf(address) */
@@ -77,8 +78,10 @@ export const ERC20_SELECTORS = Object.freeze({
   totalSupply: '0x18160ddd',
   /** transfer(address,uint256) */
   transfer: '0xa9059cbb',
-  /** approve(address,uint256), decode only */
+  /** approve(address,uint256) */
   approve: '0x095ea7b3',
+  /** allowance(address,address) */
+  allowance: '0xdd62ed3e',
 } as const);
 
 // ---------------------------------------------------------------------------
@@ -214,6 +217,23 @@ export function encodeTransfer(to: string, amount: bigint): Uint8Array {
   out.set(addressWord(to, 'to'), SELECTOR_BYTES);
   out.set(uint256Word(amount, 'amount'), SELECTOR_BYTES + WORD);
   return out;
+}
+
+/**
+ * Calldata for `approve(spender, amount)` as BYTES, for a transaction. The swap
+ * path is the only caller and passes the exact amount it is about to swap.
+ */
+export function encodeApprove(spender: string, amount: bigint): Uint8Array {
+  const out = new Uint8Array(CALL_BYTES);
+  out.set(parseHex(ERC20_SELECTORS.approve, 'approve selector'), 0);
+  out.set(addressWord(spender, 'spender'), SELECTOR_BYTES);
+  out.set(uint256Word(amount, 'amount'), SELECTOR_BYTES + WORD);
+  return out;
+}
+
+/** Calldata for `allowance(owner, spender)`, as a 0x hex string for eth_call. */
+export function encodeAllowance(owner: string, spender: string): string {
+  return ERC20_SELECTORS.allowance + bytesToHex(addressWord(owner, 'owner')) + bytesToHex(addressWord(spender, 'spender'));
 }
 
 // ---------------------------------------------------------------------------

@@ -19,6 +19,7 @@ import { LiveTxDetail } from './LiveTxDetail';
 import { LiveAddressBook } from './LiveAddressBook';
 import { LiveStaking } from './LiveStaking';
 import { LiveRewards } from './LiveRewards';
+import { LiveSwap } from './LiveSwap';
 import { LiveStakeEvm } from './LiveStakeEvm';
 // The Zcash and Bittensor screens are STATIC imports: neither engine has a
 // build flag (their design notes §13), so nothing about them is code-split.
@@ -76,6 +77,7 @@ type LiveSubView =
   // native staking) from the Home action row.
   | { name: 'staking'; from?: 'home' }
   | { name: 'rewards'; from?: 'staking' | 'home' }
+  | { name: 'swap' }
   | { name: 'tx'; txid: string }
   // "Import Monero wallet" (25 words plus a restore height), reached from
   // Settings > Wallets on a ready wallet; the first-run entry lives in
@@ -303,6 +305,7 @@ export function LiveApp() {
       // kind of staking, so a stale navigation cannot dead-end.
       onStake={() => setSubView({ name: 'staking', from: 'home' })}
       onRewards={() => setSubView({ name: 'rewards', from: 'home' })}
+      onSwap={() => setSubView({ name: 'swap' })}
     />
   );
 
@@ -405,6 +408,12 @@ export function LiveApp() {
         onRewards={() => setSubView({ name: 'rewards', from: 'staking' })}
       />,
     );
+  }
+
+  if (subView.name === 'swap') {
+    // The screen itself says so on a chain with no swap, so a stale route
+    // (the chain switched under it) cannot dead-end.
+    return wrap(<LiveSwap onBack={() => setSubView({ name: 'home' })} />);
   }
 
   if (subView.name === 'rewards') {
