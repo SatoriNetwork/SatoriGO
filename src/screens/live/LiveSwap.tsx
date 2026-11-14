@@ -409,7 +409,7 @@ export function LiveSwap({ onBack }: LiveSwapProps) {
                   </div>
                   {plan.feeBps > 0 && (
                     <div className="sum-row" data-testid="live-swap-review-wallet-fee">
-                      <span className="sum-key">Satori GO fee ({percent(plan.feeBps)}), already taken off</span>
+                      <span className="sum-key">Fee ({percent(plan.feeBps)}), already taken off</span>
                       <span className="sum-val">{formatAmount(plan.feeAmount, plan.tokenOut.decimals)} {displaySymbol(plan.tokenOut.symbol)}</span>
                     </div>
                   )}
@@ -744,7 +744,7 @@ export function LiveSwap({ onBack }: LiveSwapProps) {
             <div className="swap-leg-sub">
               <span>{receiveFiat ? formatFiatValue(receiveFiat) : ''}</span>
               {quote && quote.feeBps > 0 && (
-                <span data-testid="live-swap-quote-wallet-fee">after the {percent(quote.feeBps)} Satori GO fee</span>
+                <span data-testid="live-swap-quote-wallet-fee">after the {percent(quote.feeBps)} fee</span>
               )}
             </div>
           </div>
@@ -789,7 +789,7 @@ export function LiveSwap({ onBack }: LiveSwapProps) {
                   </span>
                 </div>
                 <div className="sum-row">
-                  <span className="sum-key">Satori GO fee</span>
+                  <span className="sum-key">Fee</span>
                   <span className="sum-val">{quote.feeBps > 0 ? percent(quote.feeBps) : 'None'}</span>
                 </div>
               </div>
