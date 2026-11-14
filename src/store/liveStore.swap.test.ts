@@ -46,7 +46,7 @@ const pool = (x: string, y: string, fee: number) => POOLS[`${[x, y].sort().join(
 
 interface Req { id: number; method: string; params: unknown[] }
 
-let world: { allowance: bigint; pricesReadable: boolean };
+let world: { allowance: bigint; pricesReadable: boolean; receipt: null | '0x1' | '0x0' };
 let sentRaw: string[];
 
 function answer(req: Req): Record<string, unknown> {
@@ -72,6 +72,8 @@ function answer(req: Req): Record<string, unknown> {
       return ok('0x5b8d80');
     case 'eth_getTransactionCount':
       return ok('0x7');
+    case 'eth_getTransactionReceipt':
+      return ok(world.receipt ? { status: world.receipt } : null);
     case 'eth_sendRawTransaction':
       sentRaw.push(req.params[0] as string);
       return ok(`0x${bytesToHex(keccak_256(hexToBytes((req.params[0] as string).slice(2))))}`);
@@ -128,7 +130,7 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
-  world = { allowance: 0n, pricesReadable: true };
+  world = { allowance: 0n, pricesReadable: true, receipt: null };
   sentRaw = [];
   setStorageForTests(new MemoryStorageAdapter());
   resetEvmProvidersForTests();
@@ -237,6 +239,51 @@ describe('in-wallet swap on Base', () => {
     } finally {
       clock.mockRestore();
     }
+  });
+
+  const settled = async () => {
+    for (let i = 0; i < 80 && state().swapStatus?.state === 'pending'; i++) await new Promise((r) => setTimeout(r, 50));
+    return state().swapStatus?.state;
+  };
+  const sendSwap = async () => {
+    world.allowance = 10n ** 30n;
+    await state().quoteSwap(USDC, SATORI, 2_000_000n);
+    await state().planSwap(50);
+    state().arm(true);
+    return state().confirmSwap();
+  };
+
+  it('a sent swap is followed: pending at once, confirmed when the chain says so', async () => {
+    const { txid } = await sendSwap();
+    expect(state().swapStatus).toMatchObject({
+      txid,
+      chainKey: 'base',
+      chainName: 'Base',
+      payText: '2 USDC',
+      receiveText: '<0.00000001 SATORI',
+      state: 'pending',
+    });
+    expect(state().swapStatus?.explorerUrl).toContain(txid);
+    world.receipt = '0x1';
+    expect(await settled()).toBe('confirmed');
+    state().dismissSwapStatus();
+    expect(state().swapStatus).toBeNull();
+  });
+
+  it('a swap the chain reverted is reported as failed, never as done', async () => {
+    await sendSwap();
+    world.receipt = '0x0';
+    expect(await settled()).toBe('failed');
+  });
+
+  it('an approval is not followed on Home: its second step is still on the swap page', async () => {
+    await state().quoteSwap(USDC, SATORI, 2_000_000n);
+    await state().planSwap(50);
+    state().arm(true);
+    const { txid } = await state().confirmSwap();
+    expect(state().swapStatus).toBeNull();
+    // Activity still shows it straight away, as a pending call that moves nothing.
+    expect(state().txs.find((t) => t.txid === txid)).toMatchObject({ asset: 'ETH', direction: 'out', status: 'pending' });
   });
 
   it('a failed quote lands as an error, and a new quote discards the plan under review', async () => {

@@ -3,7 +3,7 @@
 // rather than crashing. The service instance is module-level (singleton).
 
 import { create, type StoreApi } from 'zustand';
-import { parseAmount, formatAmount, amountToNumber } from '../services/chain/amounts';
+import { parseAmount, formatAmount, formatListAmount, amountToNumber } from '../services/chain/amounts';
 import {
   LiveWalletService,
   BroadcastGatedError,
@@ -132,6 +132,9 @@ import {
   swapNeedsImpactAck,
   EMPTY_SWAP,
   SWAP_PLAN_MAX_AGE_MS,
+  SWAP_FOLLOW_MAX_MS,
+  SWAP_FOLLOW_POLL_MS,
+  type SwapStatus,
   type SwapPlan,
   type SwapQuote,
   type SwapState,
@@ -2029,6 +2032,8 @@ interface LiveState {
   satoriRewards: SatoriRewardsState;
   /** The in-wallet Uniswap swap under way on the active EVM chain. */
   swap: SwapState;
+  /** The swap just sent, until it is confirmed and dismissed. Null for none. */
+  swapStatus: SwapStatus | null;
 
   // --- Monero (family 'monero', the Monero engine design notes §8/§15) ---------
   /** The open Monero wallet of THIS PAGE and what it last reported.
@@ -2289,6 +2294,8 @@ interface LiveState {
   /** Drop the plan under review and keep the quote (Back from the review). */
   clearSwapPlan(): void;
   clearSwap(): void;
+  /** Close the bar that follows the last swap. */
+  dismissSwapStatus(): void;
   /** Unlock the ACTIVE wallet. `password` is that wallet's own password on a v1
    *  vault and the APP password on a migrated one (ignored once the session
    *  holds the master key). `opts.migrate === false` declines the transitional
@@ -2751,6 +2758,7 @@ async function landSeedImport(set: LiveSet, get: LiveGet, evmKey: string | null,
       evmStaking: { snapshot: null, loading: false, plan: null, planning: false },
       satoriRewards: EMPTY_SATORI_REWARDS,
       swap: EMPTY_SWAP,
+      swapStatus: null,
     });
     void get().loadWallets();
     void get().loadWalletAssets();
@@ -2861,6 +2869,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   evmStaking: { snapshot: null, loading: false, plan: null, planning: false },
   satoriRewards: EMPTY_SATORI_REWARDS,
   swap: EMPTY_SWAP,
+  swapStatus: null,
   monero: { chain: null, ...EMPTY_MONERO },
   zcash: { chain: ZCASH_CHAIN, ...EMPTY_ZCASH },
   tao: { chain: TAO_CHAIN, ...EMPTY_TAO },
@@ -3452,6 +3461,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       evmStaking: { snapshot: null, loading: false, plan: null, planning: false },
       satoriRewards: EMPTY_SATORI_REWARDS,
       swap: EMPTY_SWAP,
+      swapStatus: null,
       evmTokens: { tracked: [], discovered: [] },
       error: null,
       syncing: 'idle',
@@ -3590,6 +3600,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
         evmStaking: { snapshot: null, loading: false, plan: null, planning: false },
         satoriRewards: EMPTY_SATORI_REWARDS,
         swap: EMPTY_SWAP,
+        swapStatus: null,
         // Token lists are per wallet AND per chain; loadWalletAssets below reads
         // the new account's own, so the old account's must not show meanwhile.
         evmTokens: { tracked: [], discovered: [] },
@@ -3753,6 +3764,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       evmStaking: { snapshot: null, loading: false, plan: null, planning: false },
       satoriRewards: EMPTY_SATORI_REWARDS,
       swap: EMPTY_SWAP,
+      swapStatus: null,
       // The manual row order belongs to the chain being left; the new chain's
       // own is read below. Cleared first so the old arrangement cannot briefly
       // reorder the new chain's rows.
@@ -4539,6 +4551,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       evmStaking: { snapshot: null, loading: false, plan: null, planning: false },
       satoriRewards: EMPTY_SATORI_REWARDS,
       swap: EMPTY_SWAP,
+      swapStatus: null,
       evmTokens: { tracked: [], discovered: [] },
       assetOrder: [],
       pendingMnemonic: null,
@@ -6712,9 +6725,31 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     svc.allowBroadcast = false;
     const done = { txid: result.txid, explorerUrl: evmExplorerTxUrl(chain, result.txid), chainKey: chain.key, kind: plan.kind };
     if (plan.kind === 'approve') {
+      // Activity shows it at once, as the indexer will report it: a call to the
+      // token that moves nothing and costs its fee.
+      const approving = evm.localPendingEvmTx({
+        txid: result.txid,
+        from: plan.from,
+        to: plan.to,
+        asset: chain.nativeTicker,
+        decimals: chain.nativeDecimals,
+        amountBase: 0n,
+        feeBase: plan.quote.estimatedTotal,
+        nativeDecimals: chain.nativeDecimals,
+        nativeTicker: chain.nativeTicker,
+        timestamp: Date.now(),
+      });
+      localPendingTxs = [
+        { address: plan.from, tx: approving, at: Date.now() },
+        ...localPendingTxs.filter((p) => p.tx.txid !== approving.txid),
+      ];
       // The quote stays: the screen asks for it again until the allowance is
       // mined, and the swap step opens then.
-      set((s) => ({ swap: { ...s.swap, plan: null } }));
+      set((s) => ({
+        txs: [approving, ...s.txs.filter((t) => t.txid !== approving.txid)].sort(compareLiveTx),
+        swap: { ...s.swap, plan: null },
+      }));
+      followEvmBroadcast(chain.key, result.txid);
       return done;
     }
     // What left the account, as the indexer will report it for the same txid.
@@ -6734,12 +6769,24 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       { address: plan.from, tx: pending, at: Date.now() },
       ...localPendingTxs.filter((p) => p.tx.txid !== pending.txid),
     ];
+    const amount = (base: bigint, token: SwapToken) => `${formatListAmount(base, token.decimals)} ${token.symbol}`;
     set((s) => ({
       txs: [pending, ...s.txs.filter((t) => t.txid !== pending.txid)].sort(compareLiveTx),
       swap: EMPTY_SWAP,
+      swapStatus: {
+        txid: result.txid,
+        chainKey: chain.key,
+        chainName: chain.displayName,
+        explorerUrl: done.explorerUrl,
+        payText: amount(plan.amountIn, plan.tokenIn),
+        receiveText: amount(plan.amountOut, plan.tokenOut),
+        state: 'pending',
+      },
     }));
     void get().refresh({ silent: true });
-    if (typeof setTimeout !== 'undefined') setTimeout(() => void get().refresh({ silent: true }), 6000);
+    // Balances refresh the moment it is included; the bar learns how it went.
+    followEvmBroadcast(chain.key, result.txid);
+    followSwap(chain.key, result.txid);
     return done;
   },
 
@@ -6753,6 +6800,10 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     swapRun++;
     set({ swap: EMPTY_SWAP });
     svc.allowBroadcast = false;
+  },
+
+  dismissSwapStatus() {
+    set({ swapStatus: null });
   },
 
   // --- arm broadcast --------------------------------------------------------
@@ -7382,6 +7433,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       evmStaking: { snapshot: null, loading: false, plan: null, planning: false },
       satoriRewards: EMPTY_SATORI_REWARDS,
       swap: EMPTY_SWAP,
+      swapStatus: null,
     });
   },
 }));
@@ -7441,6 +7493,39 @@ export function followEvmBroadcast(chainKey: string, txid: string): void {
     else setTimeout(() => void tick(), EVM_FOLLOW_POLL_MS);
   };
   setTimeout(() => void tick(), EVM_FOLLOW_POLL_MS);
+}
+
+/**
+ * Follow a swap to its receipt and say on `swapStatus` how it ended: status 1
+ * is confirmed, status 0 is a swap the chain reverted (nothing was swapped, the
+ * network fee was still paid). No receipt in time is `late`, which claims
+ * nothing. Reads only. A status that was dismissed or replaced is left alone.
+ */
+function followSwap(chainKey: string, txid: string): void {
+  if (typeof setTimeout === 'undefined') return;
+  const startedAt = Date.now();
+  const settle = (state: SwapStatus['state']) => {
+    const current = useLiveStore.getState().swapStatus;
+    if (current && current.txid === txid) useLiveStore.setState({ swapStatus: { ...current, state } });
+  };
+  const tick = async () => {
+    if (useLiveStore.getState().swapStatus?.txid !== txid) return;
+    let outcome: SwapStatus['state'] | null = null;
+    try {
+      const provider = await evmProviderFor(chainKey);
+      if (provider) {
+        const [answer] = await provider.rpc.batch([{ method: 'eth_getTransactionReceipt', params: [txid] }]);
+        const receipt = answer && answer.ok && answer.result && typeof answer.result === 'object' ? (answer.result as { status?: unknown }) : null;
+        if (receipt) outcome = receipt.status === '0x0' ? 'failed' : 'confirmed';
+      }
+    } catch {
+      // An unreachable node is not a reason to stop watching.
+    }
+    if (outcome) settle(outcome);
+    else if (Date.now() - startedAt >= SWAP_FOLLOW_MAX_MS) settle('late');
+    else setTimeout(() => void tick(), SWAP_FOLLOW_POLL_MS);
+  };
+  setTimeout(() => void tick(), SWAP_FOLLOW_POLL_MS);
 }
 
 if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {

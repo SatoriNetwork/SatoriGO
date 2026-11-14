@@ -3037,3 +3037,40 @@ details.disclosure[open] .disclosure-chev { transform: rotate(90deg); }
 .swap-rate:focus-visible,
 .swap-link:focus-visible,
 .swap-option:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* The review: the same panel, read-only, and the bar that follows a sent swap. */
+.swap-amount.review { font-size: 22px; white-space: normal; overflow-wrap: break-word; }
+.swap-flip.still { cursor: default; color: var(--text-dim); }
+.swap-steps { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font-size: 12px; color: var(--text-dim); }
+.swap-step.current {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-weight: 650;
+}
+.swap-confirm { margin: 16px 0 14px; display: flex; flex-direction: column; gap: 10px; }
+.swap-tick { display: flex; gap: 10px; align-items: flex-start; font-size: 12px; line-height: 1.5; cursor: pointer; }
+.swap-tick input { margin-top: 2px; flex: none; }
+.swap-tick.danger { color: var(--danger); }
+.swap-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  padding: 10px 8px 10px 12px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--r-md);
+  background: var(--card);
+}
+.swap-status.confirmed { border-left-color: var(--success); }
+.swap-status.confirmed .swap-status-icon { color: var(--success); }
+.swap-status.failed { border-left-color: var(--danger); }
+.swap-status.failed .swap-status-icon { color: var(--danger); }
+.swap-status.late { border-left-color: var(--warning); }
+.swap-status.late .swap-status-icon { color: var(--warning); }
+.swap-status-icon { flex: none; display: grid; place-items: center; width: 18px; height: 18px; }
+.swap-status-text { flex: 1; min-width: 0; display: flex; flex-direction: column; font-size: 11.5px; color: var(--text-dim); line-height: 1.4; }
+.swap-status-text strong { font-size: 12.5px; font-weight: 650; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.swap-status .swap-link { flex: none; font-size: 12px; text-decoration: none; }

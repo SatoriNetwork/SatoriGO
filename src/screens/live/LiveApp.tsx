@@ -413,7 +413,7 @@ export function LiveApp() {
   if (subView.name === 'swap') {
     // The screen itself says so on a chain with no swap, so a stale route
     // (the chain switched under it) cannot dead-end.
-    return wrap(<LiveSwap onBack={() => setSubView({ name: 'home' })} />);
+    return wrap(<LiveSwap onBack={() => setSubView({ name: 'home' })} onDone={() => setSubView({ name: 'home' })} />);
   }
 
   if (subView.name === 'rewards') {

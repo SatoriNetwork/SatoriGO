@@ -138,6 +138,24 @@ export interface SwapState {
 
 export const EMPTY_SWAP: SwapState = Object.freeze({ quote: null, quoting: false, plan: null, planning: false, error: null });
 
+/** A swap this wallet just sent, followed until the chain answers. Home shows it. */
+export interface SwapStatus {
+  txid: string;
+  chainKey: string;
+  chainName: string;
+  explorerUrl: string;
+  /** "10 USDC" and "32.52 SATORI", ready to draw. The second is the quote, not
+   *  a figure read back from the chain. */
+  payText: string;
+  receiveText: string;
+  /** `late`: no answer within SWAP_FOLLOW_MAX_MS; it may still confirm. */
+  state: 'pending' | 'confirmed' | 'failed' | 'late';
+}
+
+/** How often, and for how long, a sent swap is watched for its receipt. */
+export const SWAP_FOLLOW_POLL_MS = 1_500;
+export const SWAP_FOLLOW_MAX_MS = 180_000;
+
 /** True when this chain has a pinned Uniswap deployment in this build. */
 export async function swapSupported(chainKey: string): Promise<boolean> {
   const evm = await loadEvmModules();

@@ -138,12 +138,13 @@ function setup(swap: Partial<SwapState> = {}, chain: EvmChainInfo = BASE) {
     swap: { quote: null, quoting: false, plan: null, planning: false, error: null, ...swap },
   } as never);
   const onBack = vi.fn();
+  const onDone = vi.fn();
   render(
     <NavProvider value={NAV_VALUE}>
-      <LiveSwap onBack={onBack} />
+      <LiveSwap onBack={onBack} onDone={onDone} />
     </NavProvider>,
   );
-  return { onBack };
+  return { onBack, onDone };
 }
 
 /** Open one side's token list and choose a token from it. */
@@ -236,20 +237,28 @@ describe('LiveSwap', () => {
     expect(screen.queryByTestId('live-swap-unverified')).toBeNull();
   });
 
-  it('review: the swap is confirmed only behind the tick, armed, and ends on the sent screen', async () => {
+  it('review: leads with the trade, folds the rest, and a confirmed swap leaves for Home', async () => {
     spies.confirmSwap.mockResolvedValue({ txid: '0xabc', explorerUrl: 'https://basescan.org/tx/0xabc', chainKey: 'base', kind: 'swap' });
-    setup({ quote: QUOTE, plan: swapPlan(40) });
-    expect(screen.getByTestId('live-swap-review-minimum').textContent).toContain('6.4 SATORI');
-    expect(screen.getByTestId('live-swap-review').textContent).toContain(ROUTER);
+    const { onDone, onBack } = setup({ quote: QUOTE, plan: swapPlan(40) });
+    expect(screen.getByTestId('live-swap-review-pay').textContent).toContain('2 USDC');
+    expect(screen.getByTestId('live-swap-review-receive').textContent).toContain('6.5 SATORI');
+    expect(screen.getByTestId('live-swap-review-minimum').textContent).toBe('At least 6.4 SATORI');
+    expect(screen.getByTestId('live-swap-review-fee').textContent).toContain('Network fee');
+    // The router address, the route and the speed are one tap away, not gone.
+    expect(screen.getByTestId('live-swap-review').textContent).not.toContain(ROUTER);
+    fireEvent.click(screen.getByTestId('live-swap-review-more'));
+    expect(screen.getByTestId('live-swap-review-details').textContent).toContain(ROUTER);
+    expect(screen.getByTestId('live-swap-review-details').textContent).toContain('USDC › SATORI');
+    expect(screen.getByTestId('live-swap-review-details').textContent).toContain('Fast');
     expect(screen.queryByTestId('live-swap-ack-impact')).toBeNull();
     const confirm = screen.getByTestId('live-swap-confirm') as HTMLButtonElement;
     expect(confirm.disabled).toBe(true);
     fireEvent.click(screen.getByTestId('live-swap-arm'));
     fireEvent.click(confirm);
-    await waitFor(() => expect(screen.getByTestId('live-swap-done')).toBeTruthy());
+    await waitFor(() => expect(onDone).toHaveBeenCalledTimes(1));
+    expect(onBack).not.toHaveBeenCalled();
     expect(spies.arm.mock.calls.map((c) => c[0])).toEqual([true, false]);
     expect(spies.confirmSwap).toHaveBeenCalledWith(false);
-    expect(screen.getByTestId('live-swap-txid').textContent).toContain('0xabc');
   });
 
   it('review: a high or unmeasured price impact needs its own tick', () => {
@@ -278,13 +287,16 @@ describe('LiveSwap', () => {
       storeMod.useLiveStore.setState({ swap: { ...state().swap, plan: null } });
       return { txid: '0xdef', explorerUrl: 'x', chainKey: 'base', kind: 'approve' };
     });
-    setup({ quote: { ...QUOTE, needsApproval: true }, plan: APPROVE_PLAN });
+    const view = setup({ quote: { ...QUOTE, needsApproval: true }, plan: APPROVE_PLAN });
     expect(screen.getByTestId('live-swap-step-note').textContent).toContain('Step 1 of 2');
+    expect(screen.queryByTestId('live-swap-review-receive')).toBeNull();
+    expect(screen.getByTestId('live-swap-confirm').textContent).toBe('Approve USDC');
     expect(screen.getByTestId('live-swap-review-pay').textContent).toContain('2 USDC');
     fireEvent.click(screen.getByTestId('live-swap-arm'));
     fireEvent.click(screen.getByTestId('live-swap-confirm'));
     await waitFor(() => expect(screen.getByTestId('live-swap-waiting-approval')).toBeTruthy());
-    expect(screen.queryByTestId('live-swap-done')).toBeNull();
+    // Still on the swap page: the second step is done here.
+    expect(view.onDone).not.toHaveBeenCalled();
     expect((screen.getByTestId('live-swap-review-btn') as HTMLButtonElement).disabled).toBe(true);
   });
 

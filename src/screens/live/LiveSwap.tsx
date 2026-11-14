@@ -12,7 +12,7 @@
 // and the one button names what is still missing.
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, ArrowDownUp, CheckCircle, ChevronDown, ChevronLeft, Info, SlidersHorizontal } from 'lucide-react';
+import { AlertTriangle, ArrowDown, ArrowDownUp, ChevronDown, ChevronLeft, Info, SlidersHorizontal } from 'lucide-react';
 import { TokenIcon } from '../../components/BrandLogo';
 import { Button } from '../../components/Button';
 import { PasswordField, TextField } from '../../components/TextField';
@@ -34,6 +34,8 @@ import { typedAmountFiat, useAssetFiat } from './useFiat';
 
 interface LiveSwapProps {
   onBack(): void;
+  /** A swap was sent: leave for Home, where a bar follows it. Back when absent. */
+  onDone?(): void;
 }
 
 const FEE_LEVELS: readonly EvmFeeLevel[] = ['slow', 'normal', 'fast'];
@@ -58,7 +60,7 @@ function impactText(bps: number | null): string {
   return bps < 1 ? 'Less than 0.01%' : percent(bps);
 }
 
-export function LiveSwap({ onBack }: LiveSwapProps) {
+export function LiveSwap({ onBack, onDone }: LiveSwapProps) {
   const swap = useLiveStore((s) => s.swap);
   const quoteSwap = useLiveStore((s) => s.quoteSwap);
   const planSwap = useLiveStore((s) => s.planSwap);
@@ -127,7 +129,7 @@ export function LiveSwap({ onBack }: LiveSwapProps) {
   const [waitTimedOut, setWaitTimedOut] = useState(false);
   // Ticks while a plan is under review, so an old one is noticed without a click.
   const [now, setNow] = useState(() => Date.now());
-  const [done, setDone] = useState<{ txid: string; explorerUrl: string } | null>(null);
+  const [showMore, setShowMore] = useState(false);
   // State only reaches the button on the next render; a double click is faster.
   const confirmStarted = useRef(false);
 
@@ -218,6 +220,7 @@ export function LiveSwap({ onBack }: LiveSwapProps) {
   const resetReview = () => {
     setArmed(false);
     setAckImpact(false);
+    setShowMore(false);
     setPassword('');
     setPasswordError('');
     setConfirmError('');
@@ -230,6 +233,17 @@ export function LiveSwap({ onBack }: LiveSwapProps) {
   /** A token the wallet does not vouch for is never named by symbol alone. */
   const optionLabel = (t: SwapToken): string =>
     vouched.has(tokenKey(t)) || t.address === null ? displaySymbol(t.symbol) : `${displaySymbol(t.symbol)} (${shortAddress(t.address)})`;
+
+  /** A vouched token gets its mark. Anything else gets a plain letter: a mark
+   *  is looked up by symbol, and a symbol proves nothing. */
+  const mark = (t: SwapToken, size: number) =>
+    vouched.has(tokenKey(t)) ? (
+      <TokenIcon assetId={t.symbol} size={size} />
+    ) : (
+      <span className="swap-badge" style={{ width: size, height: size, fontSize: size * 0.45 }} aria-hidden="true">
+        {displaySymbol(t.symbol).slice(0, 1).toUpperCase() || '?'}
+      </span>
+    );
 
   const symbolOf = (address: string): string => {
     const known = options.find((t) => t.address?.toLowerCase() === address.toLowerCase());
@@ -313,33 +327,6 @@ export function LiveSwap({ onBack }: LiveSwapProps) {
     );
   }
 
-  if (done) {
-    return (
-      <div className="app-frame screen-enter">
-        {header('Swap', onBack)}
-        <div className="app-content" data-testid="live-swap-done">
-          <div className="result-screen">
-            <div className="result-icon success">
-              <CheckCircle size={32} />
-            </div>
-            <h3>Swap sent</h3>
-            <p>Your tokens arrive once {chain.displayName} confirms it.</p>
-            <div className="card" style={{ marginTop: 16, width: '100%', textAlign: 'left' }} data-testid="live-swap-txid">
-              <div className="section-label" style={{ marginTop: 0 }}>Transaction hash</div>
-              <span className="mono" style={{ fontSize: 11, wordBreak: 'break-all', color: 'var(--text-dim)' }}>{done.txid}</span>
-            </div>
-            <a href={done.explorerUrl} target="_blank" rel="noreferrer" className="btn btn-secondary btn-sm" style={{ marginTop: 12 }}>
-              Open in explorer
-            </a>
-            <Button block onClick={onBack} style={{ marginTop: 12 }}>
-              Done
-            </Button>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
   if (plan) {
     const isApprove = plan.kind === 'approve';
     const needsAck = plan.kind === 'swap' && swapNeedsImpactAck(plan.impactBps);
@@ -362,7 +349,7 @@ export function LiveSwap({ onBack }: LiveSwapProps) {
         const result = await confirmSwap(ackImpact);
         resetReview();
         if (result.kind === 'approve') startWaiting();
-        else setDone({ txid: result.txid, explorerUrl: result.explorerUrl });
+        else (onDone ?? onBack)();
       } catch (err) {
         setConfirmError(err instanceof Error ? err.message : String(err));
       } finally {
@@ -372,108 +359,145 @@ export function LiveSwap({ onBack }: LiveSwapProps) {
       }
     };
 
+    const paySymbol = displaySymbol(plan.tokenIn.symbol);
+    const impactClass = plan.kind !== 'swap' || (plan.impactBps !== null && plan.impactBps < SWAP_IMPACT_WARN_BPS) ? '' : needsAck ? ' danger' : ' warn';
+
     return (
       <div className="app-frame screen-enter">
         {header(isApprove ? 'Review approval' : 'Review swap', backFromReview)}
         <div className="app-content" data-testid="live-swap-review">
-          <div className="banner warning" style={{ marginBottom: 14 }}>
-            <AlertTriangle size={14} />
-            {plan.description} This broadcasts a real transaction on {chain.displayName} and cannot be undone.
-          </div>
           {isApprove && (
-            <div className="banner info" style={{ marginBottom: 14 }} data-testid="live-swap-step-note">
-              <Info size={14} />
-              Step 1 of 2. This lets Uniswap take the tokens for this one swap and nothing more. The swap itself is the next step.
+            <div className="swap-steps" data-testid="live-swap-step-note">
+              <span className="swap-step current">Step 1 of 2</span>
+              <span>Approve, then swap</span>
             </div>
           )}
 
-          <div className="card solid" style={{ marginBottom: 14 }}>
-            <div className="summary-table">
-              <div className="sum-row">
-                <span className="sum-key">Action</span>
-                <span className="sum-val">{isApprove ? `Approve ${displaySymbol(plan.tokenIn.symbol)}` : 'Swap on Uniswap'}</span>
+          <div className="swap-panel">
+            <div className="swap-leg">
+              <span className="swap-leg-label">{isApprove ? 'Allow Uniswap to take exactly' : 'You pay'}</span>
+              <div className="swap-leg-main" data-testid="live-swap-review-pay">
+                <span className="swap-amount review">{formatAmount(plan.amountIn, plan.tokenIn.decimals)} {paySymbol}</span>
+                {mark(plan.tokenIn, 26)}
               </div>
-              <div className="sum-row" data-testid="live-swap-review-pay">
-                <span className="sum-key">{isApprove ? 'Amount allowed' : 'You pay'}</span>
-                <span className="sum-val">{formatAmount(plan.amountIn, plan.tokenIn.decimals)} {displaySymbol(plan.tokenIn.symbol)}</span>
-              </div>
-              {plan.kind === 'swap' && (
-                <>
-                  <div className="sum-row" data-testid="live-swap-review-receive">
-                    <span className="sum-key">You receive about</span>
-                    <span className="sum-val">{formatAmount(plan.amountOut, plan.tokenOut.decimals)} {displaySymbol(plan.tokenOut.symbol)}</span>
+              {isApprove && <div className="swap-leg-sub"><span>For this one swap, and nothing more.</span></div>}
+            </div>
+            {plan.kind === 'swap' && (
+              <>
+                <div className="swap-seam">
+                  <span className="swap-flip still" aria-hidden="true">
+                    <ArrowDown size={15} />
+                  </span>
+                </div>
+                <div className="swap-leg">
+                  <span className="swap-leg-label">You receive about</span>
+                  <div className="swap-leg-main" data-testid="live-swap-review-receive">
+                    <span className="swap-amount review">
+                      {formatListAmount(plan.amountOut, plan.tokenOut.decimals)} {displaySymbol(plan.tokenOut.symbol)}
+                    </span>
+                    {mark(plan.tokenOut, 26)}
                   </div>
-                  <div className="sum-row" data-testid="live-swap-review-minimum">
-                    <span className="sum-key">At least ({percent(plan.slippageBps)} slippage)</span>
-                    <span className="sum-val">{formatAmount(plan.minimumOut, plan.tokenOut.decimals)} {displaySymbol(plan.tokenOut.symbol)}</span>
-                  </div>
-                  {plan.feeBps > 0 && (
-                    <div className="sum-row" data-testid="live-swap-review-wallet-fee">
-                      <span className="sum-key">Fee ({percent(plan.feeBps)}), already taken off</span>
-                      <span className="sum-val">{formatAmount(plan.feeAmount, plan.tokenOut.decimals)} {displaySymbol(plan.tokenOut.symbol)}</span>
-                    </div>
-                  )}
-                  <div className="sum-row" data-testid="live-swap-review-impact">
-                    <span className="sum-key">Price impact</span>
-                    <span className="sum-val" style={needsAck ? { color: 'var(--danger)' } : undefined}>{impactText(plan.impactBps)}</span>
-                  </div>
-                  <div className="sum-row">
-                    <span className="sum-key">Route</span>
-                    <span className="sum-val">
-                      {[displaySymbol(plan.tokenIn.symbol), ...plan.hops.slice(0, -1).map((h) => symbolOf(h.tokenOut)), displaySymbol(plan.tokenOut.symbol)].join(' › ')}
+                  <div className="swap-leg-sub">
+                    <span data-testid="live-swap-review-minimum">
+                      At least {formatAmount(plan.minimumOut, plan.tokenOut.decimals)} {displaySymbol(plan.tokenOut.symbol)}
                     </span>
                   </div>
-                </>
-              )}
-              <div className="sum-row">
-                <span className="sum-key">{isApprove ? 'Token contract' : 'Uniswap router'}</span>
-                <span className="sum-val mono" style={{ fontSize: 10.5, wordBreak: 'break-all' }}>{plan.to}</span>
+                </div>
+              </>
+            )}
+          </div>
+
+          <div className="summary-table swap-details">
+            {plan.kind === 'swap' && (
+              <div className="sum-row" data-testid="live-swap-review-impact">
+                <span className="sum-key">Price impact</span>
+                <span className={`sum-val swap-impact${impactClass}`}>{impactText(plan.impactBps)}</span>
               </div>
-              <div className="sum-row">
-                <span className="sum-key">Network</span>
-                <span className="sum-val">{chain.displayName}</span>
+            )}
+            {plan.kind === 'swap' && plan.feeBps > 0 && (
+              <div className="sum-row" data-testid="live-swap-review-wallet-fee">
+                <span className="sum-key">Fee ({percent(plan.feeBps)}), already taken off</span>
+                <span className="sum-val">{formatAmount(plan.feeAmount, plan.tokenOut.decimals)} {displaySymbol(plan.tokenOut.symbol)}</span>
               </div>
-              <div className="sum-row" data-testid="live-swap-review-fee">
-                <span className="sum-key">Estimated fee</span>
-                <span className="sum-val">{formatAmount(plan.quote.estimatedTotal, nativeDecimals)} {ticker}</span>
-              </div>
-              <div className="sum-row">
-                <span className="sum-key">Maximum fee</span>
-                <span className="sum-val">{formatAmount(plan.quote.maxTotal, nativeDecimals)} {ticker}</span>
-              </div>
+            )}
+            <div className="sum-row" data-testid="live-swap-review-fee">
+              <span className="sum-key">Network fee</span>
+              <span className="sum-val">{formatAmount(plan.quote.estimatedTotal, nativeDecimals)} {ticker}</span>
             </div>
           </div>
 
-          <div className="section-label">Speed</div>
-          <div style={{ display: 'flex', gap: 6, marginBottom: 14 }}>
-            {FEE_LEVELS.map((lvl) => (
-              <button
-                key={lvl}
-                type="button"
-                className={plan.level === lvl ? 'chip' : 'chip neutral'}
-                aria-pressed={plan.level === lvl}
-                onClick={() => void selectSwapFeeLevel(lvl)}
-                style={{ flex: 1, justifyContent: 'center', cursor: 'pointer' }}
-              >
-                {FEE_LEVEL_LABEL[lvl]}
-              </button>
-            ))}
-          </div>
+          <button
+            type="button"
+            className="swap-rate"
+            aria-expanded={showMore}
+            onClick={() => setShowMore((v) => !v)}
+            data-testid="live-swap-review-more"
+          >
+            <span>More details</span>
+            <ChevronDown size={14} style={showMore ? { transform: 'rotate(180deg)' } : undefined} />
+          </button>
+          {showMore && (
+            <div data-testid="live-swap-review-details">
+              <div className="summary-table swap-details">
+                {plan.kind === 'swap' && (
+                  <>
+                    <div className="sum-row">
+                      <span className="sum-key">Slippage</span>
+                      <span className="sum-val">{percent(plan.slippageBps)}</span>
+                    </div>
+                    <div className="sum-row">
+                      <span className="sum-key">Route</span>
+                      <span className="sum-val">
+                        {[paySymbol, ...plan.hops.slice(0, -1).map((h) => symbolOf(h.tokenOut)), displaySymbol(plan.tokenOut.symbol)].join(' › ')}
+                      </span>
+                    </div>
+                  </>
+                )}
+                <div className="sum-row">
+                  <span className="sum-key">{isApprove ? 'Token contract' : 'Uniswap router'}</span>
+                  <span className="sum-val mono" style={{ fontSize: 10.5, wordBreak: 'break-all' }}>{plan.to}</span>
+                </div>
+                <div className="sum-row">
+                  <span className="sum-key">Network</span>
+                  <span className="sum-val">{chain.displayName}</span>
+                </div>
+                <div className="sum-row">
+                  <span className="sum-key">Maximum network fee</span>
+                  <span className="sum-val">{formatAmount(plan.quote.maxTotal, nativeDecimals)} {ticker}</span>
+                </div>
+              </div>
+              <div className="section-label">Speed</div>
+              <div style={{ display: 'flex', gap: 6 }}>
+                {FEE_LEVELS.map((lvl) => (
+                  <button
+                    key={lvl}
+                    type="button"
+                    className={plan.level === lvl ? 'chip' : 'chip neutral'}
+                    aria-pressed={plan.level === lvl}
+                    onClick={() => void selectSwapFeeLevel(lvl)}
+                    style={{ flex: 1, justifyContent: 'center', cursor: 'pointer' }}
+                  >
+                    {FEE_LEVEL_LABEL[lvl]}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
           {plan.shortfall && (
-            <div className="banner danger" style={{ marginBottom: 14 }} data-testid="live-swap-shortfall">
+            <div className="banner danger" style={{ marginTop: 12 }} data-testid="live-swap-shortfall">
               <AlertTriangle size={14} />
               {plan.shortfall}
             </div>
           )}
           {plan.capRefusal && (
-            <div className="banner danger" style={{ marginBottom: 14 }}>
+            <div className="banner danger" style={{ marginTop: 12 }}>
               <AlertTriangle size={14} />
               {plan.capRefusal}
             </div>
           )}
           {stale && (
-            <div className="banner warning" style={{ marginBottom: 14 }} data-testid="live-swap-stale">
+            <div className="banner warning" style={{ marginTop: 12 }} data-testid="live-swap-stale">
               <AlertTriangle size={14} />
               <span>
                 The price is out of date.{' '}
@@ -493,35 +517,20 @@ export function LiveSwap({ onBack }: LiveSwapProps) {
             </div>
           )}
 
-          <div className="section-label">Confirm</div>
-          <div className="card" style={{ marginBottom: 14 }}>
+          <div className="swap-confirm">
             {needsAck && (
-              <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', cursor: 'pointer', marginBottom: 10 }}>
-                <input
-                  type="checkbox"
-                  checked={ackImpact}
-                  onChange={(e) => setAckImpact(e.target.checked)}
-                  data-testid="live-swap-ack-impact"
-                  style={{ marginTop: 2 }}
-                />
-                <span style={{ fontSize: 12, lineHeight: 1.5, color: 'var(--danger)' }}>
+              <label className="swap-tick danger">
+                <input type="checkbox" checked={ackImpact} onChange={(e) => setAckImpact(e.target.checked)} data-testid="live-swap-ack-impact" />
+                <span>
                   {plan.kind === 'swap' && plan.impactBps === null
                     ? 'The price impact of this swap could not be measured. I accept that I may receive much less than the market price.'
                     : `This swap moves the price by ${impactText(plan.kind === 'swap' ? plan.impactBps : null)}. I accept that I receive that much less than the market price.`}
                 </span>
               </label>
             )}
-            <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', cursor: 'pointer' }}>
-              <input
-                type="checkbox"
-                checked={armed}
-                onChange={(e) => setArmed(e.target.checked)}
-                data-testid="live-swap-arm"
-                style={{ marginTop: 2 }}
-              />
-              <span style={{ fontSize: 12, lineHeight: 1.5 }}>
-                I understand this sends a real transaction on {chain.displayName} and cannot be undone.
-              </span>
+            <label className="swap-tick">
+              <input type="checkbox" checked={armed} onChange={(e) => setArmed(e.target.checked)} data-testid="live-swap-arm" />
+              <span>I understand this sends a real transaction on {chain.displayName} and cannot be undone.</span>
             </label>
           </div>
 
@@ -558,13 +567,12 @@ export function LiveSwap({ onBack }: LiveSwapProps) {
             <Button variant="secondary" onClick={backFromReview}>Back</Button>
             <Button
               block
-              variant="danger"
               disabled={!armed || blocked || (needsAck && !ackImpact)}
               loading={confirming}
               onClick={() => void handleConfirm()}
               data-testid="live-swap-confirm"
             >
-              {isApprove ? 'Approve' : 'Swap'}
+              {isApprove ? `Approve ${paySymbol}` : 'Swap'}
             </Button>
           </div>
         </div>
@@ -607,17 +615,6 @@ export function LiveSwap({ onBack }: LiveSwapProps) {
         : ' warn';
   const payFiat = typedAmountFiat(amountText, fiatIn);
   const receiveFiat = quote ? typedAmountFiat(formatAmount(quote.amountOut, quote.tokenOut.decimals), fiatOut) : null;
-
-  /** A vouched token gets its mark. Anything else gets a plain letter: a mark
-   *  is looked up by symbol, and a symbol proves nothing. */
-  const mark = (t: SwapToken, size: number) =>
-    vouched.has(tokenKey(t)) ? (
-      <TokenIcon assetId={t.symbol} size={size} />
-    ) : (
-      <span className="swap-badge" style={{ width: size, height: size, fontSize: size * 0.45 }} aria-hidden="true">
-        {displaySymbol(t.symbol).slice(0, 1).toUpperCase() || '?'}
-      </span>
-    );
 
   const pill = (side: 'in' | 'out', t: SwapToken | null) => (
     <button

@@ -8,6 +8,7 @@ import { formatAmount, formatListAmount, amountToNumber } from '../../services/c
 import { deriveSyncStatus, formatSyncBannerText, pillStateFor } from './syncStatus';
 import { TokenIcon, BrandLogo } from '../../components/BrandLogo';
 import { NotificationBanner } from '../../components/NotificationBanner';
+import { SwapStatusBar } from './SwapStatusBar';
 import { ScrollMoreCue, useMoreBelow } from '../../components/ScrollMoreCue';
 import { useFitText } from '../../components/useFitText';
 import { ImmatureRewardsNote } from './ImmatureRewardsNote';
@@ -2363,6 +2364,10 @@ export function LiveHome({ onReceive, onSend, onSelectAsset, onSelectTx, onStake
                 matching set and rotates through it one at a time; the container
                 also carries `has-notice` above, which pulls the hero up to it
                 instead of letting it float in the middle of what is left. */}
+            {/* The swap just sent, followed until the chain answers. Nothing when
+                there is none. */}
+            <SwapStatusBar />
+
             {hasNotice && (
               <NotificationBanner
                 notifications={activeNotifications}
