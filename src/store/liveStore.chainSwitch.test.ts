@@ -410,6 +410,44 @@ describe('switchChain', () => {
   });
 });
 
+describe('openWalletOnChain (the switcher\'s "open a wallet you already have")', () => {
+  it('opens the NAMED wallet of another phrase on that chain, and creates nothing', async () => {
+    await state().importWallet(VECTOR_MNEMONIC, PW, 'Alpha', 'mainnet');
+    await state().importWallet(VECTOR_MNEMONIC_2, PW, 'Beta', 'ravencoin-mainnet');
+    await state().loadWallets();
+    const betaId = state().activeWalletId;
+    const alphaId = state().wallets.find((w) => w.name === 'Alpha')!.id;
+    await state().switchWallet(alphaId);
+    // Alpha's phrase has no Ravencoin wallet: the plain switch stays put.
+    await state().switchChain('ravencoin-mainnet');
+    expect(state().activeWalletId).toBe(alphaId);
+
+    await state().openWalletOnChain(betaId!, 'ravencoin-mainnet');
+
+    expect(state().activeWalletId).toBe(betaId);
+    expect(mod.activeChainId()).toBe('ravencoin-mainnet');
+    expect(state().wallets).toHaveLength(2);
+    // Another phrase's wallet opens LOCKED, behind its own password.
+    expect(state().phase).toBe('locked');
+  });
+
+  it('is a NO-OP for a wallet that is not on that chain, and for an unknown id', async () => {
+    await state().importWallet(VECTOR_MNEMONIC, PW, 'Alpha', 'mainnet');
+    await state().importWallet(VECTOR_MNEMONIC_2, PW, 'Beta', 'ravencoin-mainnet');
+    await state().loadWallets();
+    const betaId = state().activeWalletId;
+    const alphaId = state().wallets.find((w) => w.name === 'Alpha')!.id;
+
+    // Alpha is an Evrmore wallet: asking for it "on Ravencoin" must not switch.
+    await state().openWalletOnChain(alphaId, 'ravencoin-mainnet');
+    await state().openWalletOnChain('no-such-wallet', 'ravencoin-mainnet');
+    await state().openWalletOnChain(alphaId, 'litecoin-mainnet');
+
+    expect(state().activeWalletId).toBe(betaId);
+    expect(state().wallets).toHaveLength(2);
+  });
+});
+
 // --- enableChain ------------------------------------------------------------
 
 describe('enableChain', () => {

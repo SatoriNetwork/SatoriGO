@@ -774,6 +774,7 @@ export function LiveSend({ onBack, onDone, asset }: LiveSendProps) {
                   }}
                   placeholder="Enter your password to confirm"
                   testId="live-send-password"
+                  enterClicks="live-broadcast"
                 />
                 {passwordError && (
                   <span

@@ -28,6 +28,9 @@ interface MockWallet {
   moneroKeySource?: 'phrase' | 'words';
   /** Vault v2: wrapped by the app master key (the app password opens it). */
   appProtected?: boolean;
+  /** EVM seed accounts: address index and the seed's group id. */
+  hdIndex?: number;
+  seedGroup?: string;
 }
 
 /** The one Monero row's chain record, the fields switcherChainOptionsFor (REAL)
@@ -77,6 +80,9 @@ interface MockState {
   /** Absent by default: a build without --monero (no Monero row). */
   monero?: { chain: MockMoneroChainInfo | null };
   switchChain: (id: string) => Promise<void>;
+  /** Absent in most tests: only the "open an existing wallet" ones set it. */
+  openWalletOnChain?: (walletId: string, chainId: string) => Promise<void>;
+  readEvmAccountsSeenOn?: (chainKey: string) => Promise<Record<string, number[] | undefined>>;
   enableChain: (id: string, password: string) => Promise<{ ok: boolean; error?: string; needsPassword?: boolean }>;
   /** Absent in most tests: reads as "ask for the password", as before. */
   canEnableChainWithoutPassword?: boolean;
@@ -229,6 +235,20 @@ vi.mock('../../store/liveStore', () => ({
   // tests): the active wallet's sibling on that chain (same tag-stripped
   // name), or null for a seed wallet with none there; a wallet outside every
   // seed group (an imported key, a 25-word Monero import) takes the first.
+  // Every wallet on the chain, whichever phrase it came from (the real one is
+  // pinned in the store's own tests).
+  walletsOnChain: (wallets: MockWallet[], chainId: string) =>
+    wallets.filter((w) =>
+      chainId.startsWith('evm:')
+        ? w.family === 'evm'
+        : chainId === 'xmr:mainnet'
+          ? w.family === 'monero'
+          : chainId === 'zec:mainnet'
+            ? w.family === 'zcash'
+            : chainId === 'tao:mainnet'
+              ? w.family === 'substrate'
+              : (w.family ?? 'utxo') === 'utxo' && w.network === chainId,
+    ),
   walletOnChain: (wallets: MockWallet[], chainId: string) => {
     const onChain = (w: MockWallet) =>
       chainId.startsWith('evm:')
@@ -1506,5 +1526,116 @@ describe('no password on an open app-protected wallet (owner request 2026-10-04)
     fireEvent.click(screen.getByTestId('live-chain-option-litecoin-mainnet'));
     expect(screen.queryByTestId('live-chain-enable-needs-password')).toBeNull();
     expect(screen.getByTestId('live-chain-enable-protected-note')).not.toBeNull();
+  });
+});
+
+describe('open an existing wallet instead of adding one (owner, 2026-11-14)', () => {
+  // Wallet 1 (X Coin) is active with no sibling anywhere. Another phrase has
+  // two EVM accounts and a Bitcoin wallet. Clicking Base must not push the
+  // user into deriving a new account: it offers the ones already there.
+  const others = [
+    evmWallet({ id: 'e2', name: 'Wallet 2 (EVM)', address: '0x1111111111111111111111111111111111111111', active: false }),
+    evmWallet({ id: 'e3', name: 'Trading', address: '0x2222222222222222222222222222222222222222', active: false }),
+    wallet({ id: 'b2', name: 'Wallet 2 (Bitcoin)', network: 'bitcoin-mainnet', active: false }),
+  ];
+  function setupWithOthers() {
+    const openWalletOnChain = vi.fn().mockResolvedValue(undefined);
+    const fns = setup({
+      wallets: [wallet({ id: 'w1', name: 'Wallet 1', network: 'xfer-mainnet' }), ...others],
+      activeChain: 'xfer-mainnet',
+      evm: { chains: EVM_CHAINS },
+      openWalletOnChain,
+    });
+    return { ...fns, openWalletOnChain };
+  }
+
+  it('lists the wallets already on the chain, next to the add step, and switches nothing by itself', () => {
+    const { switchChain, enableChain, openWalletOnChain } = setupWithOthers();
+    renderSwitcher();
+    openSwitcher();
+    fireEvent.click(screen.getByTestId('live-chain-option-evm:base'));
+
+    const select = screen.getByTestId('live-chain-open-existing-select') as HTMLSelectElement;
+    expect(Array.from(select.options).map((o) => o.value)).toEqual(['e2', 'e3']);
+    expect(select.options[0].textContent).toBe('Wallet 2 (EVM) \u00b7 0x1111\u20261111');
+    // The add step is still there, unchanged, under it.
+    expect(screen.getByTestId('live-chain-enable-panel').textContent).toMatch(/Enable Base for this wallet\?/);
+    expect(screen.getByTestId('live-chain-enable-submit')).not.toBeNull();
+    expect(switchChain).not.toHaveBeenCalled();
+    expect(enableChain).not.toHaveBeenCalled();
+    expect(openWalletOnChain).not.toHaveBeenCalled();
+  });
+
+  it('Open goes to the first wallet by default, on the chain that was clicked, and creates nothing', () => {
+    const { enableChain, openWalletOnChain } = setupWithOthers();
+    renderSwitcher();
+    openSwitcher();
+    fireEvent.click(screen.getByTestId('live-chain-option-evm:base'));
+    fireEvent.click(screen.getByTestId('live-chain-open-existing-submit'));
+
+    expect(openWalletOnChain).toHaveBeenCalledTimes(1);
+    expect(openWalletOnChain).toHaveBeenCalledWith('e2', 'evm:base');
+    expect(enableChain).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('live-chain-dropdown')).toBeNull();
+    expect(navCalls[navCalls.length - 1]).toBe('assets');
+  });
+
+  it('Open goes to the wallet picked in the list', () => {
+    const { openWalletOnChain } = setupWithOthers();
+    renderSwitcher();
+    openSwitcher();
+    fireEvent.click(screen.getByTestId('live-chain-option-evm:base'));
+    fireEvent.change(screen.getByTestId('live-chain-open-existing-select'), { target: { value: 'e3' } });
+    fireEvent.click(screen.getByTestId('live-chain-open-existing-submit'));
+    expect(openWalletOnChain).toHaveBeenCalledWith('e3', 'evm:base');
+  });
+
+  it('a pick made for one chain does not carry over to the next one', () => {
+    const { openWalletOnChain } = setupWithOthers();
+    renderSwitcher();
+    openSwitcher();
+    fireEvent.click(screen.getByTestId('live-chain-option-evm:base'));
+    fireEvent.change(screen.getByTestId('live-chain-open-existing-select'), { target: { value: 'e3' } });
+    fireEvent.click(screen.getByTestId('live-chain-enable-cancel'));
+    fireEvent.click(screen.getByTestId('live-chain-option-bitcoin-mainnet'));
+    const select = screen.getByTestId('live-chain-open-existing-select') as HTMLSelectElement;
+    expect(Array.from(select.options).map((o) => o.value)).toEqual(['b2']);
+    fireEvent.click(screen.getByTestId('live-chain-open-existing-submit'));
+    expect(openWalletOnChain).toHaveBeenCalledWith('b2', 'bitcoin-mainnet');
+  });
+
+  it('accounts of one seed sit under its name, and only those used on THAT chain are listed', async () => {
+    const G = '0xseed2';
+    const readEvmAccountsSeenOn = vi.fn().mockResolvedValue({ [G]: [0, 2] });
+    setup({
+      wallets: [
+        wallet({ id: 'w1', name: 'Wallet 1', network: 'xfer-mainnet' }),
+        evmWallet({ id: 'a0', name: 'Wallet 2', seedGroup: G, hdIndex: 0, address: '0x1000000000000000000000000000000000000001', active: false }),
+        evmWallet({ id: 'a1', name: 'Account 2', seedGroup: G, hdIndex: 1, address: '0x2000000000000000000000000000000000000002', active: false }),
+        evmWallet({ id: 'a2', name: 'Account 3', seedGroup: G, hdIndex: 2, address: '0x3000000000000000000000000000000000000003', active: false }),
+      ],
+      activeChain: 'xfer-mainnet',
+      evm: { chains: EVM_CHAINS },
+      readEvmAccountsSeenOn,
+    });
+    renderSwitcher();
+    openSwitcher();
+    fireEvent.click(screen.getByTestId('live-chain-option-evm:base'));
+    expect(readEvmAccountsSeenOn).toHaveBeenCalledWith('base');
+    const select = screen.getByTestId('live-chain-open-existing-select') as HTMLSelectElement;
+    // Account 2 (index 1) is not used on Base: gone once the record is read.
+    await waitFor(() => expect(Array.from(select.options).map((o) => o.value)).toEqual(['a0', 'a2']));
+    const group = select.querySelector('optgroup');
+    expect(group?.getAttribute('label')).toBe('Wallet 2');
+    expect(select.options[0].textContent).toMatch(/^Wallet 2 /);
+  });
+
+  it('a chain nobody has a wallet on shows only the add step, as before', () => {
+    setupWithOthers();
+    renderSwitcher();
+    openSwitcher();
+    fireEvent.click(screen.getByTestId('live-chain-option-litecoin-mainnet'));
+    expect(screen.getByTestId('live-chain-enable-panel')).not.toBeNull();
+    expect(screen.queryByTestId('live-chain-open-existing')).toBeNull();
   });
 });

@@ -449,6 +449,7 @@ export function LiveSendTao({ onBack, onDone }: LiveSendTaoProps) {
                   }}
                   placeholder="Enter your password to confirm"
                   testId="live-tao-send-password"
+                  enterClicks="live-tao-broadcast"
                 />
                 {passwordError && (
                   <span

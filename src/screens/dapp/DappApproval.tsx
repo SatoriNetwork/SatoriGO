@@ -827,6 +827,7 @@ export function DappApproval({ requestId, hosted = false, onDone, session }: Dap
                   placeholder="Enter your wallet password"
                   autoFocus
                   testId="dapp-password"
+                  enterClicks={['dapp-confirm', 'dapp-approve']}
                 />
               </div>
             )}
@@ -981,6 +982,7 @@ export function DappApproval({ requestId, hosted = false, onDone, session }: Dap
                   placeholder="Enter your wallet password"
                   autoFocus
                   testId="dapp-password"
+                  enterClicks={['dapp-confirm', 'dapp-approve']}
                 />
               </div>
             )}

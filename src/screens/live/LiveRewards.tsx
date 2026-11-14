@@ -267,6 +267,7 @@ export function LiveRewards({ onBack }: LiveRewardsProps) {
                 }}
                 placeholder="Enter your password to confirm"
                 testId="live-rewards-password"
+                enterClicks="live-rewards-confirm"
               />
               {passwordError && (
                 <span role="alert" style={{ fontSize: 11.5, color: 'var(--danger)', display: 'block', marginTop: 4 }}>

@@ -9,6 +9,15 @@ and release commits.
 
 ---
 
+## 1.7.25
+
+- Switching to a network this wallet is not on yet now offers a choice: open
+  a wallet you already have on that network, picked from a list, or add the
+  network to the current wallet as before.
+- Enter confirms wherever you type your password: a send, a claim, staking, a
+  request from a site, and the password and backup screens. It does nothing
+  while the confirm button itself is unavailable.
+
 ## 1.7.24
 
 - X Coin: Home now says how much of your balance is lottery rewards that are

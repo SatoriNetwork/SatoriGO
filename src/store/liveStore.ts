@@ -2376,6 +2376,14 @@ interface LiveState {
    *  it (walletOnChain picks which). No-op when that chain is already active, or
    *  when it has no wallet yet — call enableChain for that. */
   switchChain(chainId: string): Promise<void>;
+  /** Open ONE NAMED wallet that already lives on `chainId`: the switcher's
+   *  "Open a wallet you already have" choice, for a chain the active wallet's
+   *  own phrase has no wallet on. No-op when that wallet is not on the chain. */
+  openWalletOnChain(walletId: string, chainId: string): Promise<void>;
+  /** The recorded per-seed account visibility of ANY EVM chain (not only the
+   *  active one): seedGroup -> account indexes known used there, undefined for
+   *  a seed with no record. Read only; probes nothing and changes no state. */
+  readEvmAccountsSeenOn(chainKey: string): Promise<Record<string, number[] | undefined>>;
   /** Derive a NEW wallet on `chainId` from the ACTIVE wallet's EXISTING secret,
    *  so the user never retypes their recovery phrase. `password` is the ACTIVE
    *  wallet's password ('' for a passwordless wallet). Returns {ok:false,error}
@@ -3652,6 +3660,34 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     if (!target) return;
     if (target.id === get().activeWalletId) return;
     await get().switchWallet(target.id);
+  },
+
+  // The user's own pick among the wallets already on `chainId`. switchChain
+  // never crosses to another recovery phrase by itself (walletOnChain); this
+  // is that crossing made explicitly, by wallet id. Creates nothing and needs
+  // no secret: it is switchWallet, plus the chain within an EVM account.
+  async openWalletOnChain(walletId: string, chainId: string) {
+    if (get().wallets.length === 0) await get().loadWallets();
+    // Fail closed: only a wallet that IS on that chain, never an arbitrary id.
+    const target = walletsOnChain(get().wallets, chainId).find((w) => w.id === walletId);
+    if (!target) return;
+    if (target.id !== get().activeWalletId) await get().switchWallet(target.id);
+    const evmKey = evmChainKeyOf(chainId);
+    if (evmKey !== null && get().activeWalletId === target.id && svc.evmChainKey() !== evmKey) {
+      await get().switchEvmChain(evmKey);
+    }
+  },
+
+  async readEvmAccountsSeenOn(chainKey: string) {
+    const groups = [...new Set(get().wallets.filter((w) => w.seedGroup).map((w) => w.seedGroup as string))];
+    const out: Record<string, number[] | undefined> = {};
+    await Promise.all(
+      groups.map(async (g) => {
+        const v = await readValue<number[]>(evmSeenKey(g, chainKey));
+        out[g] = Array.isArray(v) && v.every((n) => typeof n === 'number') ? v : undefined;
+      }),
+    );
+    return out;
   },
 
   // --- EVM chain within the active account ------------------------------------

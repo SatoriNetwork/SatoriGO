@@ -468,6 +468,7 @@ export function LiveSendZcash({ onBack, onDone }: LiveSendZcashProps) {
                   }}
                   placeholder="Enter your password to confirm"
                   testId="live-zec-send-password"
+                  enterClicks="live-zec-broadcast"
                 />
                 {passwordError && (
                   <span

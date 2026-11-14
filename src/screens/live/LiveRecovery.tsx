@@ -396,6 +396,7 @@ function BackupPanel({ onDone }: { onDone: () => void }) {
         onChange={(e) => setPassword(e.target.value)}
         placeholder={`At least ${MIN_PASSWORD} characters`}
         testId="live-rec-backup-pw"
+        enterClicks="live-rec-backup-save"
       />
       <div style={{ height: 9 }} />
       <PasswordField
@@ -406,6 +407,7 @@ function BackupPanel({ onDone }: { onDone: () => void }) {
         onChange={(e) => setConfirm(e.target.value)}
         placeholder="The same password"
         testId="live-rec-backup-pw2"
+        enterClicks="live-rec-backup-save"
         error={error || undefined}
       />
       <Button
@@ -609,6 +611,7 @@ export function RestorePanel({ onDone }: { onDone: () => void }) {
             onChange={(e) => setPassword(e.target.value)}
             placeholder="The password you chose for this file"
             testId="live-rec-restore-pw"
+            enterClicks="live-rec-restore-read"
             error={error || undefined}
           />
           <Button
@@ -699,6 +702,7 @@ export function AppRecoverPanel({ onBack }: { onBack: () => void }) {
           onChange={(e) => setPassword(e.target.value)}
           placeholder={`At least ${MIN_PASSWORD} characters`}
           testId="live-recover-new-pw"
+          enterClicks="live-recover-submit"
         />
         <div style={{ height: 9 }} />
         <PasswordField
@@ -709,6 +713,7 @@ export function AppRecoverPanel({ onBack }: { onBack: () => void }) {
           onChange={(e) => setConfirm(e.target.value)}
           placeholder="The same password"
           testId="live-recover-new-pw2"
+          enterClicks="live-recover-submit"
           error={error || undefined}
         />
         <Button

@@ -521,6 +521,7 @@ export function DappApprovalEvm({ pending, hosted, session, settle, frame }: Dap
         placeholder="Enter your wallet password"
         autoFocus
         testId="dapp-password"
+        enterClicks={['dapp-confirm', 'dapp-approve']}
       />
     </div>
   );

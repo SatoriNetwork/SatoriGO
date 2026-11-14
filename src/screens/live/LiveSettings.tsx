@@ -1632,6 +1632,7 @@ export function LiveSettings({ onBack, onOpenAddressBook, onImportMonero }: Live
                     value={appCurrentPw}
                     onChange={(e) => onAppFieldChange(setAppCurrentPw)(e.target.value)}
                     testId="live-app-pw-current"
+                    enterClicks="live-app-pw-submit"
                   />
                 ) : (
                   <>
@@ -1666,6 +1667,7 @@ export function LiveSettings({ onBack, onOpenAddressBook, onImportMonero }: Live
                   value={appNewPw}
                   onChange={(e) => onAppFieldChange(setAppNewPw)(e.target.value)}
                   testId="live-app-pw-new"
+                  enterClicks="live-app-pw-submit"
                 />
                 <PasswordStrengthBar password={appNewPw} />
                 <PasswordField
@@ -1675,6 +1677,7 @@ export function LiveSettings({ onBack, onOpenAddressBook, onImportMonero }: Live
                   value={appConfirmPw}
                   onChange={(e) => onAppFieldChange(setAppConfirmPw)(e.target.value)}
                   testId="live-app-pw-confirm"
+                  enterClicks="live-app-pw-submit"
                 />
                 {appPasswordSet && (
                   <p className="text-faint" style={{ fontSize: 11, margin: '6px 2px 0', lineHeight: 1.5 }}>
@@ -2029,6 +2032,7 @@ export function LiveSettings({ onBack, onOpenAddressBook, onImportMonero }: Live
                     setPwSuccess(false);
                   }}
                   testId="live-change-pw-new"
+                  enterClicks="live-change-pw-submit"
                 />
                 <PasswordStrengthBar password={newPw} />
                 <PasswordField
@@ -2042,6 +2046,7 @@ export function LiveSettings({ onBack, onOpenAddressBook, onImportMonero }: Live
                     setPwSuccess(false);
                   }}
                   testId="live-change-pw-confirm"
+                  enterClicks="live-change-pw-submit"
                 />
               </>
             )}

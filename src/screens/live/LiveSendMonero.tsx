@@ -511,6 +511,7 @@ export function LiveSendMonero({ onBack, onDone }: LiveSendMoneroProps) {
                   }}
                   placeholder="Enter your password to confirm"
                   testId="live-xmr-send-password"
+                  enterClicks="live-xmr-broadcast"
                 />
                 {passwordError && (
                   <span

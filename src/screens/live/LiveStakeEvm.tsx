@@ -522,6 +522,7 @@ export function LiveStakeEvm({ onBack }: LiveStakeEvmProps) {
                 }}
                 placeholder="Enter your password to confirm"
                 testId="live-stake-password"
+                enterClicks="live-stake-broadcast"
               />
               {passwordError && (
                 <span

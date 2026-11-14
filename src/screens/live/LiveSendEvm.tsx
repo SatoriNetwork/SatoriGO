@@ -461,6 +461,7 @@ export function LiveSendEvm({ onBack, onDone, asset }: LiveSendEvmProps) {
                   }}
                   placeholder="Enter your password to confirm"
                   testId="live-send-password"
+                  enterClicks="live-broadcast"
                 />
                 {passwordError && (
                   <span

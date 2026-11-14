@@ -29,16 +29,18 @@ import { Button } from '../../components/Button';
 import {
   useLiveStore,
   walletOnChain,
+  walletsOnChain,
   activeChainTarget,
   describeChain,
 } from '../../store/liveStore';
 import { useNav } from './LiveNav';
+import { filterAccountsForChain, flattenGroups, groupWallets, shortAccountAddress } from './walletGroups';
 import { useSettingsStore } from '../../store/settingsStore';
 import { moveFavouriteChain, toggleFavouriteChain } from '../../services/favouriteChains';
 import { networkFor, chainsShareDerivation, type EvrmoreNetwork } from '../../services/chain/chainParams';
 import { moneroPhraseUsedBefore } from '../../services/chain/engine';
 import { localIsoDate, MONERO_GENESIS_DATE, restoreHeightFromDate } from '../../services/moneroDates';
-import { isEvmChainTarget } from '../../store/evmChains';
+import { isEvmChainTarget, evmChainKeyOf } from '../../store/evmChains';
 import { isMoneroChainTarget } from '../../store/moneroChains';
 import { isZcashChainTarget } from '../../store/zcashChain';
 import { isTaoChainTarget } from '../../store/taoChain';
@@ -91,6 +93,10 @@ export function ChainSwitcher() {
   const switchChain = useLiveStore((s) => s.switchChain);
   const { tab, openTab } = useNav();
   const enableChain = useLiveStore((s) => s.enableChain);
+  // Optional chaining at the call: the switcher's own tests mock the store
+  // without it unless they cover this choice.
+  const openWalletOnChain = useLiveStore((s) => s.openWalletOnChain);
+  const readEvmAccountsSeenOn = useLiveStore((s) => s.readEvmAccountsSeenOn);
   // The no-password hint for an open app-protected wallet (owner request,
   // 2026-10-04). Optional chaining: the switcher's own tests mock the store
   // without it, and a missing flag must read as "ask for the password".
@@ -113,6 +119,14 @@ export function ChainSwitcher() {
   // out stale): the field comes back for this panel, whatever the flag says.
   const [passwordRequired, setPasswordRequired] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  // The wallet picked under "Open a wallet you already have" on the enable
+  // step; '' = the first one offered.
+  const [existingPick, setExistingPick] = useState('');
+  // For an EVM target: which accounts of each seed are known USED on THAT
+  // chain, so the list is the one Home shows there, not every account the
+  // seed has anywhere. Tagged with the chain it was read for; until it
+  // arrives (and for a seed with no record) every account shows.
+  const [targetSeen, setTargetSeen] = useState<{ chainId: string; seen: Record<string, number[] | undefined> } | null>(null);
   // "Add Monero" only: has this phrase been used with Monero before (Satori GO
   // on another device, or Cake Wallet with the same words)? Decides where the
   // scan starts (the Monero engine design notes §6.6): the release floor when
@@ -185,6 +199,7 @@ export function ChainSwitcher() {
     setError(null);
     setPasswordRequired(null);
     setSubmitting(false);
+    setExistingPick('');
     setQuery('');
     setMoneroFirstUsed('');
     setMoneroDateError(null);
@@ -232,6 +247,14 @@ export function ChainSwitcher() {
       return;
     }
     setEnableTarget(chainId);
+    setExistingPick('');
+    setTargetSeen(null);
+    const evmKey = isEvmChainTarget(chainId) ? evmChainKeyOf(chainId) : null;
+    if (evmKey !== null && readEvmAccountsSeenOn) {
+      void readEvmAccountsSeenOn(evmKey)
+        .then((seen) => setTargetSeen({ chainId, seen }))
+        .catch(() => {});
+    }
     setPassword('');
     setError(null);
     setPasswordRequired(null);
@@ -292,6 +315,37 @@ export function ChainSwitcher() {
       setError(err instanceof Error ? err.message : String(err));
       setSubmitting(false);
     }
+  }
+
+  // Wallets ALREADY on the target chain that the straight switch did not take:
+  // they come from another recovery phrase (or are imported keys), so the
+  // switcher never jumps to one by itself (the seed-scoping rule above). But
+  // whoever clicked the chain may simply want to go to one of them, not derive
+  // a new wallet. Offered as a choice here, never chosen for them (owner,
+  // 2026-11-14).
+  const existingNodes = enableTarget
+    ? groupWallets(
+        filterAccountsForChain(
+          walletsOnChain(wallets, enableTarget).filter((w) => w.id !== activeWallet?.id),
+          targetSeen && targetSeen.chainId === enableTarget ? targetSeen.seen : {},
+          null,
+        ),
+      )
+    : [];
+  const existingOnTarget = flattenGroups(existingNodes);
+  const existingChosen = existingOnTarget.find((w) => w.id === existingPick) ?? existingOnTarget[0] ?? null;
+  // Each row keeps the wallet's OWN name: a closed list shows only the picked
+  // row, and "Account 1" alone would not say whose account it is.
+  const existingOptionText = (w: { name: string; address?: string }): string =>
+    w.address ? `${w.name} \u00b7 ${shortAccountAddress(w.address)}` : w.name;
+
+  function handleOpenExisting() {
+    if (!enableTarget || !existingChosen || submitting) return;
+    const chainId = enableTarget;
+    const walletId = existingChosen.id;
+    closeAll();
+    if (tab !== 'assets') openTab('assets');
+    void openWalletOnChain?.(walletId, chainId);
   }
 
   const targetDesc = enableTarget ? describeChain(enableTarget, evmChains, moneroChain) : null;
@@ -708,6 +762,60 @@ export function ChainSwitcher() {
                 data-testid="live-chain-enable-panel"
                 style={{ padding: '8px 9px 9px' }}
               >
+                {existingOnTarget.length > 0 && (
+                  <div data-testid="live-chain-open-existing" style={{ marginBottom: 12 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 12.5, fontWeight: 700, marginBottom: 7 }}>
+                      <TokenIcon assetId={chainMarkId(targetDesc)} size={18} />
+                      <span style={{ minWidth: 0 }}>Open a wallet you already have on {targetDisplayName}</span>
+                    </div>
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                      <select
+                        className="live-picker"
+                        data-testid="live-chain-open-existing-select"
+                        aria-label={`Wallet to open on ${targetDisplayName}`}
+                        value={existingChosen?.id ?? ''}
+                        onChange={(e) => setExistingPick(e.target.value)}
+                        style={{ flex: 1, minWidth: 0 }}
+                      >
+                        {/* Accounts of one seed sit under that seed's name, as
+                            in the wallet switcher; anything else is a plain row. */}
+                        {existingNodes.map((node) =>
+                          node.kind === 'group' && node.members.length > 1 ? (
+                            <optgroup key={node.key} label={node.title}>
+                              {node.members.map((w) => (
+                                <option key={w.id} value={w.id}>
+                                  {existingOptionText(w)}
+                                </option>
+                              ))}
+                            </optgroup>
+                          ) : (
+                            (node.kind === 'group' ? node.members : [node.wallet]).map((w) => (
+                              <option key={w.id} value={w.id}>
+                                {existingOptionText(w)}
+                              </option>
+                            ))
+                          ),
+                        )}
+                      </select>
+                      <Button
+                        type="button"
+                        size="sm"
+                        onClick={handleOpenExisting}
+                        data-testid="live-chain-open-existing-submit"
+                        style={{ flexShrink: 0 }}
+                      >
+                        Open
+                      </Button>
+                    </div>
+                    <div
+                      className="section-label"
+                      role="presentation"
+                      style={{ margin: '14px 0 0', paddingTop: 10, borderTop: '1px solid var(--border)' }}
+                    >
+                      Or add a new one
+                    </div>
+                  </div>
+                )}
                 <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 12.5, fontWeight: 700, marginBottom: 7 }}>
                   <TokenIcon assetId={chainMarkId(targetDesc)} size={18} />
                   <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>
