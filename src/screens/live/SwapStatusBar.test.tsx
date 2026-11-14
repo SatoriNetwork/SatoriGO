@@ -17,13 +17,18 @@ class NoNetWebSocket {
   }
 }
 
+const ME = '0x9858EfFD232B4033E47d90003D41EC34EcaEda94';
+
 const STATUS: SwapStatus = {
   txid: '0xabc',
+  from: ME,
   chainKey: 'base',
   chainName: 'Base',
   explorerUrl: 'https://basescan.org/tx/0xabc',
-  payText: '10 USDC',
-  receiveText: '32.52 SATORI',
+  payAmount: '10',
+  paySymbol: 'USDC',
+  receiveAmount: '32.52',
+  receiveSymbol: 'SATORI',
   state: 'pending',
 };
 
@@ -32,8 +37,8 @@ let storeMod: LiveStoreModule;
 let SwapStatusBar: typeof import('./SwapStatusBar')['SwapStatusBar'];
 let CLEAR_MS = 0;
 const state = () => storeMod.useLiveStore.getState();
-const show = (status: SwapStatus | null, activeChainKey = 'base') => {
-  storeMod.useLiveStore.setState({ swapStatus: status, evm: { ...state().evm, activeChainKey } } as never);
+const show = (status: SwapStatus | null, activeChainKey = 'base', address = ME) => {
+  storeMod.useLiveStore.setState({ swapStatus: status, address, evm: { ...state().evm, activeChainKey } } as never);
   return render(<SwapStatusBar />);
 };
 const bar = () => screen.getByTestId('live-swap-status');
@@ -53,11 +58,14 @@ afterEach(() => {
 });
 
 describe('SwapStatusBar', () => {
-  it('draws nothing when no swap was sent, or on another network', () => {
+  it('draws nothing when no swap was sent, on another network, or for another account', () => {
     show(null);
     expect(screen.queryByTestId('live-swap-status')).toBeNull();
     cleanup();
     show(STATUS, 'ethereum');
+    expect(screen.queryByTestId('live-swap-status')).toBeNull();
+    cleanup();
+    show(STATUS, 'base', '0x00000000000000000000000000000000000000a1');
     expect(screen.queryByTestId('live-swap-status')).toBeNull();
   });
 

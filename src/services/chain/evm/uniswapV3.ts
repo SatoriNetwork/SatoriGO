@@ -15,8 +15,9 @@
 // The chain's own coin is swapped as its wrapped token: the router wraps the
 // value attached to the call, and unwrapWETH9 turns the output back into coin.
 
-import { hexToBytes } from '@noble/hashes/utils';
+import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
 import { isEvmAddress, normalizeEvmAddress } from './keys';
+import { hashStruct, type TypedData, type TypedDataField } from './typedData';
 
 export interface UniswapV3Deployment {
   factory: string;
@@ -80,6 +81,9 @@ export const UNISWAP_V3_SELECTORS = Object.freeze({
   unwrapWETH9: '0x49404b7c', // unwrapWETH9(uint256,address)
   sweepTokenWithFee: '0xe0e189a0', // sweepTokenWithFee(address,uint256,address,uint256,address)
   unwrapWETH9WithFee: '0x9b2c0a37', // unwrapWETH9WithFee(uint256,address,uint256,address)
+  selfPermitIfNecessary: '0xc2e3140a', // selfPermitIfNecessary(address,uint256,uint256,uint8,bytes32,bytes32)
+  DOMAIN_SEPARATOR: '0x3644e515', // DOMAIN_SEPARATOR(), on a token with permit
+  nonces: '0x7ecebe00', // nonces(address), on a token with permit
   factory: '0xc45a0155', // factory(), on the router and the quoter
   WETH9: '0x4aa4a4fc', // WETH9(), on the router
 });
@@ -262,6 +266,97 @@ export function encodeUnwrapWETH9WithFee(amountMinimum: bigint, recipient: strin
   );
 }
 
+// --- permit (EIP-2612): the allowance as a signature, inside the swap ----------
+// A token that supports it lets its owner SIGN the allowance instead of sending
+// an approve transaction. The router's selfPermitIfNecessary presents that
+// signature to the token as the first call of the swap's own multicall, so a
+// token swap is one transaction. It is "if necessary" on purpose: when the
+// allowance is already there (someone replayed the public signature first) it
+// does nothing, where a plain selfPermit would revert the whole swap.
+
+/** A signed allowance for the router, exactly `value`, good until `deadline`. */
+export interface SwapPermit {
+  token: string;
+  value: bigint;
+  deadline: bigint;
+  v: number;
+  /** 0x + 32 bytes each. */
+  r: string;
+  s: string;
+}
+
+const BYTES32_RE = /^0x[0-9a-fA-F]{64}$/;
+const DOMAIN_TYPE: TypedDataField[] = [
+  { name: 'name', type: 'string' },
+  { name: 'version', type: 'string' },
+  { name: 'chainId', type: 'uint256' },
+  { name: 'verifyingContract', type: 'address' },
+];
+const PERMIT_TYPE: TypedDataField[] = [
+  { name: 'owner', type: 'address' },
+  { name: 'spender', type: 'address' },
+  { name: 'value', type: 'uint256' },
+  { name: 'nonce', type: 'uint256' },
+  { name: 'deadline', type: 'uint256' },
+];
+
+/** The EIP-712 domain separator a token with this name and version would
+ *  publish, 0x + 64 lowercase hex. A token's real one is compared with this to
+ *  learn its version without trusting anyone's word for it. */
+export function permitDomainSeparator(name: string, version: string, chainId: number, token: string): string {
+  const domain = { name, version, chainId, verifyingContract: normalizeEvmAddress(token) };
+  return `0x${bytesToHex(hashStruct('EIP712Domain', domain, { EIP712Domain: DOMAIN_TYPE }, 'domain'))}`;
+}
+
+/** The typed data an owner signs to allow `spender` exactly `value`. */
+export function permitTypedData(args: {
+  name: string;
+  version: string;
+  chainId: number;
+  token: string;
+  owner: string;
+  spender: string;
+  value: bigint;
+  nonce: bigint;
+  deadline: bigint;
+}): TypedData {
+  return {
+    types: { EIP712Domain: DOMAIN_TYPE, Permit: PERMIT_TYPE },
+    primaryType: 'Permit',
+    domain: { name: args.name, version: args.version, chainId: args.chainId, verifyingContract: normalizeEvmAddress(args.token) },
+    message: {
+      owner: normalizeEvmAddress(args.owner),
+      spender: normalizeEvmAddress(args.spender),
+      value: args.value.toString(),
+      nonce: args.nonce.toString(),
+      deadline: args.deadline.toString(),
+    },
+  };
+}
+
+/** Split the wallet's 65-byte signature (r || s || v) into the permit's parts. */
+export function splitPermitSignature(signature: string): { v: number; r: string; s: string } {
+  if (!/^0x[0-9a-fA-F]{130}$/.test(signature)) throw new Error('uniswapV3: a signature is 65 bytes');
+  const v = parseInt(signature.slice(130), 16);
+  if (v !== 27 && v !== 28) throw new Error('uniswapV3: signature v must be 27 or 28');
+  return { v, r: `0x${signature.slice(2, 66)}`, s: `0x${signature.slice(66, 130)}` };
+}
+
+/** Inner call: selfPermitIfNecessary(token, value, deadline, v, r, s). */
+export function encodeSelfPermitIfNecessary(permit: SwapPermit): string {
+  if (!BYTES32_RE.test(permit.r) || !BYTES32_RE.test(permit.s)) throw new Error('uniswapV3: permit r and s are bytes32');
+  if (permit.v !== 27 && permit.v !== 28) throw new Error('uniswapV3: permit v must be 27 or 28');
+  return (
+    UNISWAP_V3_SELECTORS.selfPermitIfNecessary +
+    addressWord(permit.token, 'token') +
+    uintWord(permit.value) +
+    uintWord(permit.deadline) +
+    uintWord(BigInt(permit.v)) +
+    permit.r.slice(2).toLowerCase() +
+    permit.s.slice(2).toLowerCase()
+  );
+}
+
 /** The transaction data: multicall(deadline, calls). The router reverts the
  *  whole thing once `deadline` (unix seconds) has passed. */
 export function encodeMulticall(deadline: bigint, calls: readonly string[]): Uint8Array {
@@ -291,6 +386,9 @@ export function encodeMulticall(deadline: bigint, calls: readonly string[]): Uin
  * checks its minimum BEFORE the fee, so it is given beforeSwapFee(minimum) and
  * the user's minimum holds after it. Without a fee the bytes are exactly what
  * they were before the fee existed.
+ *
+ * With a `permit`, its selfPermitIfNecessary goes first, so the router is
+ * allowed the input token by the time the swap pulls it.
  */
 export function encodeSwap(args: {
   deployment: UniswapV3Deployment;
@@ -301,8 +399,14 @@ export function encodeSwap(args: {
   deadline: bigint;
   nativeOut: boolean;
   fee?: SwapFee | null;
+  /** A signed allowance to present first, in place of an earlier approve. */
+  permit?: SwapPermit | null;
 }): Uint8Array {
-  const { deployment, hops, recipient, amountIn, amountOutMinimum, deadline, nativeOut, fee } = args;
+  const { deployment, hops, recipient, amountIn, amountOutMinimum, deadline, nativeOut, fee, permit } = args;
+  if (permit && (permit.token.toLowerCase() !== hops[0]?.tokenIn.toLowerCase() || permit.value !== amountIn)) {
+    throw new Error('uniswapV3: the permit must be for the token and amount being swapped');
+  }
+  const first = permit ? [encodeSelfPermitIfNecessary(permit)] : [];
   if (amountIn <= 0n) throw new Error('uniswapV3: amountIn must be positive');
   if (amountOutMinimum <= 0n) throw new Error('uniswapV3: a swap needs a minimum output');
   const last = hops[hops.length - 1];
@@ -315,7 +419,7 @@ export function encodeSwap(args: {
     const forward = nativeOut
       ? encodeUnwrapWETH9WithFee(gross, recipient, fee)
       : encodeSweepTokenWithFee(last.tokenOut, gross, recipient, fee);
-    return encodeMulticall(deadline, [swap, forward]);
+    return encodeMulticall(deadline, [...first, swap, forward]);
   }
   const swap = encodeExactInput({
     hops,
@@ -323,7 +427,7 @@ export function encodeSwap(args: {
     amountIn,
     amountOutMinimum,
   });
-  return encodeMulticall(deadline, nativeOut ? [swap, encodeUnwrapWETH9(amountOutMinimum, recipient)] : [swap]);
+  return encodeMulticall(deadline, nativeOut ? [...first, swap, encodeUnwrapWETH9(amountOutMinimum, recipient)] : [...first, swap]);
 }
 
 /** `amountOut` less `slippageBps` hundredths of a percent, rounded down. */

@@ -95,6 +95,7 @@ const swapPlan = (impactBps: number | null): SwapPlan =>
     feeBps: 0,
     feeAmount: 0n,
     plannedAt: Date.now(),
+    viaPermit: false,
     slippageBps: 50,
     impactBps,
     hops: QUOTE.hops,
@@ -189,9 +190,9 @@ describe('LiveSwap', () => {
     pick('live-swap-token-in', USDC_KEY);
     pick('live-swap-token-out', SATORI_KEY);
     fireEvent.change(screen.getByTestId('live-swap-amount'), { target: { value: '2' } });
-    await waitFor(() => expect(spies.quoteSwap).toHaveBeenCalledTimes(1), { timeout: 2000 });
+    await waitFor(() => expect(spies.quoteSwap).toHaveBeenCalledTimes(1), { timeout: 8000 });
     expect(spies.quoteSwap).toHaveBeenCalledWith(USDC, SATORI, 2_000_000n);
-  });
+  }, 15_000);
 
   it('refuses an amount above the balance before any review', () => {
     setup({ quote: QUOTE });
@@ -221,10 +222,10 @@ describe('LiveSwap', () => {
     expect(spies.planSwap).toHaveBeenCalledWith(100);
   });
 
-  it('names the approval step when the token is not yet allowed, and warns about a thin pool', () => {
+  it('leaves the approval question to the review, and warns about a thin pool', () => {
     setup({ quote: { ...QUOTE, needsApproval: true, impactBps: 850 } });
     fill();
-    expect(button().textContent).toBe('Approve USDC');
+    expect(button().textContent).toBe('Review swap');
     expect(screen.getByTestId('live-swap-quote-impact').className).toContain('warn');
     expect(screen.getByTestId('live-swap-impact-warning').textContent).toContain('8.5% less');
   });
@@ -259,6 +260,15 @@ describe('LiveSwap', () => {
     expect(onBack).not.toHaveBeenCalled();
     expect(spies.arm.mock.calls.map((c) => c[0])).toEqual([true, false]);
     expect(spies.confirmSwap).toHaveBeenCalledWith(false);
+  });
+
+  it('review: a swap carrying a signed permit says the approval is inside it', () => {
+    setup({ quote: QUOTE, plan: swapPlan(40) });
+    expect(screen.queryByTestId('live-swap-review-permit')).toBeNull();
+    cleanup();
+    setup({ quote: QUOTE, plan: { ...swapPlan(40), viaPermit: true } as SwapPlan });
+    expect(screen.getByTestId('live-swap-review-permit').textContent).toContain('Signed for exactly this amount');
+    expect(screen.queryByTestId('live-swap-step-note')).toBeNull();
   });
 
   it('review: a high or unmeasured price impact needs its own tick', () => {

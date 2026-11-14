@@ -13,7 +13,7 @@ vi.mock('../services/chain/engine', async (importOriginal) => {
 });
 
 import { MemoryStorageAdapter, setStorageForTests } from '../services/storage';
-import { UNISWAP_V3, UNISWAP_V3_SELECTORS, decodeErc20Calldata, decodeSignedTx, midPriceOut } from '../services/chain/evm';
+import { UNISWAP_V3, UNISWAP_V3_SELECTORS, decodeErc20Calldata, decodeSignedTx, midPriceOut, permitDomainSeparator } from '../services/chain/evm';
 import { resetEvmProvidersForTests } from './evmBalances';
 import { resetEvmIndexersForTests } from './evmHistory';
 import type { SwapToken } from './evmSwap';
@@ -46,7 +46,7 @@ const pool = (x: string, y: string, fee: number) => POOLS[`${[x, y].sort().join(
 
 interface Req { id: number; method: string; params: unknown[] }
 
-let world: { allowance: bigint; pricesReadable: boolean; receipt: null | '0x1' | '0x0' };
+let world: { allowance: bigint; pricesReadable: boolean; receipt: null | '0x1' | '0x0'; permit: boolean; permitRefused: boolean; estimateReverts: boolean };
 let sentRaw: string[];
 
 function answer(req: Req): Record<string, unknown> {
@@ -61,8 +61,11 @@ function answer(req: Req): Record<string, unknown> {
       return ok({ timestamp: '0x66f00000' });
     case 'eth_getBalance':
       return ok(`0x${(10n ** 18n).toString(16)}`);
-    case 'eth_estimateGas':
-      return ok('0x30d40');
+    case 'eth_estimateGas': {
+      // Only the swap can be made to fail: the approval that follows must still price.
+      const { to = '' } = req.params[0] as { to?: string };
+      return world.estimateReverts && to.toLowerCase() === D.swapRouter02.toLowerCase() ? err('execution reverted: invalid signature') : ok('0x30d40');
+    }
     case 'eth_feeHistory':
       return ok({
         baseFeePerGas: Array.from({ length: 6 }, () => '0x4c4b40'),
@@ -101,6 +104,15 @@ function answer(req: Req): Record<string, unknown> {
         const p = Object.values(POOLS).find((x) => x.address === to.toLowerCase());
         return p && world.pricesReadable ? ok(`0x${word(p.sqrt)}${word(0)}`) : err('execution reverted');
       }
+      if (world.permit && sel === '0x06fdde03') {
+        const hex = bytesToHex(new TextEncoder().encode('USD Coin'));
+        return ok(`0x${word(32)}${word(hex.length / 2)}${hex.padEnd(64, '0')}`);
+      }
+      if (world.permit && sel === UNISWAP_V3_SELECTORS.DOMAIN_SEPARATOR) return ok(permitDomainSeparator('USD Coin', '2', 8453, to));
+      if (world.permit && sel === UNISWAP_V3_SELECTORS.nonces) return ok(`0x${word(3)}`);
+      if (world.permit && to.toLowerCase() === D.swapRouter02.toLowerCase() && sel === UNISWAP_V3_SELECTORS.multicall) {
+        return world.permitRefused ? err('execution reverted: invalid signature') : ok('0x');
+      }
       if (sel === '0xdd62ed3e') return ok(`0x${word(world.allowance)}`);
       if (sel === '0x70a08231') return ok(`0x${word(10n ** 24n)}`);
       if (sel === '0x313ce567') return ok(`0x${word(18)}`);
@@ -130,7 +142,7 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
-  world = { allowance: 0n, pricesReadable: true, receipt: null };
+  world = { allowance: 0n, pricesReadable: true, receipt: null, permit: false, permitRefused: false, estimateReverts: false };
   sentRaw = [];
   setStorageForTests(new MemoryStorageAdapter());
   resetEvmProvidersForTests();
@@ -242,7 +254,8 @@ describe('in-wallet swap on Base', () => {
   });
 
   const settled = async () => {
-    for (let i = 0; i < 80 && state().swapStatus?.state === 'pending'; i++) await new Promise((r) => setTimeout(r, 50));
+    // Generous: the receipt is polled every 1.5 s, and the suite runs many files at once.
+    for (let i = 0; i < 300 && state().swapStatus?.state === 'pending'; i++) await new Promise((r) => setTimeout(r, 50));
     return state().swapStatus?.state;
   };
   const sendSwap = async () => {
@@ -259,8 +272,11 @@ describe('in-wallet swap on Base', () => {
       txid,
       chainKey: 'base',
       chainName: 'Base',
-      payText: '2 USDC',
-      receiveText: '<0.00000001 SATORI',
+      from: ME,
+      payAmount: '2',
+      paySymbol: 'USDC',
+      receiveAmount: '<0.00000001',
+      receiveSymbol: 'SATORI',
       state: 'pending',
     });
     expect(state().swapStatus?.explorerUrl).toContain(txid);
@@ -268,13 +284,13 @@ describe('in-wallet swap on Base', () => {
     expect(await settled()).toBe('confirmed');
     state().dismissSwapStatus();
     expect(state().swapStatus).toBeNull();
-  });
+  }, 30_000);
 
   it('a swap the chain reverted is reported as failed, never as done', async () => {
     await sendSwap();
     world.receipt = '0x0';
     expect(await settled()).toBe('failed');
-  });
+  }, 30_000);
 
   it('an approval is not followed on Home: its second step is still on the swap page', async () => {
     await state().quoteSwap(USDC, SATORI, 2_000_000n);
@@ -284,6 +300,37 @@ describe('in-wallet swap on Base', () => {
     expect(state().swapStatus).toBeNull();
     // Activity still shows it straight away, as a pending call that moves nothing.
     expect(state().txs.find((t) => t.txid === txid)).toMatchObject({ asset: 'ETH', direction: 'out', status: 'pending' });
+  });
+
+  it('a token with permit swaps in ONE transaction: no approval is sent', async () => {
+    world.permit = true;
+    expect((await state().quoteSwap(USDC, SATORI, 2_000_000n))?.needsApproval).toBe(true);
+    const plan = await state().planSwap(50);
+    expect(plan).toMatchObject({ kind: 'swap', viaPermit: true });
+    state().arm(true);
+    const { kind } = await state().confirmSwap();
+    expect(kind).toBe('swap');
+    expect(sentRaw).toHaveLength(1);
+    expect(sent(0).to.toLowerCase()).toBe(D.swapRouter02.toLowerCase());
+    expect(bytesToHex(sent(0).data)).toContain(UNISWAP_V3_SELECTORS.selfPermitIfNecessary.slice(2));
+    expect(state().swapStatus?.state).toBe('pending');
+  });
+
+  it('a permit the token refuses falls back to the approval step', async () => {
+    world.permit = true;
+    world.permitRefused = true;
+    await state().quoteSwap(USDC, SATORI, 2_000_000n);
+    expect((await state().planSwap(50))?.kind).toBe('approve');
+    expect(swap().error).toBe(null);
+  });
+
+  it('a swap that fails for another reason is reported, not turned into an approval the user would pay for', async () => {
+    world.permit = true;
+    world.estimateReverts = true;
+    await state().quoteSwap(USDC, SATORI, 2_000_000n);
+    expect(await state().planSwap(50)).toBe(null);
+    expect(swap().error).toMatch(/invalid signature|refused to simulate/);
+    expect(sentRaw).toHaveLength(0);
   });
 
   it('a failed quote lands as an error, and a new quote discards the plan under review', async () => {

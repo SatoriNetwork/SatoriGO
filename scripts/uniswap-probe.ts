@@ -21,12 +21,33 @@ import {
   encodeSwap,
   minimumOut,
   afterSwapFee,
+  encodeMulticall,
+  encodeSelfPermitIfNecessary,
+  permitDomainSeparator,
+  permitTypedData,
+  splitPermitSignature,
   type SwapHop,
 } from '../src/services/chain/evm/uniswapV3';
 import { bytesToHex } from '@noble/hashes/utils';
+import { secp256k1 } from '@noble/curves/secp256k1';
+import { publicKeyToEvmAddress } from '../src/services/chain/evm/keys';
+import { decodeString, decodeUint256, encodeName } from '../src/services/chain/evm/erc20';
+import { signTypedData } from '../src/services/chain/evm/typedData';
+import { evmChainByKey } from '../src/services/chain/evm/chains';
 
 /** Stands in for a fee recipient in simulations. Nothing is ever sent. */
 const FEE_PROBE_ADDRESS = '0x00000000000000000000000000000000000000fe';
+
+/** A key made for this run and thrown away. It holds nothing; it only signs
+ *  permits that are simulated and never sent. Fresh on purpose: a well-known
+ *  test key can carry an EIP-7702 delegation on some chains, and a token such
+ *  as USDC then treats it as a contract wallet and refuses its signature. */
+const PROBE_KEY = secp256k1.utils.randomPrivateKey();
+const PROBE_OWNER = publicKeyToEvmAddress(secp256k1.getPublicKey(PROBE_KEY, false));
+/** Tokens whose permit the wallet is expected to use, beyond each chain's dollar token. */
+const PERMIT_TOKENS: Record<string, Record<string, string>> = {
+  base: { SATORI: '0xd0a5bFF2789230b0fb1Bd989fc7CE7084c947E17' },
+};
 
 const DEFAULT_RPC: Record<string, string> = {
   base: 'https://mainnet.base.org',
@@ -108,6 +129,46 @@ async function checkChain(key: string): Promise<boolean> {
       const feeSim = await call(d.swapRouter02, `0x${bytesToHex(withFee)}`, { from: d.wrappedNative, value: `0x${amountIn.toString(16)}` });
       check(`simulate coin-in swap with a ${bips / 100}% fee`, typeof feeSim.result === 'string', feeSim.error?.message ?? '');
     }
+  }
+  // Permit: the wallet's own detection (the version whose domain hash equals
+  // the token's DOMAIN_SEPARATOR), then a permit signed by the probe key and
+  // presented to the REAL token through the router, simulated. It needs no
+  // balance, so it proves the signature is one the token accepts.
+  const chainId = evmChainByKey(key)?.chainId ?? 0;
+  for (const [symbol, token] of Object.entries({ ...(PERMIT_TOKENS[key] ?? {}), stable: d.stable })) {
+    const name = await call(token, encodeName());
+    const separator = (await call(token, UNISWAP_V3_SELECTORS.DOMAIN_SEPARATOR)).result?.toLowerCase();
+    const nonce = await call(token, UNISWAP_V3_SELECTORS.nonces + PROBE_OWNER.slice(2).toLowerCase().padStart(64, '0'));
+    let version: string | undefined;
+    let tokenName = '';
+    try {
+      tokenName = decodeString(name.result ?? '');
+      version = ['1', '2'].find((v) => permitDomainSeparator(tokenName, v, chainId, token) === separator);
+    } catch {
+      version = undefined;
+    }
+    if (!version || !nonce.result) {
+      console.log(`  info permit ${symbol}: none the wallet can use (it will ask for an approval instead)`);
+      continue;
+    }
+    const deadline = BigInt(Math.floor(Date.now() / 1000) + 1200);
+    const data = permitTypedData({
+      name: tokenName,
+      version,
+      chainId,
+      token,
+      owner: PROBE_OWNER,
+      spender: d.swapRouter02,
+      value: 1_000_000n,
+      nonce: decodeUint256(nonce.result),
+      deadline,
+    });
+    const permit = { token, value: 1_000_000n, deadline, ...splitPermitSignature(signTypedData(data, PROBE_KEY)) };
+    const sim = await call(d.swapRouter02, `0x${bytesToHex(encodeMulticall(deadline, [encodeSelfPermitIfNecessary(permit)]))}`, { from: PROBE_OWNER });
+    check(`permit ${symbol} ("${tokenName}" v${version}) accepted by the token through the router`, typeof sim.result === 'string', sim.error?.message ?? '');
+    const forged = { ...permit, value: 1_000_001n };
+    const bad = await call(d.swapRouter02, `0x${bytesToHex(encodeMulticall(deadline, [encodeSelfPermitIfNecessary(forged)]))}`, { from: PROBE_OWNER });
+    check(`permit ${symbol} for another amount is refused`, typeof bad.result !== 'string');
   }
   return ok;
 }

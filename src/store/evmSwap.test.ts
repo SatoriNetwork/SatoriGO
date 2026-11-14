@@ -24,6 +24,7 @@ import {
   swapSupported,
   swapNeedsImpactAck,
   swapFeeFor,
+  SwapNeedsApprovalError,
   SWAP_DEADLINE_SECONDS,
   SWAP_FEE_BPS,
   SWAP_FEE_RECIPIENT,
@@ -42,7 +43,13 @@ import {
   decodeErc20Calldata,
   encodeSwap,
   encodeSweepTokenWithFee,
+  encodeSelfPermitIfNecessary,
+  permitDomainSeparator,
+  permitTypedData,
+  splitPermitSignature,
+  signTypedData,
   midPriceOut,
+  type TypedData,
   type SwapHop,
 } from '../services/chain/evm';
 import type { EvmChainInfo } from './evmChains';
@@ -118,6 +125,10 @@ function fakeBase(
     satoriLockRound?: bigint;
     /** The latest block's timestamp; null = the node will not say. */
     blockTime?: bigint | null;
+    /** Tokens answer like ones with EIP-2612 permit, under this domain. */
+    permit?: { name: string; version: string; nonce: bigint };
+    /** The token refuses the signed permit when it is shown one. */
+    permitRefused?: boolean;
   } = {},
 ) {
   const pools = opts.pools ?? POOLS;
@@ -175,6 +186,17 @@ function fakeBase(
           const i = pools.findIndex((_, n) => poolAddress(n) === to);
           if (i < 0 || pools[i].noPrice) return err('execution reverted');
           return ok('0x' + word(pools[i].sqrt) + word(0));
+        }
+        if (opts.permit && sel === ERC20_SELECTORS.name) {
+          const hex = bytesToHex(new TextEncoder().encode(opts.permit.name));
+          return ok('0x' + word(32) + word(hex.length / 2) + hex.padEnd(64, '0'));
+        }
+        if (opts.permit && sel === UNISWAP_V3_SELECTORS.DOMAIN_SEPARATOR) {
+          return ok(permitDomainSeparator(opts.permit.name, opts.permit.version, 8453, call.to));
+        }
+        if (opts.permit && sel === UNISWAP_V3_SELECTORS.nonces) return ok('0x' + word(opts.permit.nonce));
+        if (opts.permit && to === D.swapRouter02.toLowerCase() && sel === UNISWAP_V3_SELECTORS.multicall) {
+          return opts.permitRefused ? err('execution reverted: EIP2612: invalid signature') : ok('0x');
         }
         if (sel === ERC20_SELECTORS.allowance) return ok('0x' + word(opts.allowance ?? 0n));
         if (sel === ERC20_SELECTORS.balanceOf) return ok('0x' + word(opts.balance ?? 10n ** 30n));
@@ -527,5 +549,78 @@ describe('the wallet fee', () => {
     expect(quote).toMatchObject({ feeBps: 0, amountOut: 3_988_000n });
     const plan = await buildSwapPlan({ provider, chain: BASE, quote, slippageBps: 50, feeConfig: ON });
     expect(bytesToHex(plan.data)).not.toContain(UNISWAP_V3_SELECTORS.sweepTokenWithFee.slice(2));
+  });
+});
+
+describe('permit: a token swap in one transaction', () => {
+  const signPermit = (data: TypedData) => signTypedData(data, FROM_KEY);
+  const PERMIT = { name: 'USD Coin', version: '2', nonce: 5n };
+
+  it('29. a token with permit is signed for exactly the amount and swapped in one transaction', async () => {
+    const { provider, seen } = fakeBase({ permit: PERMIT });
+    const quote = await quoteSwap({ provider, chain: BASE, from: FROM, tokenIn: USDC, tokenOut: SATORI, amountIn: 1_000_000n });
+    expect(quote.needsApproval).toBe(true);
+    const plan = await buildSwapPlan({ provider, chain: BASE, quote, slippageBps: 50, signPermit });
+    if (plan.kind !== 'swap') throw new Error('expected a swap plan');
+    expect(plan.viaPermit).toBe(true);
+    expect(plan.to).toBe(D.swapRouter02);
+    // What was signed: the router, this amount, the token's own nonce, the swap's deadline.
+    const deadline = BLOCK_TIME + BigInt(SWAP_DEADLINE_SECONDS);
+    const data = permitTypedData({
+      name: 'USD Coin',
+      version: '2',
+      chainId: 8453,
+      token: USDC_ADDR,
+      owner: FROM,
+      spender: D.swapRouter02,
+      value: 1_000_000n,
+      nonce: 5n,
+      deadline,
+    });
+    const permit = { token: USDC_ADDR, value: 1_000_000n, deadline, ...splitPermitSignature(signTypedData(data, FROM_KEY)) };
+    expect(bytesToHex(plan.data)).toBe(
+      bytesToHex(
+        encodeSwap({ deployment: D, hops: quote.hops, recipient: FROM, amountIn: 1_000_000n, amountOutMinimum: plan.minimumOut, deadline, nativeOut: false, permit }),
+      ),
+    );
+    expect(bytesToHex(plan.data)).toContain(encodeSelfPermitIfNecessary(permit).slice(2));
+    // The node simulated it, permit and all, before it became a plan.
+    expect(seen.some((r) => r.method === 'eth_estimateGas')).toBe(true);
+  });
+
+  it('30. a token with no permit, or one whose domain the wallet cannot match, is not signed for', async () => {
+    const sign = vi.fn(signPermit);
+    const plain = fakeBase();
+    const quote = await quoteSwap({ provider: plain.provider, chain: BASE, from: FROM, tokenIn: USDC, tokenOut: SATORI, amountIn: 1_000_000n });
+    await expect(buildSwapPlan({ provider: plain.provider, chain: BASE, quote, slippageBps: 50, signPermit: sign })).rejects.toMatchObject({
+      code: 'gated',
+      message: 'Approve USDC first, then swap.',
+    });
+    const odd = fakeBase({ permit: { ...PERMIT, version: '7' } });
+    await expect(buildSwapPlan({ provider: odd.provider, chain: BASE, quote, slippageBps: 50, signPermit: sign })).rejects.toMatchObject({ code: 'gated' });
+    expect(sign).not.toHaveBeenCalled();
+  });
+
+  it('31. with the allowance already there nothing is signed, and the coin never needs it', async () => {
+    const sign = vi.fn(signPermit);
+    const { provider } = fakeBase({ permit: PERMIT, allowance: 10n ** 30n });
+    const quote = await quoteSwap({ provider, chain: BASE, from: FROM, tokenIn: USDC, tokenOut: SATORI, amountIn: 1_000_000n });
+    const plan = await buildSwapPlan({ provider, chain: BASE, quote, slippageBps: 50, signPermit: sign });
+    expect(plan).toMatchObject({ kind: 'swap', viaPermit: false });
+    const coin = await quoteSwap({ provider, chain: BASE, from: FROM, tokenIn: ETH, tokenOut: SATORI, amountIn: 10n ** 12n });
+    expect(await buildSwapPlan({ provider, chain: BASE, quote: coin, slippageBps: 50, signPermit: sign })).toMatchObject({ viaPermit: false });
+    expect(sign).not.toHaveBeenCalled();
+  });
+
+  it('32. a permit the token refuses means an approval; a swap that fails anyway is reported as that', async () => {
+    const refused = fakeBase({ permit: PERMIT, permitRefused: true });
+    const quote = await quoteSwap({ provider: refused.provider, chain: BASE, from: FROM, tokenIn: USDC, tokenOut: SATORI, amountIn: 1_000_000n });
+    await expect(buildSwapPlan({ provider: refused.provider, chain: BASE, quote, slippageBps: 50, signPermit })).rejects.toBeInstanceOf(SwapNeedsApprovalError);
+    expect(refused.seen.some((r) => r.method === 'eth_estimateGas')).toBe(false);
+    // The token takes the permit, the swap itself will not simulate: an approval would not help.
+    const broken = fakeBase({ permit: PERMIT, estimateReverts: 'execution reverted: Too little received' });
+    const failure = await buildSwapPlan({ provider: broken.provider, chain: BASE, quote, slippageBps: 50, signPermit }).catch((e: unknown) => e);
+    expect(failure).toMatchObject({ code: 'quote-failed', message: expect.stringContaining('Too little received') });
+    expect(failure).not.toBeInstanceOf(SwapNeedsApprovalError);
   });
 });

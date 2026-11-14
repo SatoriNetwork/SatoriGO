@@ -130,6 +130,7 @@ import {
   buildSwapPlan,
   quoteSwap,
   swapNeedsImpactAck,
+  SwapNeedsApprovalError,
   EMPTY_SWAP,
   SWAP_PLAN_MAX_AGE_MS,
   SWAP_FOLLOW_MAX_MS,
@@ -6659,9 +6660,32 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       const provider = await evmProviderFor(chain.key);
       if (!provider) throw new EvmSendError('no-engine', 'This build of Satori GO has no EVM engine.');
       const nativeBalanceBase = get().assets.find((a) => a.isNative && a.name === chain.nativeTicker)?.amountBase;
-      const plan = quote.needsApproval
-        ? await buildSwapApprovePlan({ provider, chain, quote, nativeBalanceBase })
-        : await buildSwapPlan({ provider, chain, quote, slippageBps, nativeBalanceBase });
+      // A token the router is not yet allowed: one transaction when the token
+      // can take the allowance as a signed permit inside the swap, else the
+      // approval first. Only "this needs an approval" falls back: any other
+      // refusal is the answer, and an approval would not change it.
+      let plan: SwapPlan | null = null;
+      if (quote.needsApproval) {
+        plan = await buildSwapPlan({
+          provider,
+          chain,
+          quote,
+          slippageBps,
+          nativeBalanceBase,
+          signPermit: (data) => {
+            const signed = svc.signTypedDataEvm(data);
+            // The key that signs must be the account the swap is planned for.
+            if (signed.address.toLowerCase() !== quote.from.toLowerCase()) throw new Error('signer is not the swapping account');
+            return signed.signature;
+          },
+        }).catch((err: unknown) => {
+          if (err instanceof SwapNeedsApprovalError) return null;
+          throw err;
+        });
+        plan ??= await buildSwapApprovePlan({ provider, chain, quote, nativeBalanceBase });
+      } else {
+        plan = await buildSwapPlan({ provider, chain, quote, slippageBps, nativeBalanceBase });
+      }
       if (abandoned()) return null;
       set((s) => ({ swap: { ...s.swap, plan, planning: false } }));
       return plan;
@@ -6769,17 +6793,19 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       { address: plan.from, tx: pending, at: Date.now() },
       ...localPendingTxs.filter((p) => p.tx.txid !== pending.txid),
     ];
-    const amount = (base: bigint, token: SwapToken) => `${formatListAmount(base, token.decimals)} ${token.symbol}`;
     set((s) => ({
       txs: [pending, ...s.txs.filter((t) => t.txid !== pending.txid)].sort(compareLiveTx),
       swap: EMPTY_SWAP,
       swapStatus: {
         txid: result.txid,
+        from: plan.from,
         chainKey: chain.key,
         chainName: chain.displayName,
         explorerUrl: done.explorerUrl,
-        payText: amount(plan.amountIn, plan.tokenIn),
-        receiveText: amount(plan.amountOut, plan.tokenOut),
+        payAmount: formatListAmount(plan.amountIn, plan.tokenIn.decimals),
+        paySymbol: plan.tokenIn.symbol,
+        receiveAmount: formatListAmount(plan.amountOut, plan.tokenOut.decimals),
+        receiveSymbol: plan.tokenOut.symbol,
         state: 'pending',
       },
     }));

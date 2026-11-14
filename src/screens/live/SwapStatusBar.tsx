@@ -12,16 +12,11 @@ import { useLiveStore } from '../../store/liveStore';
 /** How long a confirmed swap stays on screen before it clears itself. */
 export const SWAP_STATUS_CLEAR_MS = 8000;
 
-/** "10 USDC" with the symbol made safe to draw. */
-function shown(text: string): string {
-  const at = text.lastIndexOf(' ');
-  return at < 0 ? text : `${text.slice(0, at)} ${displaySymbol(text.slice(at + 1))}`;
-}
-
 export function SwapStatusBar() {
   const status = useLiveStore((s) => s.swapStatus);
   const dismiss = useLiveStore((s) => s.dismissSwapStatus);
   const activeChainKey = useLiveStore((s) => s.evm.activeChainKey);
+  const address = useLiveStore((s) => s.address);
 
   const txid = status?.txid;
   const state = status?.state;
@@ -31,12 +26,13 @@ export function SwapStatusBar() {
     return () => clearTimeout(timer);
   }, [txid, state, dismiss]);
 
-  // A swap belongs to the network it was sent on.
-  if (!status || status.chainKey !== activeChainKey) return null;
-  const pay = shown(status.payText);
-  const receive = shown(status.receiveText);
+  // A swap belongs to the account that sent it, on the network it was sent on.
+  if (!status || status.chainKey !== activeChainKey || status.from !== address) return null;
+  const receiveSymbol = displaySymbol(status.receiveSymbol);
+  const pay = `${status.payAmount} ${displaySymbol(status.paySymbol)}`;
+  const receive = `${status.receiveAmount} ${receiveSymbol}`;
   const text = {
-    pending: { title: `Swapping ${pay} for ${receive.slice(receive.lastIndexOf(' ') + 1)}`, detail: `Waiting for ${status.chainName} to confirm` },
+    pending: { title: `Swapping ${pay} for ${receiveSymbol}`, detail: `Waiting for ${status.chainName} to confirm` },
     confirmed: { title: 'Swap complete', detail: `${pay} for about ${receive}` },
     failed: { title: 'Swap failed', detail: 'Nothing was swapped. The network fee was still paid.' },
     late: { title: 'Swap still pending', detail: `${status.chainName} has not confirmed it yet. It may still go through.` },

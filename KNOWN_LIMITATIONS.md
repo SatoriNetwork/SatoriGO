@@ -470,7 +470,12 @@ confirmed by the owner on mainnet (item 7). Nothing below is marketing.
     low. The deadline is counted from the chain's clock, and a reviewed swap
     has to be priced again after two minutes. An approval that is confirmed and
     then not followed by its swap leaves Uniswap's router allowed that exact
-    amount and no more. The wallet cannot tell whether a token it does not
+    amount and no more. Where a token supports a signed permit (EIP-2612, with
+    a domain version of 1 or 2 that matches what the token publishes), the
+    allowance is signed when the swap is reviewed and sent inside the swap, so
+    there is one transaction; a token without one, with its own permit dialect,
+    or an account the token treats as a contract wallet (an EIP-7702
+    delegation) gets the two-step approval instead. The wallet cannot tell whether a token it does not
     vouch for can be sold again after it is bought. The wallet's own swap fee
     is 0 and switched off in this build; the code for it is present (the fee
     would come off the token received, through the router's own fee call,

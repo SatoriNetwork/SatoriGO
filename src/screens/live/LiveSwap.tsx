@@ -2,9 +2,10 @@
 //
 // The wallet finds the route and builds the transaction itself against pinned
 // contracts (src/store/evmSwap.ts), so this screen only ever shows and confirms
-// what the store planned. A token swap can take two transactions: an approval
-// for the exact amount, then the swap. Each one gets the same review, arming
-// gate and password as a send.
+// what the store planned. A token swap needs the router allowed the exact
+// amount first: as a signed permit inside the swap when the token supports one
+// (one transaction), else as an approval before it (two). Each transaction
+// gets the same review, arming gate and password as a send.
 //
 // The form is the two amounts: what you pay over what you receive, in one
 // panel, with the token of each side on a pill that opens the token list.
@@ -420,6 +421,12 @@ export function LiveSwap({ onBack, onDone }: LiveSwapProps) {
                 <span className="sum-val">{formatAmount(plan.feeAmount, plan.tokenOut.decimals)} {displaySymbol(plan.tokenOut.symbol)}</span>
               </div>
             )}
+            {plan.kind === 'swap' && plan.viaPermit && (
+              <div className="sum-row" data-testid="live-swap-review-permit">
+                <span className="sum-key">Approval</span>
+                <span className="sum-val">Signed for exactly this amount, inside this swap</span>
+              </div>
+            )}
             <div className="sum-row" data-testid="live-swap-review-fee">
               <span className="sum-key">Network fee</span>
               <span className="sum-val">{formatAmount(plan.quote.estimatedTotal, nativeDecimals)} {ticker}</span>
@@ -599,7 +606,7 @@ export function LiveSwap({ onBack, onDone }: LiveSwapProps) {
             ? { label: 'Waiting for approval', ready: false }
             : !quote
               ? { label: error ? 'No swap available' : 'Getting a price...', ready: false }
-              : { label: quote.needsApproval ? `Approve ${inSymbol}` : 'Review swap', ready: !quoting && !planning };
+              : { label: 'Review swap', ready: !quoting && !planning };
 
   const amountNumber = (base: bigint, decimals: number) => Number(formatAmount(base, decimals));
   const rate =

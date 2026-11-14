@@ -21,7 +21,8 @@ import { planEvmCall, type EvmCallPlan } from './evmCall';
 import { EvmSendError, refuseLockedSatori } from './evmSend';
 import type { EvmWalletDataProvider } from '../services/chain/evm/evmProvider';
 import type { EvmRpcCall, EvmRpcBatchResult } from '../services/chain/evm/rpc';
-import type { SwapFee, SwapHop, UniswapV3Deployment } from '../services/chain/evm/uniswapV3';
+import type { SwapFee, SwapHop, SwapPermit, UniswapV3Deployment } from '../services/chain/evm/uniswapV3';
+import type { TypedData } from '../services/chain/evm/typedData';
 import type { EvmChainInfo } from './evmChains';
 
 type EvmMods = NonNullable<Awaited<ReturnType<typeof loadEvmModules>>>;
@@ -121,6 +122,9 @@ export type SwapPlan = EvmCallPlan &
         feeAmount: bigint;
         /** When this was priced, on this computer's clock (SWAP_PLAN_MAX_AGE_MS). */
         plannedAt: number;
+        /** True when the allowance rides inside this transaction as a signed
+         *  permit, so no separate approval was needed. */
+        viaPermit: boolean;
         slippageBps: number;
         impactBps: number | null;
         hops: SwapHop[];
@@ -141,13 +145,18 @@ export const EMPTY_SWAP: SwapState = Object.freeze({ quote: null, quoting: false
 /** A swap this wallet just sent, followed until the chain answers. Home shows it. */
 export interface SwapStatus {
   txid: string;
+  /** The account that sent it: the bar is that account's, on that network. */
+  from: string;
   chainKey: string;
   chainName: string;
   explorerUrl: string;
-  /** "10 USDC" and "32.52 SATORI", ready to draw. The second is the quote, not
-   *  a figure read back from the chain. */
-  payText: string;
-  receiveText: string;
+  /** Amounts as text ("10", "32.52") and the raw token symbols, kept apart so
+   *  the screen can make each symbol safe to draw. What is received is the
+   *  quote, not a figure read back from the chain. */
+  payAmount: string;
+  paySymbol: string;
+  receiveAmount: string;
+  receiveSymbol: string;
   /** `late`: no answer within SWAP_FOLLOW_MAX_MS; it may still confirm. */
   state: 'pending' | 'confirmed' | 'failed' | 'late';
 }
@@ -155,6 +164,18 @@ export interface SwapStatus {
 /** How often, and for how long, a sent swap is watched for its receipt. */
 export const SWAP_FOLLOW_POLL_MS = 1_500;
 export const SWAP_FOLLOW_MAX_MS = 180_000;
+
+/** The one refusal an approval fixes: the router may not yet take the input
+ *  token, and no signed permit can stand in. Its own class so the store falls
+ *  back to the approval step for this and for nothing else. */
+export class SwapNeedsApprovalError extends EvmSendError {
+  constructor(symbol: string) {
+    super('gated', `Approve ${symbol} first, then swap.`);
+    this.name = 'SwapNeedsApprovalError';
+  }
+}
+
+const hex = (bytes: Uint8Array): string => Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
 
 /** True when this chain has a pinned Uniswap deployment in this build. */
 export async function swapSupported(chainKey: string): Promise<boolean> {
@@ -369,6 +390,79 @@ async function refuseLocked(provider: EvmWalletDataProvider, chain: EvmChainInfo
   }
 }
 
+/**
+ * A signed allowance for the router: exactly the amount being swapped, good
+ * until the swap's own deadline. Null when the token has no permit this wallet
+ * can use, which sends the caller back to an ordinary approval.
+ *
+ * Nothing is taken on trust. The token's name and nonce are read from the
+ * chain, and its version is whichever one makes the standard's domain hash
+ * equal the DOMAIN_SEPARATOR the token itself publishes; a token that matches
+ * none is not signed for at all. The signed permit is then shown to the token
+ * in a simulation, and one it refuses is dropped.
+ *
+ * The signature only allows Uniswap's router, which only ever moves the
+ * tokens of whoever calls it, so a plan that is reviewed and then abandoned
+ * leaves nothing behind that anyone else can use.
+ */
+async function signSwapPermit(
+  evm: EvmMods,
+  provider: EvmWalletDataProvider,
+  chain: EvmChainInfo,
+  deployment: UniswapV3Deployment,
+  quote: SwapQuote,
+  deadline: bigint,
+  sign: (data: TypedData) => string,
+): Promise<SwapPermit | null> {
+  const token = quote.tokenIn.address;
+  if (token === null) return null;
+  try {
+    const [nameAnswer, separatorAnswer, nonceAnswer] = await batch(provider, chain, [
+      ethCall(token, evm.encodeName()),
+      ethCall(token, evm.UNISWAP_V3_SELECTORS.DOMAIN_SEPARATOR),
+      ethCall(token, evm.UNISWAP_V3_SELECTORS.nonces + quote.from.slice(2).toLowerCase().padStart(64, '0')),
+    ]);
+    const name = read(nameAnswer, (r) => evm.decodeString(r as string));
+    const separator = read(separatorAnswer, (r) => (typeof r === 'string' && /^0x[0-9a-fA-F]{64}$/.test(r) ? r.toLowerCase() : null));
+    const nonce = read(nonceAnswer, (r) => evm.decodeUint256(r as string));
+    if (!name || !separator || nonce === null) return null;
+    const version = PERMIT_VERSIONS.find((v) => evm.permitDomainSeparator(name, v, chain.chainId, token) === separator);
+    if (!version) return null;
+    const data = evm.permitTypedData({
+      name,
+      version,
+      chainId: chain.chainId,
+      token,
+      owner: quote.from,
+      spender: deployment.swapRouter02,
+      value: quote.amountIn,
+      nonce,
+      deadline,
+    });
+    const permit = { token, value: quote.amountIn, deadline, ...evm.splitPermitSignature(sign(data)) };
+    // Ask the token itself, through the router, before building a swap on it.
+    // A permit it refuses (its own dialect, an account it treats as a contract
+    // wallet) means an approval; and a swap that then fails to simulate has
+    // failed for a reason an approval would not fix, so it is reported, not
+    // papered over with a first step the user would pay for.
+    const [accepted] = await batch(provider, chain, [
+      {
+        method: 'eth_call',
+        params: [
+          { from: quote.from, to: deployment.swapRouter02, data: `0x${hex(evm.encodeMulticall(deadline, [evm.encodeSelfPermitIfNecessary(permit)]))}` },
+          'latest',
+        ],
+      },
+    ]);
+    return accepted && accepted.ok ? permit : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The permit domain versions in use: OpenZeppelin tokens say "1", USDC says "2". */
+const PERMIT_VERSIONS: readonly string[] = ['1', '2'];
+
 /** The route must be one this wallet could have built: from the token paid to
  *  the token received, through nothing but the pinned intermediates. The quote
  *  only ever comes from quoteSwap, so this is a second lock, not the first. */
@@ -433,6 +527,10 @@ export async function buildSwapPlan(args: {
   quote: SwapQuote;
   slippageBps: number;
   nativeBalanceBase?: bigint;
+  /** Signs typed data with the sending account, returning 0x r||s||v. When
+   *  given, a token the router is not yet allowed is covered by a signed permit
+   *  inside the swap, if the token supports one, instead of being refused. */
+  signPermit?: (data: TypedData) => string;
   /** Tests only: the compiled-in fee constants are used when absent. */
   feeConfig?: SwapFeeConfig;
 }): Promise<SwapPlan> {
@@ -461,10 +559,13 @@ export async function buildSwapPlan(args: {
   if (grossOut === null || grossOut <= 0n || chainTime === null || chainTime <= 0n) {
     throw new EvmSendError('quote-failed', 'Uniswap could not quote this swap right now. Try again.');
   }
+  const deadline = chainTime + BigInt(SWAP_DEADLINE_SECONDS);
+  let permit: SwapPermit | null = null;
   if (!nativeIn) {
     const allowance = read(allowed, (r) => evm.decodeUint256(r as string));
     if (allowance === null || allowance < quote.amountIn) {
-      throw new EvmSendError('gated', `Approve ${quote.tokenIn.symbol} first, then swap.`);
+      permit = args.signPermit ? await signSwapPermit(evm, provider, chain, deployment, quote, deadline, args.signPermit) : null;
+      if (!permit) throw new SwapNeedsApprovalError(quote.tokenIn.symbol);
     }
   }
   const fee = swapFeeFor(chain.key, quote.tokenOut, args.feeConfig);
@@ -486,9 +587,10 @@ export async function buildSwapPlan(args: {
         recipient: quote.from,
         amountIn: quote.amountIn,
         amountOutMinimum: minimumOut,
-        deadline: chainTime + BigInt(SWAP_DEADLINE_SECONDS),
+        deadline,
         nativeOut,
         fee,
+        permit,
       }),
       value: nativeIn ? quote.amountIn : 0n,
       description: `Swap ${amountText(quote.amountIn, quote.tokenIn)} for at least ${amountText(minimumOut, quote.tokenOut)} on Uniswap.`,
@@ -505,6 +607,7 @@ export async function buildSwapPlan(args: {
     feeBps: fee?.bips ?? 0,
     feeAmount: grossOut - amountOut,
     plannedAt: Date.now(),
+    viaPermit: permit !== null,
     slippageBps,
     impactBps,
     hops: quote.hops,

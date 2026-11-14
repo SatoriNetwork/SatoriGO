@@ -30,7 +30,15 @@ import {
   beforeSwapFee,
   encodeSweepTokenWithFee,
   encodeUnwrapWETH9WithFee,
+  encodeSelfPermitIfNecessary,
+  permitDomainSeparator,
+  permitTypedData,
+  splitPermitSignature,
 } from './uniswapV3';
+import { signTypedData, typedDataDigest } from './typedData';
+import { secp256k1 } from '@noble/curves/secp256k1';
+import { hexToBytes } from '@noble/hashes/utils';
+import { publicKeyToEvmAddress } from './keys';
 
 const BASE = UNISWAP_V3.base;
 const WETH = BASE.wrappedNative;
@@ -63,6 +71,9 @@ describe('pinned Uniswap v3 deployments', () => {
       unwrapWETH9: 'unwrapWETH9(uint256,address)',
       sweepTokenWithFee: 'sweepTokenWithFee(address,uint256,address,uint256,address)',
       unwrapWETH9WithFee: 'unwrapWETH9WithFee(uint256,address,uint256,address)',
+      selfPermitIfNecessary: 'selfPermitIfNecessary(address,uint256,uint256,uint8,bytes32,bytes32)',
+      DOMAIN_SEPARATOR: 'DOMAIN_SEPARATOR()',
+      nonces: 'nonces(address)',
       factory: 'factory()',
       WETH9: 'WETH9()',
     };
@@ -260,5 +271,58 @@ describe('slippage and price impact', () => {
     expect(priceImpactBps(1001n, 1000n)).toBe(0);
     expect(priceImpactBps(0n, 1000n)).toBe(10_000);
     expect(priceImpactBps(5n, 0n)).toBeNull();
+  });
+});
+
+describe('permit: the allowance as a signature inside the swap', () => {
+  const KEY = hexToBytes('1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727');
+  const OWNER = '0x9858EfFD232B4033E47d90003D41EC34EcaEda94';
+  const data = permitTypedData({
+    name: 'Satori',
+    version: '1',
+    chainId: 8453,
+    token: SATORI,
+    owner: OWNER,
+    spender: BASE.swapRouter02,
+    value: 10_000_000n,
+    nonce: 5n,
+    deadline: 1_800_001_200n,
+  });
+
+  it('the domain separator depends on every part of the domain', () => {
+    const sep = permitDomainSeparator('Satori', '1', 8453, SATORI);
+    expect(sep).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(permitDomainSeparator('Satori', '2', 8453, SATORI)).not.toBe(sep);
+    expect(permitDomainSeparator('Satori', '1', 1, SATORI)).not.toBe(sep);
+    expect(permitDomainSeparator('satori', '1', 8453, SATORI)).not.toBe(sep);
+    expect(permitDomainSeparator('Satori', '1', 8453, USDC)).not.toBe(sep);
+    // USD Coin on Ethereum, a published value: the hashing is the standard's.
+    expect(permitDomainSeparator('USD Coin', '2', 1, '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48')).toBe(
+      '0x06c37168a7db5138defc7866392bb87a741f9b3d104deb5094588ce041cae335',
+    );
+  });
+
+  it('the signed permit recovers to its owner and names the spender and the exact amount', () => {
+    expect(data.message).toEqual({ owner: OWNER, spender: BASE.swapRouter02, value: '10000000', nonce: '5', deadline: '1800001200' });
+    const { v, r, s } = splitPermitSignature(signTypedData(data, KEY));
+    const sig = new secp256k1.Signature(BigInt(r), BigInt(s)).addRecoveryBit(v - 27);
+    expect(publicKeyToEvmAddress(sig.recoverPublicKey(typedDataDigest(data)).toRawBytes(false))).toBe(OWNER);
+    expect(() => splitPermitSignature('0x1234')).toThrow(/65 bytes/);
+    expect(() => splitPermitSignature(`0x${'11'.repeat(64)}00`)).toThrow(/27 or 28/);
+  });
+
+  it('goes first in the multicall, and only for the token and amount being swapped', () => {
+    const permit = { token: SATORI, value: 10_000_000n, deadline: 99n, v: 28, r: `0x${'aa'.repeat(32)}`, s: `0x${'bb'.repeat(32)}` };
+    expect(encodeSelfPermitIfNecessary(permit)).toBe(
+      `0xc2e3140a${pad(satori)}${word(10_000_000)}${word(99)}${word(28)}${'aa'.repeat(32)}${'bb'.repeat(32)}`,
+    );
+    const hops = [{ tokenIn: SATORI, tokenOut: USDC, fee: 3000 }];
+    const args = { deployment: BASE, hops, recipient: USER, amountIn: 10_000_000n, amountOutMinimum: 5n, deadline: 99n, nativeOut: false };
+    const swap = encodeExactInput({ hops, recipient: USER, amountIn: 10_000_000n, amountOutMinimum: 5n });
+    expect(bytesToHex(encodeSwap({ ...args, permit }))).toBe(bytesToHex(encodeMulticall(99n, [encodeSelfPermitIfNecessary(permit), swap])));
+    expect(() => encodeSwap({ ...args, permit: { ...permit, value: 10_000_001n } })).toThrow(/permit/);
+    expect(() => encodeSwap({ ...args, permit: { ...permit, token: USDC } })).toThrow(/permit/);
+    expect(() => encodeSelfPermitIfNecessary({ ...permit, r: '0x12' })).toThrow(/bytes32/);
+    expect(() => encodeSelfPermitIfNecessary({ ...permit, v: 1 })).toThrow(/27 or 28/);
   });
 });
