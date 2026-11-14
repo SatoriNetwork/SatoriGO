@@ -146,7 +146,20 @@ function setup(swap: Partial<SwapState> = {}, chain: EvmChainInfo = BASE) {
   return { onBack };
 }
 
-const pick = (testId: string, value: string) => fireEvent.change(screen.getByTestId(testId), { target: { value } });
+/** Open one side's token list and choose a token from it. */
+const pick = (testId: string, value: string) => {
+  fireEvent.click(screen.getByTestId(testId));
+  fireEvent.click(screen.getByTestId(`live-swap-option-${value}`));
+};
+const USDC_KEY = USDC_ADDR.toLowerCase();
+const SATORI_KEY = SATORI_ADDR.toLowerCase();
+/** The form as a user leaves it before a quote: 2 USDC for SATORI. */
+const fill = (amount = '2') => {
+  pick('live-swap-token-in', USDC_KEY);
+  pick('live-swap-token-out', SATORI_KEY);
+  fireEvent.change(screen.getByTestId('live-swap-amount'), { target: { value: amount } });
+};
+const button = () => screen.getByTestId('live-swap-review-btn') as HTMLButtonElement;
 
 beforeAll(async () => {
   (globalThis as { WebSocket?: unknown }).WebSocket = NoNetWebSocket;
@@ -172,8 +185,8 @@ describe('LiveSwap', () => {
 
   it('asks for a quote once two tokens and an amount are in, in base units of the token paid', async () => {
     setup();
-    pick('live-swap-token-in', USDC_ADDR.toLowerCase());
-    pick('live-swap-token-out', SATORI_ADDR.toLowerCase());
+    pick('live-swap-token-in', USDC_KEY);
+    pick('live-swap-token-out', SATORI_KEY);
     fireEvent.change(screen.getByTestId('live-swap-amount'), { target: { value: '2' } });
     await waitFor(() => expect(spies.quoteSwap).toHaveBeenCalledTimes(1), { timeout: 2000 });
     expect(spies.quoteSwap).toHaveBeenCalledWith(USDC, SATORI, 2_000_000n);
@@ -181,28 +194,37 @@ describe('LiveSwap', () => {
 
   it('refuses an amount above the balance before any review', () => {
     setup({ quote: QUOTE });
-    pick('live-swap-token-in', USDC_ADDR.toLowerCase());
-    pick('live-swap-token-out', SATORI_ADDR.toLowerCase());
-    fireEvent.change(screen.getByTestId('live-swap-amount'), { target: { value: '6' } });
-    expect(screen.getByText('More than this address holds.')).toBeTruthy();
-    expect((screen.getByTestId('live-swap-review-btn') as HTMLButtonElement).disabled).toBe(true);
+    fill('6');
+    expect(button().textContent).toBe('Not enough USDC');
+    expect(button().disabled).toBe(true);
+    expect(screen.getByTestId('live-swap-amount').getAttribute('aria-invalid')).toBe('true');
   });
 
   it('shows the quote, and plans the next step with the chosen slippage', () => {
     setup({ quote: QUOTE });
-    expect(screen.getByTestId('live-swap-quote-out').textContent).toContain('6.5 SATORI');
+    fill();
+    expect(screen.getByTestId('live-swap-quote-out').textContent).toBe('6.5');
+    expect(screen.getByTestId('live-swap-details-toggle').textContent).toContain('1 USDC ≈ 3.25 SATORI');
     expect(screen.getByTestId('live-swap-quote-impact').textContent).toContain('0.4%');
     expect(screen.queryByTestId('live-swap-impact-warning')).toBeNull();
+    // Slippage sits behind the header control, the rest behind the rate line.
+    expect(screen.queryByTestId('live-swap-slippage-100')).toBeNull();
+    fireEvent.click(screen.getByTestId('live-swap-settings'));
     fireEvent.click(screen.getByTestId('live-swap-slippage-100'));
-    const review = screen.getByTestId('live-swap-review-btn');
-    expect(review.textContent).toBe('Review swap');
-    fireEvent.click(review);
+    expect(screen.queryByTestId('live-swap-details')).toBeNull();
+    fireEvent.click(screen.getByTestId('live-swap-details-toggle'));
+    expect(screen.getByTestId('live-swap-details').textContent).toContain('USDC › SATORI');
+    expect(screen.getByTestId('live-swap-details').textContent).toContain('6.435 SATORI'); // 1% under 6.5
+    expect(button().textContent).toBe('Review swap');
+    fireEvent.click(button());
     expect(spies.planSwap).toHaveBeenCalledWith(100);
   });
 
   it('names the approval step when the token is not yet allowed, and warns about a thin pool', () => {
     setup({ quote: { ...QUOTE, needsApproval: true, impactBps: 850 } });
-    expect(screen.getByTestId('live-swap-review-btn').textContent).toBe('Approve USDC');
+    fill();
+    expect(button().textContent).toBe('Approve USDC');
+    expect(screen.getByTestId('live-swap-quote-impact').className).toContain('warn');
     expect(screen.getByTestId('live-swap-impact-warning').textContent).toContain('8.5% less');
   });
 
@@ -210,7 +232,7 @@ describe('LiveSwap', () => {
     setup();
     pick('live-swap-token-out', JUNK_ADDR.toLowerCase());
     expect(screen.getByTestId('live-swap-unverified').textContent).toContain(JUNK_ADDR);
-    pick('live-swap-token-out', SATORI_ADDR.toLowerCase());
+    pick('live-swap-token-out', SATORI_KEY);
     expect(screen.queryByTestId('live-swap-unverified')).toBeNull();
   });
 
@@ -287,15 +309,16 @@ describe('LiveSwap', () => {
         <LiveSwap onBack={() => {}} />
       </NavProvider>,
     );
-    const labels = Array.from((screen.getByTestId('live-swap-token-in') as HTMLSelectElement).options).map((o) => o.textContent);
-    expect(labels).toContain('USDC');
-    expect(labels).toContain('USDC (0xfB69…d359)');
-    pick('live-swap-token-in', JUNK_ADDR.toLowerCase());
-    expect(screen.queryByText(/Balance:/)).toBeNull();
+    fireEvent.click(screen.getByTestId('live-swap-token-in'));
+    expect(screen.getByTestId(`live-swap-option-${USDC_KEY}`).textContent).toBe('USDC5');
+    expect(screen.getByTestId(`live-swap-option-${JUNK_ADDR.toLowerCase()}`).textContent).toBe('UUSDC (0xfB69…d359)Not verified') // a letter badge, then the label;
+    fireEvent.click(screen.getByTestId(`live-swap-option-${JUNK_ADDR.toLowerCase()}`));
+    expect(screen.getByTestId('live-swap-token-in').textContent).toBe('UUSDC (0xfB69…d359)'); // a letter, not USDC's mark
+    expect(screen.queryByTestId('live-swap-balance')).toBeNull();
     expect(screen.queryByTestId('live-swap-max')).toBeNull();
     // The real one still shows its own.
-    pick('live-swap-token-in', USDC_ADDR.toLowerCase());
-    expect(screen.getByText('Balance: 5 USDC')).toBeTruthy();
+    pick('live-swap-token-in', USDC_KEY);
+    expect(screen.getByTestId('live-swap-balance').textContent).toBe('Balance 5 · Max');
   });
 
   it('review: a swap priced more than two minutes ago cannot be confirmed until it is priced again', () => {
@@ -310,11 +333,13 @@ describe('LiveSwap', () => {
   it('where pending swaps are public it says so and offers no wide slippage', () => {
     setup({}, { ...BASE, key: 'ethereum', displayName: 'Ethereum' });
     expect(screen.getByTestId('live-swap-mempool-note').textContent).toContain('trading bots');
+    fireEvent.click(screen.getByTestId('live-swap-settings'));
     expect(screen.queryByTestId('live-swap-slippage-300')).toBeNull();
     expect(screen.getByTestId('live-swap-slippage-100')).toBeTruthy();
     cleanup();
     setup();
     expect(screen.queryByTestId('live-swap-mempool-note')).toBeNull();
+    fireEvent.click(screen.getByTestId('live-swap-settings'));
     expect(screen.getByTestId('live-swap-slippage-300')).toBeTruthy();
   });
 
@@ -331,10 +356,40 @@ describe('LiveSwap', () => {
     expect(screen.getByTestId('live-swap-review-wallet-fee').textContent).toContain('0.016 SATORI');
   });
 
+  it('the button names what is still missing, one thing at a time', () => {
+    setup();
+    expect(button().textContent).toBe('Choose a token');
+    expect(screen.getByTestId('live-swap-token-out').textContent).toBe('Choose token');
+    pick('live-swap-token-out', SATORI_KEY);
+    expect(button().textContent).toBe('Enter an amount');
+    fireEvent.change(screen.getByTestId('live-swap-amount'), { target: { value: 'abc' } });
+    expect(button().textContent).toBe('Enter a valid amount');
+    fireEvent.change(screen.getByTestId('live-swap-amount'), { target: { value: '0.01' } });
+    expect(button().textContent).toBe('Getting a price...');
+    expect(button().disabled).toBe(true);
+    expect(screen.getByTestId('live-swap-quote-out').textContent).toBe('0');
+  });
+
+  it('choosing the other side\'s token swaps the two, and the flip button does the same', () => {
+    setup();
+    pick('live-swap-token-out', SATORI_KEY);
+    pick('live-swap-token-in', SATORI_KEY);
+    expect(screen.getByTestId('live-swap-token-in').textContent).toContain('SATORI');
+    expect(screen.getByTestId('live-swap-token-out').textContent).toContain('ETH');
+    fireEvent.click(screen.getByTestId('live-swap-flip'));
+    expect(screen.getByTestId('live-swap-token-in').textContent).toContain('ETH');
+    expect(screen.getByTestId('live-swap-token-out').textContent).toContain('SATORI');
+    // The list closes on a choice and on a click outside it.
+    expect(screen.queryByTestId('live-swap-sheet')).toBeNull();
+    fireEvent.click(screen.getByTestId('live-swap-token-in'));
+    fireEvent.click(screen.getByTestId('live-swap-sheet').parentElement!);
+    expect(screen.queryByTestId('live-swap-sheet')).toBeNull();
+  });
+
   it('the coin has no Max, a token does', () => {
     setup();
     expect(screen.queryByTestId('live-swap-max')).toBeNull();
-    pick('live-swap-token-in', USDC_ADDR.toLowerCase());
+    pick('live-swap-token-in', USDC_KEY);
     fireEvent.click(screen.getByTestId('live-swap-max'));
     expect((screen.getByTestId('live-swap-amount') as HTMLInputElement).value).toBe('5');
   });

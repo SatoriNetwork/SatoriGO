@@ -5,13 +5,20 @@
 // what the store planned. A token swap can take two transactions: an approval
 // for the exact amount, then the swap. Each one gets the same review, arming
 // gate and password as a send.
+//
+// The form is the two amounts: what you pay over what you receive, in one
+// panel, with the token of each side on a pill that opens the token list.
+// Everything else (the rate, the route, slippage) stays folded until asked for,
+// and the one button names what is still missing.
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, ArrowDown, CheckCircle, ChevronLeft, Info } from 'lucide-react';
+import { AlertTriangle, ArrowDownUp, CheckCircle, ChevronDown, ChevronLeft, Info, SlidersHorizontal } from 'lucide-react';
+import { TokenIcon } from '../../components/BrandLogo';
 import { Button } from '../../components/Button';
 import { PasswordField, TextField } from '../../components/TextField';
 import { formatAmount, formatListAmount, parseAmount } from '../../services/chain/amounts';
 import { displaySymbol } from '../../services/displaySymbol';
+import { formatFiatValue } from '../../services/fiat';
 import { activeEvmChain, useLiveStore } from '../../store/liveStore';
 import {
   SWAP_IMPACT_WARN_BPS,
@@ -23,6 +30,7 @@ import {
 } from '../../store/evmSwap';
 import type { EvmFeeLevel } from '../../services/chain/evm/fees';
 import { LiveNav } from './LiveNav';
+import { typedAmountFiat, useAssetFiat } from './useFiat';
 
 interface LiveSwapProps {
   onBack(): void;
@@ -110,6 +118,10 @@ export function LiveSwap({ onBack }: LiveSwapProps) {
   const [passwordError, setPasswordError] = useState('');
   const [confirming, setConfirming] = useState(false);
   const [confirmError, setConfirmError] = useState('');
+  // Which side's token list is open, the folded details, the slippage panel.
+  const [sheet, setSheet] = useState<'in' | 'out' | null>(null);
+  const [showDetails, setShowDetails] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const [waitingApproval, setWaitingApproval] = useState(false);
   const [waitingSince, setWaitingSince] = useState(0);
   const [waitTimedOut, setWaitTimedOut] = useState(false);
@@ -146,6 +158,10 @@ export function LiveSwap({ onBack }: LiveSwapProps) {
     return row ? row.amountBase : null;
   };
   const balanceIn = balanceOf(tokenIn);
+  // A price is looked up by symbol, so only a token the wallet vouches for gets one.
+  const priced = (t: SwapToken | null) => (t && vouched.has(tokenKey(t)) ? t.symbol : '');
+  const fiatIn = useAssetFiat(priced(tokenIn), tokenIn?.address === null).unit;
+  const fiatOut = useAssetFiat(priced(tokenOut), tokenOut?.address === null).unit;
   const overBalance = amountIn !== null && balanceIn !== null && amountIn > balanceIn;
 
   // A clean slate on leaving: an armed plan must never survive a navigation.
@@ -220,7 +236,24 @@ export function LiveSwap({ onBack }: LiveSwapProps) {
     return known ? displaySymbol(known.symbol) : shortAddress(address);
   };
 
-  const pickFound = async (address: string, side: 'in' | 'out' = 'out') => {
+  /** Put a token on one side. Picking the other side's token swaps the two. */
+  const choose = (side: 'in' | 'out', key: string) => {
+    const other = side === 'in' ? outKey : inKey;
+    const mine = side === 'in' ? inKey : outKey;
+    if (key === other) {
+      const fallback = mine || options.map(tokenKey).find((k) => k !== key) || '';
+      if (side === 'in') setOutKey(fallback);
+      else setInKey(fallback);
+    }
+    if (side === 'in') setInKey(key);
+    else setOutKey(key);
+    setSheet(null);
+    setQuery('');
+    setHits([]);
+    setSearchError('');
+  };
+
+  const pickFound = async (address: string, side: 'in' | 'out') => {
     setSearchError('');
     setSearching(true);
     try {
@@ -230,20 +263,17 @@ export function LiveSwap({ onBack }: LiveSwapProps) {
         return;
       }
       setFound((list) => (list.some((t) => tokenKey(t) === tokenKey(resolved.token)) ? list : [...list, resolved.token]));
-      if (side === 'in') setInKey(tokenKey(resolved.token));
-      else setOutKey(tokenKey(resolved.token));
-      setQuery('');
-      setHits([]);
+      choose(side, tokenKey(resolved.token));
     } finally {
       setSearching(false);
     }
   };
 
-  const runSearch = async () => {
+  const runSearch = async (side: 'in' | 'out') => {
     const text = query.trim();
     if (!text) return;
     if (ADDRESS_RE.test(text)) {
-      await pickFound(text);
+      await pickFound(text, side);
       return;
     }
     setSearchError('');
@@ -258,13 +288,13 @@ export function LiveSwap({ onBack }: LiveSwapProps) {
     }
   };
 
-  const header = (title: string, back: () => void) => (
+  const header = (title: string, back: () => void, right?: JSX.Element) => (
     <div className="sub-header">
       <button type="button" className="icon-btn" onClick={back} aria-label="Back">
         <ChevronLeft size={20} />
       </button>
       <h2>{title}</h2>
-      <span />
+      {right ?? <span />}
     </div>
   );
 
@@ -544,134 +574,241 @@ export function LiveSwap({ onBack }: LiveSwapProps) {
   }
 
   const outUnverified = tokenOut !== null && !vouched.has(tokenKey(tokenOut));
-  const canReview = !!quote && !quoting && !planning && !overBalance && !waitingApproval;
   const publicMempool = SWAP_PUBLIC_MEMPOOL_CHAINS.includes(chain.key);
   const slippageChoices = SLIPPAGE_CHOICES.filter((bps) => !publicMempool || bps <= PUBLIC_MEMPOOL_MAX_SLIPPAGE_BPS);
 
+  // The one button says what is still missing, in the order it is needed.
+  const inSymbol = tokenIn ? displaySymbol(tokenIn.symbol) : '';
+  const step: { label: string; ready: boolean } = !tokenOut
+    ? { label: 'Choose a token', ready: false }
+    : amountError
+      ? { label: 'Enter a valid amount', ready: false }
+      : amountIn === null || amountIn <= 0n
+        ? { label: 'Enter an amount', ready: false }
+        : overBalance
+          ? { label: `Not enough ${inSymbol}`, ready: false }
+          : waitingApproval
+            ? { label: 'Waiting for approval', ready: false }
+            : !quote
+              ? { label: error ? 'No swap available' : 'Getting a price...', ready: false }
+              : { label: quote.needsApproval ? `Approve ${inSymbol}` : 'Review swap', ready: !quoting && !planning };
+
+  const amountNumber = (base: bigint, decimals: number) => Number(formatAmount(base, decimals));
+  const rate =
+    quote && quote.amountIn > 0n
+      ? amountNumber(quote.amountOut, quote.tokenOut.decimals) / amountNumber(quote.amountIn, quote.tokenIn.decimals)
+      : null;
+  const rateText = rate !== null && Number.isFinite(rate) && rate > 0 ? Number(rate.toPrecision(6)).toString() : null;
+  const impactTone =
+    !quote || (quote.impactBps !== null && quote.impactBps < SWAP_IMPACT_WARN_BPS)
+      ? ''
+      : swapNeedsImpactAck(quote.impactBps)
+        ? ' danger'
+        : ' warn';
+  const payFiat = typedAmountFiat(amountText, fiatIn);
+  const receiveFiat = quote ? typedAmountFiat(formatAmount(quote.amountOut, quote.tokenOut.decimals), fiatOut) : null;
+
+  /** A vouched token gets its mark. Anything else gets a plain letter: a mark
+   *  is looked up by symbol, and a symbol proves nothing. */
+  const mark = (t: SwapToken, size: number) =>
+    vouched.has(tokenKey(t)) ? (
+      <TokenIcon assetId={t.symbol} size={size} />
+    ) : (
+      <span className="swap-badge" style={{ width: size, height: size, fontSize: size * 0.45 }} aria-hidden="true">
+        {displaySymbol(t.symbol).slice(0, 1).toUpperCase() || '?'}
+      </span>
+    );
+
+  const pill = (side: 'in' | 'out', t: SwapToken | null) => (
+    <button
+      type="button"
+      className={t ? 'swap-token' : 'swap-token unset'}
+      onClick={() => setSheet(side)}
+      aria-label={side === 'in' ? 'Token to pay with' : 'Token to receive'}
+      aria-haspopup="dialog"
+      data-testid={`live-swap-token-${side}`}
+    >
+      {t && mark(t, 22)}
+      <span>{t ? optionLabel(t) : 'Choose token'}</span>
+      <ChevronDown size={14} />
+    </button>
+  );
+
   return (
     <div className="app-frame screen-enter">
-      {header('Swap', onBack)}
+      {header(
+        'Swap',
+        onBack,
+        <button
+          type="button"
+          className="icon-btn"
+          aria-label="Slippage settings"
+          aria-expanded={showSettings}
+          onClick={() => setShowSettings((v) => !v)}
+          data-testid="live-swap-settings"
+        >
+          <SlidersHorizontal size={18} />
+        </button>,
+      )}
       <div className="app-content" data-testid="live-swap">
-        <div className="section-label" style={{ marginTop: 0 }}>You pay</div>
-        <select
-          className="live-picker"
-          data-testid="live-swap-token-in"
-          aria-label="Token to pay with"
-          value={inKey}
-          onChange={(e) => {
-            if (e.target.value === outKey) setOutKey(inKey);
-            setInKey(e.target.value);
-          }}
-          style={{ width: '100%', marginBottom: 8 }}
-        >
-          {options.map((t) => (
-            <option key={tokenKey(t)} value={tokenKey(t)}>{optionLabel(t)}</option>
-          ))}
-        </select>
-        <TextField
-          label={`Amount${tokenIn ? ` (${displaySymbol(tokenIn.symbol)})` : ''}`}
-          placeholder="0.00"
-          inputMode="decimal"
-          autoComplete="off"
-          value={amountText}
-          onChange={(e) => setAmountText(e.target.value)}
-          error={amountError || (overBalance ? 'More than this address holds.' : undefined)}
-          hint={tokenIn && balanceIn !== null ? `Balance: ${formatListAmount(balanceIn, tokenIn.decimals)} ${displaySymbol(tokenIn.symbol)}` : undefined}
-          testId="live-swap-amount"
-          suffixEl={
-            tokenIn && tokenIn.address !== null && balanceIn !== null && balanceIn > 0n ? (
-              <button
-                type="button"
-                className="chip neutral"
-                style={{ cursor: 'pointer' }}
-                onClick={() => setAmountText(formatAmount(balanceIn, tokenIn.decimals))}
-                data-testid="live-swap-max"
-              >
-                Max
-              </button>
-            ) : undefined
-          }
-        />
-
-        <div style={{ display: 'flex', justifyContent: 'center', margin: '10px 0' }}>
-          <button
-            type="button"
-            className="icon-btn"
-            aria-label="Swap the two tokens around"
-            data-testid="live-swap-flip"
-            disabled={!tokenOut}
-            onClick={() => {
-              setInKey(outKey);
-              setOutKey(inKey);
-              setAmountText('');
-            }}
-          >
-            <ArrowDown size={18} />
-          </button>
-        </div>
-
-        <div className="section-label" style={{ marginTop: 0 }}>You receive</div>
-        <select
-          className="live-picker"
-          data-testid="live-swap-token-out"
-          aria-label="Token to receive"
-          value={outKey}
-          onChange={(e) => {
-            if (e.target.value === inKey) setInKey(outKey || 'native');
-            setOutKey(e.target.value);
-          }}
-          style={{ width: '100%', marginBottom: 8 }}
-        >
-          <option value="">Choose a token...</option>
-          {options.map((t) => (
-            <option key={tokenKey(t)} value={tokenKey(t)}>{optionLabel(t)}</option>
-          ))}
-        </select>
-        <TextField
-          label="Find another token"
-          placeholder="Name, symbol or contract address"
-          autoComplete="off"
-          spellCheck={false}
-          value={query}
-          onChange={(e) => {
-            setQuery(e.target.value);
-            setSearchError('');
-          }}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') void runSearch();
-          }}
-          error={searchError || undefined}
-          testId="live-swap-search"
-          suffixEl={
-            <button
-              type="button"
-              className="chip neutral"
-              style={{ cursor: 'pointer' }}
-              disabled={searching || query.trim() === ''}
-              onClick={() => void runSearch()}
-              data-testid="live-swap-search-go"
-            >
-              {searching ? '…' : 'Find'}
-            </button>
-          }
-        />
-        {hits.length > 0 && (
-          <div className="card" style={{ marginTop: 8, padding: 6 }} data-testid="live-swap-hits">
-            {hits.map((hit) => (
-              <button
-                key={hit.address}
-                type="button"
-                className="chip neutral"
-                style={{ display: 'flex', width: '100%', justifyContent: 'space-between', cursor: 'pointer', marginBottom: 4 }}
-                onClick={() => void pickFound(hit.address)}
-              >
-                <span>{displaySymbol(hit.symbol)} · {hit.name}</span>
-                <span className="mono" style={{ fontSize: 10.5 }}>{shortAddress(hit.address)}</span>
-              </button>
-            ))}
+        {showSettings && (
+          <div className="card" style={{ marginBottom: 12 }} data-testid="live-swap-settings-panel">
+            <div className="section-label" style={{ marginTop: 0 }}>Slippage</div>
+            <div style={{ display: 'flex', gap: 6 }}>
+              {slippageChoices.map((bps) => (
+                <button
+                  key={bps}
+                  type="button"
+                  className={slippageBps === bps ? 'chip' : 'chip neutral'}
+                  aria-pressed={slippageBps === bps}
+                  onClick={() => setSlippageBps(bps)}
+                  style={{ flex: 1, justifyContent: 'center', cursor: 'pointer' }}
+                  data-testid={`live-swap-slippage-${bps}`}
+                >
+                  {percent(bps)}
+                </button>
+              ))}
+            </div>
+            <div className="text-faint" style={{ fontSize: 11, marginTop: 8, lineHeight: 1.5 }}>
+              How far the price may move against you before the swap is cancelled instead.
+            </div>
           </div>
         )}
 
+        <div className="swap-panel">
+          <div className="swap-leg">
+            <label className="swap-leg-label" htmlFor="live-swap-amount-input">You pay</label>
+            <div className="swap-leg-main">
+              <input
+                id="live-swap-amount-input"
+                className="swap-amount"
+                placeholder="0"
+                inputMode="decimal"
+                autoComplete="off"
+                spellCheck={false}
+                value={amountText}
+                onChange={(e) => setAmountText(e.target.value)}
+                aria-invalid={!!amountError || overBalance}
+                data-testid="live-swap-amount"
+              />
+              {pill('in', tokenIn)}
+            </div>
+            <div className="swap-leg-sub">
+              <span data-testid="live-swap-pay-fiat">{payFiat ? formatFiatValue(payFiat) : ''}</span>
+              {tokenIn && balanceIn !== null && (
+                <span data-testid="live-swap-balance">
+                  Balance {formatListAmount(balanceIn, tokenIn.decimals)}
+                  {tokenIn.address !== null && balanceIn > 0n && (
+                    <>
+                      {' · '}
+                      <button
+                        type="button"
+                        className="swap-link"
+                        onClick={() => setAmountText(formatAmount(balanceIn, tokenIn.decimals))}
+                        data-testid="live-swap-max"
+                      >
+                        Max
+                      </button>
+                    </>
+                  )}
+                </span>
+              )}
+            </div>
+          </div>
+
+          <div className="swap-seam">
+            <button
+              type="button"
+              className="swap-flip"
+              aria-label="Swap the two tokens around"
+              data-testid="live-swap-flip"
+              disabled={!tokenOut}
+              onClick={() => {
+                setInKey(outKey);
+                setOutKey(inKey);
+                setAmountText('');
+              }}
+            >
+              <ArrowDownUp size={15} />
+            </button>
+          </div>
+
+          <div className="swap-leg">
+            <span className="swap-leg-label">You receive</span>
+            <div className="swap-leg-main">
+              <span className={quote ? 'swap-amount' : 'swap-amount empty'} data-testid="live-swap-quote-out" aria-live="polite">
+                {quote ? formatListAmount(quote.amountOut, quote.tokenOut.decimals) : '0'}
+              </span>
+              {pill('out', tokenOut)}
+            </div>
+            <div className="swap-leg-sub">
+              <span>{receiveFiat ? formatFiatValue(receiveFiat) : ''}</span>
+              {quote && quote.feeBps > 0 && (
+                <span data-testid="live-swap-quote-wallet-fee">after the {percent(quote.feeBps)} Satori GO fee</span>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {quote && (
+          <div data-testid="live-swap-quote">
+            <button
+              type="button"
+              className="swap-rate"
+              aria-expanded={showDetails}
+              onClick={() => setShowDetails((v) => !v)}
+              data-testid="live-swap-details-toggle"
+            >
+              <span>
+                {rateText ? `1 ${displaySymbol(quote.tokenIn.symbol)} ≈ ${rateText} ${displaySymbol(quote.tokenOut.symbol)}` : 'Details'}
+              </span>
+              <span className="swap-rate-end">
+                <span className={`swap-impact${impactTone}`} data-testid="live-swap-quote-impact">
+                  Price impact {impactText(quote.impactBps).toLowerCase()}
+                </span>
+                <ChevronDown size={14} style={showDetails ? { transform: 'rotate(180deg)' } : undefined} />
+              </span>
+            </button>
+            {showDetails && (
+              <div className="summary-table swap-details" data-testid="live-swap-details">
+                <div className="sum-row">
+                  <span className="sum-key">At least</span>
+                  <span className="sum-val">
+                    {formatListAmount((quote.amountOut * BigInt(10_000 - slippageBps)) / 10_000n, quote.tokenOut.decimals)}{' '}
+                    {displaySymbol(quote.tokenOut.symbol)}
+                  </span>
+                </div>
+                <div className="sum-row">
+                  <span className="sum-key">Slippage</span>
+                  <span className="sum-val">{percent(slippageBps)}</span>
+                </div>
+                <div className="sum-row">
+                  <span className="sum-key">Route</span>
+                  <span className="sum-val">
+                    {[displaySymbol(quote.tokenIn.symbol), ...quote.hops.slice(0, -1).map((h) => symbolOf(h.tokenOut)), displaySymbol(quote.tokenOut.symbol)].join(' › ')}
+                  </span>
+                </div>
+                <div className="sum-row">
+                  <span className="sum-key">Satori GO fee</span>
+                  <span className="sum-val">{quote.feeBps > 0 ? percent(quote.feeBps) : 'None'}</span>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {error && (
+          <div className="banner danger" style={{ marginTop: 12 }} data-testid="live-swap-error">
+            <AlertTriangle size={14} />
+            {error}
+          </div>
+        )}
+        {quote && quote.impactBps !== null && quote.impactBps >= SWAP_IMPACT_WARN_BPS && (
+          <div className="banner warning" style={{ marginTop: 12 }} data-testid="live-swap-impact-warning">
+            <AlertTriangle size={14} />
+            This pool is small next to your swap, so you receive {impactText(quote.impactBps)} less than the market price. A smaller amount loses less.
+          </div>
+        )}
         {outUnverified && tokenOut?.address && (
           <div className="banner warning" style={{ marginTop: 12 }} data-testid="live-swap-unverified">
             <AlertTriangle size={14} />
@@ -682,88 +819,14 @@ export function LiveSwap({ onBack }: LiveSwapProps) {
             </span>
           </div>
         )}
-
-        <div className="section-label">Slippage</div>
-        <div style={{ display: 'flex', gap: 6, marginBottom: 14 }}>
-          {slippageChoices.map((bps) => (
-            <button
-              key={bps}
-              type="button"
-              className={slippageBps === bps ? 'chip' : 'chip neutral'}
-              aria-pressed={slippageBps === bps}
-              onClick={() => setSlippageBps(bps)}
-              style={{ flex: 1, justifyContent: 'center', cursor: 'pointer' }}
-              data-testid={`live-swap-slippage-${bps}`}
-            >
-              {percent(bps)}
-            </button>
-          ))}
-        </div>
-
-        {publicMempool && (
-          <div className="text-faint" style={{ fontSize: 11, margin: '-6px 0 14px', lineHeight: 1.5 }} data-testid="live-swap-mempool-note">
-            On {chain.displayName}, pending swaps are public and trading bots can move the price against you, up to your slippage. Keep it low.
-          </div>
-        )}
-
-        {quoting && !quote && (
-          <div className="text-faint" style={{ fontSize: 12, marginBottom: 14 }} data-testid="live-swap-quoting">
-            Asking Uniswap for a price...
-          </div>
-        )}
-        {error && (
-          <div className="banner danger" style={{ marginBottom: 14 }} data-testid="live-swap-error">
-            <AlertTriangle size={14} />
-            {error}
-          </div>
-        )}
-
-        {quote && (
-          <div className="card solid" style={{ marginBottom: 14 }} data-testid="live-swap-quote">
-            <div className="summary-table">
-              <div className="sum-row" data-testid="live-swap-quote-out">
-                <span className="sum-key">You receive about</span>
-                <span className="sum-val">{formatListAmount(quote.amountOut, quote.tokenOut.decimals)} {displaySymbol(quote.tokenOut.symbol)}</span>
-              </div>
-              {quote.feeBps > 0 && (
-                <div className="sum-row" data-testid="live-swap-quote-wallet-fee">
-                  <span className="sum-key">Satori GO fee</span>
-                  <span className="sum-val">{percent(quote.feeBps)}, already taken off</span>
-                </div>
-              )}
-              <div className="sum-row" data-testid="live-swap-quote-impact">
-                <span className="sum-key">Price impact</span>
-                <span
-                  className="sum-val"
-                  style={quote.impactBps === null || quote.impactBps >= SWAP_IMPACT_WARN_BPS ? { color: 'var(--danger)' } : undefined}
-                >
-                  {impactText(quote.impactBps)}
-                </span>
-              </div>
-              <div className="sum-row">
-                <span className="sum-key">Route</span>
-                <span className="sum-val">
-                  {[displaySymbol(quote.tokenIn.symbol), ...quote.hops.slice(0, -1).map((h) => symbolOf(h.tokenOut)), displaySymbol(quote.tokenOut.symbol)].join(' › ')}
-                </span>
-              </div>
-            </div>
-          </div>
-        )}
-        {quote && quote.impactBps !== null && quote.impactBps >= SWAP_IMPACT_WARN_BPS && (
-          <div className="banner warning" style={{ marginBottom: 14 }} data-testid="live-swap-impact-warning">
-            <AlertTriangle size={14} />
-            This pool is small next to your swap, so you receive {impactText(quote.impactBps)} less than the market price. A smaller amount loses less.
-          </div>
-        )}
-
         {waitingApproval && !waitTimedOut && (
-          <div className="banner info" style={{ marginBottom: 14 }} data-testid="live-swap-waiting-approval">
+          <div className="banner info" style={{ marginTop: 12 }} data-testid="live-swap-waiting-approval">
             <Info size={14} />
             Approval sent. Waiting for {chain.displayName} to confirm it, then you can review the swap.
           </div>
         )}
         {waitingApproval && waitTimedOut && (
-          <div className="banner warning" style={{ marginBottom: 14 }} data-testid="live-swap-approval-late">
+          <div className="banner warning" style={{ marginTop: 12 }} data-testid="live-swap-approval-late">
             <AlertTriangle size={14} />
             <span>
               {chain.displayName} has not confirmed the approval yet. It may still be pending; Activity shows it.{' '}
@@ -776,19 +839,112 @@ export function LiveSwap({ onBack }: LiveSwapProps) {
 
         <Button
           block
-          disabled={!canReview}
+          disabled={!step.ready}
           loading={planning}
           onClick={() => void planSwap(slippageBps)}
+          style={{ marginTop: 14 }}
           data-testid="live-swap-review-btn"
         >
-          {waitingApproval ? 'Waiting for approval' : quote?.needsApproval ? `Approve ${displaySymbol(quote.tokenIn.symbol)}` : 'Review swap'}
+          {step.label}
         </Button>
+
+        {publicMempool && (
+          <div className="text-faint" style={{ fontSize: 11, marginTop: 10, lineHeight: 1.5 }} data-testid="live-swap-mempool-note">
+            On {chain.displayName}, pending swaps are public and trading bots can move the price against you, up to your slippage. Keep it low.
+          </div>
+        )}
         <div className="text-faint" style={{ fontSize: 11, marginTop: 10, lineHeight: 1.5 }}>
           Swaps go through Uniswap v3 pools. Satori GO finds the route and builds the transaction itself
           {quote && quote.feeBps > 0 ? '.' : ', and takes no fee.'}
         </div>
       </div>
       <LiveNav />
+
+      {sheet && (
+        <div
+          className="overlay sheet-host"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setSheet(null);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') setSheet(null);
+          }}
+        >
+          <div className="sheet" role="dialog" aria-modal="true" aria-label={sheet === 'in' ? 'Pay with' : 'Receive'} data-testid="live-swap-sheet">
+            <div className="sheet-grip" />
+            <h3>{sheet === 'in' ? 'Pay with' : 'Receive'}</h3>
+            <TextField
+              placeholder="Name, symbol or contract address"
+              aria-label="Find a token"
+              autoComplete="off"
+              spellCheck={false}
+              autoFocus
+              value={query}
+              onChange={(e) => {
+                setQuery(e.target.value);
+                setSearchError('');
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') void runSearch(sheet);
+              }}
+              error={searchError || undefined}
+              testId="live-swap-search"
+              suffixEl={
+                <button
+                  type="button"
+                  className="chip neutral"
+                  style={{ cursor: 'pointer' }}
+                  disabled={searching || query.trim() === ''}
+                  onClick={() => void runSearch(sheet)}
+                  data-testid="live-swap-search-go"
+                >
+                  {searching ? '…' : 'Find'}
+                </button>
+              }
+            />
+            {hits.length > 0 && (
+              <div style={{ marginTop: 8 }} data-testid="live-swap-hits">
+                {hits.map((hit) => (
+                  <button key={hit.address} type="button" className="swap-option" onClick={() => void pickFound(hit.address, sheet)}>
+                    <span className="swap-badge" style={{ width: 30, height: 30, fontSize: 13 }} aria-hidden="true">
+                      {displaySymbol(hit.symbol).slice(0, 1).toUpperCase() || '?'}
+                    </span>
+                    <span className="swap-option-name">
+                      {displaySymbol(hit.symbol)}
+                      <small>{hit.name}</small>
+                    </span>
+                    <span className="mono swap-option-end">{shortAddress(hit.address)}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+            <div style={{ marginTop: 8 }}>
+              {options.map((t) => {
+                const key = tokenKey(t);
+                const balance = balanceOf(t);
+                const selected = key === (sheet === 'in' ? inKey : outKey);
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    className="swap-option"
+                    aria-current={selected ? 'true' : undefined}
+                    onClick={() => choose(sheet, key)}
+                    data-testid={`live-swap-option-${key}`}
+                  >
+                    {mark(t, 30)}
+                    <span className="swap-option-name">
+                      {optionLabel(t)}
+                      {!vouched.has(key) && <small>Not verified</small>}
+                    </span>
+                    <span className="swap-option-end">{balance !== null ? formatListAmount(balance, t.decimals) : ''}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
