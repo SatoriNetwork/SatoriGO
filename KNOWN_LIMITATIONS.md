@@ -475,8 +475,12 @@ confirmed by the owner on mainnet (item 7). Nothing below is marketing.
     then not followed by its swap leaves Uniswap's router allowed that exact
     amount and no more. Where a token supports a signed permit (EIP-2612, with
     a domain version of 1 or 2 that matches what the token publishes), the
-    allowance is signed when the swap is reviewed and sent inside the swap, so
-    there is one transaction; a token without one, with its own permit dialect,
+    wallet asks first, and on a yes the allowance is signed before the review
+    opens (the review needs it to simulate the swap) and sent inside the swap,
+    so there is one transaction. That yes is a button, not the password: the
+    signature allows only Uniswap's router, only that exact amount, for 20
+    minutes, and updating the price of a reviewed permit swap signs a fresh one
+    without asking again; a token without one, with its own permit dialect,
     or an account the token treats as a contract wallet (an EIP-7702
     delegation) gets the two-step approval instead. The wallet cannot tell whether a token it does not
     vouch for can be sold again after it is bought. The wallet's own swap fee

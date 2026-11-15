@@ -137,7 +137,7 @@ function setup(swap: Partial<SwapState> = {}, chain: EvmChainInfo = BASE) {
       { name: 'USDC', amountBase: 5_000_000n, scale: 6, decimals: 6, isNative: false },
     ],
     evmTokens: { tracked: [{ address: JUNK_ADDR, symbol: 'JUNK', decimals: 18, trusted: false }], discovered: [] },
-    swap: { quote: null, quoting: false, plan: null, planning: false, error: null, ...swap },
+    swap: { quote: null, quoting: false, plan: null, planning: false, permitAsk: false, error: null, ...swap },
   } as never);
   const onBack = vi.fn();
   const onDone = vi.fn();
@@ -311,6 +311,20 @@ describe('LiveSwap', () => {
     expect((screen.getByTestId('live-swap-review-btn') as HTMLButtonElement).disabled).toBe(true);
   });
 
+  it('permit: asks before anything is signed, and passes the answer on', () => {
+    setup({ quote: { ...QUOTE, needsApproval: true }, permitAsk: true });
+    const ask = screen.getByTestId('live-swap-permit-ask');
+    expect(ask.textContent).toContain('exactly 2 USDC');
+    expect(spies.planSwap).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTestId('live-swap-permit-sign'));
+    expect(spies.planSwap).toHaveBeenLastCalledWith(50, 'sign');
+    fireEvent.click(screen.getByTestId('live-swap-permit-approve'));
+    expect(spies.planSwap).toHaveBeenLastCalledWith(50, 'approve');
+    expect(spies.clearSwapPlan).not.toHaveBeenCalled();
+    fireEvent.keyDown(ask, { key: 'Escape' });
+    expect(spies.clearSwapPlan).toHaveBeenCalledTimes(1);
+  });
+
   it('approval wait: reads only the allowance, and asks for the full quote once it is there', async () => {
     spies.confirmSwap.mockImplementation(async () => {
       storeMod.useLiveStore.setState({ swap: { ...state().swap, plan: null } });
@@ -379,7 +393,13 @@ describe('LiveSwap', () => {
     expect((screen.getByTestId('live-swap-confirm') as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByTestId('live-swap-stale').textContent).toContain('out of date');
     fireEvent.click(screen.getByTestId('live-swap-replan'));
-    expect(spies.planSwap).toHaveBeenCalledWith(50);
+    expect(spies.planSwap).toHaveBeenCalledWith(50, undefined);
+    // A permit swap was agreed to already: pricing it again does not ask twice.
+    cleanup();
+    spies.planSwap.mockClear();
+    setup({ quote: QUOTE, plan: { ...swapPlan(40), viaPermit: true, plannedAt: Date.now() - 121_000 } as SwapPlan });
+    fireEvent.click(screen.getByTestId('live-swap-replan'));
+    expect(spies.planSwap).toHaveBeenCalledWith(50, 'sign');
   });
 
   it('where pending swaps are public it says so and offers no wide slippage', () => {

@@ -22,9 +22,10 @@ and release commits.
   outside service composes the transaction, and Satori GO takes no fee.
 - Swapping a token (not the network's own coin) needs Uniswap allowed exactly
   the amount you are swapping, never more. For tokens that support it, SATORI
-  and USDC among them, that permission is signed and travels inside the swap,
-  so it is one transaction. For the others it is two steps: an approval, then
-  the swap.
+  and USDC among them, the wallet asks whether to sign that permission; on a
+  yes it travels inside the swap, so it is one transaction, and nothing is
+  signed before you answer. For the others, or if you prefer, it is two steps:
+  an approval, then the swap.
 - After a swap you are back on Home, where a bar follows it until the network
   confirms it, and says so if it failed.
 - A swap that would move the price a lot, or whose price impact cannot be

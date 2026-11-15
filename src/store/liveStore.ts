@@ -130,6 +130,7 @@ import {
   buildSwapPlan,
   quoteSwap,
   swapAllowanceReady,
+  swapPermitAvailable,
   swapNeedsImpactAck,
   SwapNeedsApprovalError,
   EMPTY_SWAP,
@@ -2290,8 +2291,13 @@ interface LiveState {
    *  amount. One small read; changes nothing. */
   swapAllowanceReady(): Promise<boolean>;
   /** Price the next step of the quoted swap for review: the exact-amount
-   *  approval when the quote needs one, else the swap. Sets `swap.plan`. */
-  planSwap(slippageBps: number): Promise<SwapPlan | null>;
+   *  approval when the quote needs one, else the swap. Sets `swap.plan`.
+   *
+   *  A token that can take the allowance as a signed permit is never signed
+   *  for unasked: the first call sets `swap.permitAsk` and plans nothing. The
+   *  user's answer comes back as `permit`: 'sign' (one transaction, the permit
+   *  signed now) or 'approve' (the ordinary approval first). */
+  planSwap(slippageBps: number, permit?: 'sign' | 'approve'): Promise<SwapPlan | null>;
   selectSwapFeeLevel(level: EvmFeeLevel): Promise<void>;
   /** Sign and broadcast the step under review (requires arm(true)). A swap
    *  whose price impact is high or unmeasured also needs `ackImpact`. */
@@ -6628,7 +6634,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     const run = ++swapRun;
     const startedOn = get().address;
     const abandoned = () => run !== swapRun || get().address !== startedOn;
-    set((s) => ({ swap: { ...s.swap, quoting: true, plan: null, planning: false, error: null } }));
+    set((s) => ({ swap: { ...s.swap, quoting: true, plan: null, planning: false, permitAsk: false, error: null } }));
     svc.allowBroadcast = false;
     try {
       const chain = activeEvmChain(get());
@@ -6656,11 +6662,11 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     return provider ? swapAllowanceReady({ provider, chain, quote }) : false;
   },
 
-  async planSwap(slippageBps: number) {
+  async planSwap(slippageBps: number, permit?: 'sign' | 'approve') {
     const run = ++swapRun;
     const startedOn = get().address;
     const abandoned = () => run !== swapRun || get().address !== startedOn;
-    set((s) => ({ swap: { ...s.swap, quoting: false, planning: true, plan: null, error: null } }));
+    set((s) => ({ swap: { ...s.swap, quoting: false, planning: true, plan: null, permitAsk: false, error: null } }));
     svc.allowBroadcast = false;
     try {
       const chain = activeEvmChain(get());
@@ -6677,7 +6683,13 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       // approval first. Only "this needs an approval" falls back: any other
       // refusal is the answer, and an approval would not change it.
       let plan: SwapPlan | null = null;
-      if (quote.needsApproval) {
+      if (quote.needsApproval && !permit && (await swapPermitAvailable({ provider, chain, quote }))) {
+        // The key signs nothing the user has not agreed to: ask first.
+        if (abandoned()) return null;
+        set((s) => ({ swap: { ...s.swap, planning: false, permitAsk: true } }));
+        return null;
+      }
+      if (quote.needsApproval && permit === 'sign') {
         plan = await buildSwapPlan({
           provider,
           chain,
@@ -6695,6 +6707,8 @@ export const useLiveStore = create<LiveState>((set, get) => ({
           throw err;
         });
         plan ??= await buildSwapApprovePlan({ provider, chain, quote, nativeBalanceBase });
+      } else if (quote.needsApproval) {
+        plan = await buildSwapApprovePlan({ provider, chain, quote, nativeBalanceBase });
       } else {
         plan = await buildSwapPlan({ provider, chain, quote, slippageBps, nativeBalanceBase });
       }
@@ -6830,7 +6844,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
 
   clearSwapPlan() {
     swapRun++;
-    set((s) => ({ swap: { ...s.swap, plan: null, planning: false, error: null } }));
+    set((s) => ({ swap: { ...s.swap, plan: null, planning: false, permitAsk: false, error: null } }));
     svc.allowBroadcast = false;
   },
 

@@ -137,10 +137,13 @@ export interface SwapState {
   quoting: boolean;
   plan: SwapPlan | null;
   planning: boolean;
+  /** The token can take its allowance as a signed permit, and the user has not
+   *  yet been asked whether to sign one. Nothing is signed while this is set. */
+  permitAsk: boolean;
   error: string | null;
 }
 
-export const EMPTY_SWAP: SwapState = Object.freeze({ quote: null, quoting: false, plan: null, planning: false, error: null });
+export const EMPTY_SWAP: SwapState = Object.freeze({ quote: null, quoting: false, plan: null, planning: false, permitAsk: false, error: null });
 
 /** A swap this wallet just sent, followed until the chain answers. Home shows it. */
 export interface SwapStatus {
@@ -450,6 +453,39 @@ async function refuseLocked(provider: EvmWalletDataProvider, chain: EvmChainInfo
  * tokens of whoever calls it, so a plan that is reviewed and then abandoned
  * leaves nothing behind that anyone else can use.
  */
+async function permitTerms(
+  evm: EvmMods,
+  provider: EvmWalletDataProvider,
+  chain: EvmChainInfo,
+  quote: SwapQuote,
+): Promise<{ name: string; version: string; nonce: bigint } | null> {
+  const token = quote.tokenIn.address;
+  if (token === null) return null;
+  const [nameAnswer, separatorAnswer, nonceAnswer] = await batch(provider, chain, [
+    ethCall(token, evm.encodeName()),
+    ethCall(token, evm.UNISWAP_V3_SELECTORS.DOMAIN_SEPARATOR),
+    ethCall(token, evm.UNISWAP_V3_SELECTORS.nonces + quote.from.slice(2).toLowerCase().padStart(64, '0')),
+  ]);
+  const name = read(nameAnswer, (r) => evm.decodeString(r as string));
+  const separator = read(separatorAnswer, (r) => (typeof r === 'string' && /^0x[0-9a-fA-F]{64}$/.test(r) ? r.toLowerCase() : null));
+  const nonce = read(nonceAnswer, (r) => evm.decodeUint256(r as string));
+  if (!name || !separator || nonce === null) return null;
+  const version = PERMIT_VERSIONS.find((v) => evm.permitDomainSeparator(name, v, chain.chainId, token) === separator);
+  return version ? { name, version, nonce } : null;
+}
+
+/** Whether the token paid can take its allowance as a signed permit this
+ *  wallet knows how to build. Reads only, signs nothing: it is what decides
+ *  whether the user is ASKED to sign one. Never throws. */
+export async function swapPermitAvailable(args: { provider: EvmWalletDataProvider; chain: EvmChainInfo; quote: SwapQuote }): Promise<boolean> {
+  try {
+    const { evm } = setup(await loadEvmModules(), args.chain);
+    return (await permitTerms(evm, args.provider, args.chain, args.quote)) !== null;
+  } catch {
+    return false;
+  }
+}
+
 async function signSwapPermit(
   evm: EvmMods,
   provider: EvmWalletDataProvider,
@@ -462,17 +498,9 @@ async function signSwapPermit(
   const token = quote.tokenIn.address;
   if (token === null) return null;
   try {
-    const [nameAnswer, separatorAnswer, nonceAnswer] = await batch(provider, chain, [
-      ethCall(token, evm.encodeName()),
-      ethCall(token, evm.UNISWAP_V3_SELECTORS.DOMAIN_SEPARATOR),
-      ethCall(token, evm.UNISWAP_V3_SELECTORS.nonces + quote.from.slice(2).toLowerCase().padStart(64, '0')),
-    ]);
-    const name = read(nameAnswer, (r) => evm.decodeString(r as string));
-    const separator = read(separatorAnswer, (r) => (typeof r === 'string' && /^0x[0-9a-fA-F]{64}$/.test(r) ? r.toLowerCase() : null));
-    const nonce = read(nonceAnswer, (r) => evm.decodeUint256(r as string));
-    if (!name || !separator || nonce === null) return null;
-    const version = PERMIT_VERSIONS.find((v) => evm.permitDomainSeparator(name, v, chain.chainId, token) === separator);
-    if (!version) return null;
+    const terms = await permitTerms(evm, provider, chain, quote);
+    if (!terms) return null;
+    const { name, version, nonce } = terms;
     const data = evm.permitTypedData({
       name,
       version,

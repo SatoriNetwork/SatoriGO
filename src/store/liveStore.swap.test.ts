@@ -47,6 +47,8 @@ const pool = (x: string, y: string, fee: number) => POOLS[`${[x, y].sort().join(
 
 interface Req { id: number; method: string; params: unknown[] }
 
+/** How many signed permits the fake chain has been shown. */
+let permitsShown = 0;
 let world: { allowance: bigint; pricesReadable: boolean; receipt: null | '0x1' | '0x0'; permit: boolean; permitRefused: boolean; estimateReverts: boolean };
 let sentRaw: string[];
 
@@ -120,6 +122,7 @@ function answer(req: Req): Record<string, unknown> {
       if (world.permit && sel === UNISWAP_V3_SELECTORS.DOMAIN_SEPARATOR) return ok(permitDomainSeparator('USD Coin', '2', 8453, to));
       if (world.permit && sel === UNISWAP_V3_SELECTORS.nonces) return ok(`0x${word(3)}`);
       if (world.permit && to.toLowerCase() === D.swapRouter02.toLowerCase() && sel === UNISWAP_V3_SELECTORS.multicall) {
+        permitsShown += 1;
         return world.permitRefused ? err('execution reverted: invalid signature') : ok('0x');
       }
       if (sel === '0xdd62ed3e') return ok(`0x${word(world.allowance)}`);
@@ -151,6 +154,7 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
+  permitsShown = 0;
   world = { allowance: 0n, pricesReadable: true, receipt: null, permit: false, permitRefused: false, estimateReverts: false };
   sentRaw = [];
   setStorageForTests(new MemoryStorageAdapter());
@@ -214,7 +218,7 @@ describe('in-wallet swap on Base', () => {
 
     // Shown at once as what left the account; the swap is over.
     expect(state().txs.find((t) => t.txid === txid)).toMatchObject({ asset: 'USDC', direction: 'out', status: 'pending', amount: 2 });
-    expect(swap()).toEqual({ quote: null, quoting: false, plan: null, planning: false, error: null });
+    expect(swap()).toEqual({ quote: null, quoting: false, plan: null, planning: false, permitAsk: false, error: null });
   });
 
   it('the coin needs no approval and rides as value, through the dollar token', async () => {
@@ -314,7 +318,7 @@ describe('in-wallet swap on Base', () => {
   it('a token with permit swaps in ONE transaction: no approval is sent', async () => {
     world.permit = true;
     expect((await state().quoteSwap(USDC, SATORI, 2_000_000n))?.needsApproval).toBe(true);
-    const plan = await state().planSwap(50);
+    const plan = await state().planSwap(50, 'sign');
     expect(plan).toMatchObject({ kind: 'swap', viaPermit: true });
     state().arm(true);
     const { kind } = await state().confirmSwap();
@@ -325,11 +329,39 @@ describe('in-wallet swap on Base', () => {
     expect(state().swapStatus?.state).toBe('pending');
   });
 
+  it('a permit is never signed unasked: the first review only asks, and the answer decides', async () => {
+    world.permit = true;
+    await state().quoteSwap(USDC, SATORI, 2_000_000n);
+    expect(await state().planSwap(50)).toBe(null);
+    expect(swap()).toMatchObject({ permitAsk: true, plan: null, planning: false, error: null });
+    expect(permitsShown).toBe(0);
+    // "Approve first": the ordinary approval, still nothing signed.
+    expect((await state().planSwap(50, 'approve'))?.kind).toBe('approve');
+    expect(swap().permitAsk).toBe(false);
+    expect(permitsShown).toBe(0);
+    // Asked again, then "Sign": one transaction.
+    await state().planSwap(50);
+    expect(swap().permitAsk).toBe(true);
+    expect(await state().planSwap(50, 'sign')).toMatchObject({ kind: 'swap', viaPermit: true });
+    expect(swap().permitAsk).toBe(false);
+    expect(permitsShown).toBe(1);
+    // Closing the question leaves nothing behind.
+    await state().planSwap(50);
+    state().clearSwapPlan();
+    expect(swap()).toMatchObject({ permitAsk: false, plan: null });
+  });
+
+  it('a token without permit is not asked about one', async () => {
+    await state().quoteSwap(USDC, SATORI, 2_000_000n);
+    expect((await state().planSwap(50))?.kind).toBe('approve');
+    expect(swap().permitAsk).toBe(false);
+  });
+
   it('a permit the token refuses falls back to the approval step', async () => {
     world.permit = true;
     world.permitRefused = true;
     await state().quoteSwap(USDC, SATORI, 2_000_000n);
-    expect((await state().planSwap(50))?.kind).toBe('approve');
+    expect((await state().planSwap(50, 'sign'))?.kind).toBe('approve');
     expect(swap().error).toBe(null);
   });
 
@@ -337,7 +369,7 @@ describe('in-wallet swap on Base', () => {
     world.permit = true;
     world.estimateReverts = true;
     await state().quoteSwap(USDC, SATORI, 2_000_000n);
-    expect(await state().planSwap(50)).toBe(null);
+    expect(await state().planSwap(50, 'sign')).toBe(null);
     expect(swap().error).toMatch(/invalid signature|refused to simulate/);
     expect(sentRaw).toHaveLength(0);
   });

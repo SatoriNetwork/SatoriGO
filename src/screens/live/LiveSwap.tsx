@@ -531,7 +531,8 @@ export function LiveSwap({ onBack, onDone }: LiveSwapProps) {
                   style={{ cursor: 'pointer' }}
                   onClick={() => {
                     resetReview();
-                    void planSwap(plan.slippageBps);
+                    // A permit swap was agreed to once already; pricing it again signs again.
+                    void planSwap(plan.slippageBps, plan.viaPermit ? 'sign' : undefined);
                   }}
                   data-testid="live-swap-replan"
                 >
@@ -880,6 +881,34 @@ export function LiveSwap({ onBack, onDone }: LiveSwapProps) {
         </div>
       </div>
       <LiveNav />
+
+      {swap.permitAsk && quote && (
+        <div
+          className="overlay sheet-host"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) clearSwapPlan();
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') clearSwapPlan();
+          }}
+        >
+          <div className="sheet" role="dialog" aria-modal="true" aria-label="Sign a permission" data-testid="live-swap-permit-ask">
+            <div className="sheet-grip" />
+            <h3>Swap in one transaction?</h3>
+            <p className="text-dim" style={{ fontSize: 13, lineHeight: 1.55, margin: '8px 0 14px' }}>
+              Uniswap needs your permission to take the {displaySymbol(quote.tokenIn.symbol)} you are swapping. Your wallet can sign that
+              permission now, for exactly {formatAmount(quote.amountIn, quote.tokenIn.decimals)} {displaySymbol(quote.tokenIn.symbol)}, and
+              send it inside the swap. It lasts 20 minutes and moves nothing until you confirm the swap on the next screen.
+            </p>
+            <Button block onClick={() => void planSwap(slippageBps, 'sign')} data-testid="live-swap-permit-sign">
+              Sign and review
+            </Button>
+            <Button block variant="secondary" style={{ marginTop: 8 }} onClick={() => void planSwap(slippageBps, 'approve')} data-testid="live-swap-permit-approve">
+              Approve first (two transactions)
+            </Button>
+          </div>
+        </div>
+      )}
 
       {sheet && (
         <div
