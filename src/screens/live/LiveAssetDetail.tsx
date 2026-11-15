@@ -310,21 +310,35 @@ export function LiveAssetDetail({ asset, onBack, onReceive, onSend, onSelectTx, 
               )}
             </button>
           )}
-          <div
-            className="hero-value"
-            data-testid={`live-asset-detail-balance-${asset.name}`}
-            style={{ marginTop: 4, maxWidth: '100%', textAlign: 'center', wordBreak: 'break-word' }}
-          >
-            {formatAmount(asset.amountBase, asset.scale, {
-              grouping: true,
-              // The asset's OWN divisions cap what is shown; `scale` is what the
-              // number is stored in. They differ for an asset with divisions < 8.
-              maxFractionDigits: Math.max(0, Math.min(asset.decimals, asset.scale)),
-            })}
-            <span style={{ fontSize: 15, fontWeight: 500, marginLeft: 8, color: 'var(--text-dim)' }}>
-              {shownName}
-            </span>
-          </div>
+          {(() => {
+            // The asset's OWN divisions cap what is shown; `scale` is what the
+            // number is stored in. They differ for an asset with divisions < 8.
+            const ownDigits = Math.max(0, Math.min(asset.decimals, asset.scale));
+            const full = formatAmount(asset.amountBase, asset.scale, { grouping: true, maxFractionDigits: ownDigits });
+            // An 18 decimal token would fill two lines of hero type, so the
+            // figure stops at 8 places (truncated) and the rest is in the tooltip.
+            const shown = formatAmount(asset.amountBase, asset.scale, { grouping: true, maxFractionDigits: Math.min(ownDigits, 8) });
+            return (
+              <div
+                className="hero-value"
+                data-testid={`live-asset-detail-balance-${asset.name}`}
+                title={full === shown ? undefined : `${full} ${shownName}`}
+                style={{
+                  marginTop: 4,
+                  maxWidth: '100%',
+                  textAlign: 'center',
+                  wordBreak: 'break-word',
+                  // A long figure steps down in size so it stays on one line.
+                  ...(shown.length > 16 ? { fontSize: 19 } : shown.length > 11 ? { fontSize: 23 } : {}),
+                }}
+              >
+                {shown}
+                <span style={{ fontSize: 15, fontWeight: 500, marginLeft: 8, color: 'var(--text-dim)' }}>
+                  {shownName}
+                </span>
+              </div>
+            );
+          })()}
           {/* What it is worth, the unit price and the 24h move: the same three
               facts its row on Home shows, which this screen used to drop. */}
           {unitFiat && (
