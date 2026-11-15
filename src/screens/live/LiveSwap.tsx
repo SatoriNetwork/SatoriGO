@@ -446,7 +446,7 @@ export function LiveSwap({ onBack, onDone }: LiveSwapProps) {
             )}
             <div className="sum-row" data-testid="live-swap-review-fee">
               <span className="sum-key">Network fee</span>
-              <span className="sum-val">{formatAmount(plan.quote.estimatedTotal, nativeDecimals)} {ticker}</span>
+              <span className="sum-val" title={`${formatAmount(plan.quote.estimatedTotal, nativeDecimals)} ${ticker}`}>{formatListAmount(plan.quote.estimatedTotal, nativeDecimals)} {ticker}</span>
             </div>
           </div>
 
@@ -487,7 +487,7 @@ export function LiveSwap({ onBack, onDone }: LiveSwapProps) {
                 </div>
                 <div className="sum-row">
                   <span className="sum-key">Maximum network fee</span>
-                  <span className="sum-val">{formatAmount(plan.quote.maxTotal, nativeDecimals)} {ticker}</span>
+                  <span className="sum-val" title={`${formatAmount(plan.quote.maxTotal, nativeDecimals)} ${ticker}`}>{formatListAmount(plan.quote.maxTotal, nativeDecimals)} {ticker}</span>
                 </div>
               </div>
               <div className="section-label">Speed</div>
