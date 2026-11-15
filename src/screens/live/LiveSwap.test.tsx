@@ -8,7 +8,7 @@
  */
 
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, waitFor, act } from '@testing-library/react';
 import { MemoryStorageAdapter, setStorageForTests } from '../../services/storage';
 import { NavProvider } from './LiveNav';
 import type { SwapPlan, SwapQuote, SwapState, SwapToken } from '../../store/evmSwap';
@@ -117,6 +117,7 @@ const state = () => storeMod.useLiveStore.getState();
 const NAV_VALUE = { tab: 'assets' as const, section: 'home' as const, openTab: () => {}, openSettings: () => {} };
 const spies = {
   quoteSwap: vi.fn(async () => null),
+  swapAllowanceReady: vi.fn(async () => false),
   planSwap: vi.fn(async () => null),
   confirmSwap: vi.fn(),
   clearSwap: vi.fn(),
@@ -309,6 +310,35 @@ describe('LiveSwap', () => {
     expect(view.onDone).not.toHaveBeenCalled();
     expect((screen.getByTestId('live-swap-review-btn') as HTMLButtonElement).disabled).toBe(true);
   });
+
+  it('approval wait: reads only the allowance, and asks for the full quote once it is there', async () => {
+    spies.confirmSwap.mockImplementation(async () => {
+      storeMod.useLiveStore.setState({ swap: { ...state().swap, plan: null } });
+      return { txid: '0xdef', explorerUrl: 'x', chainKey: 'base', kind: 'approve' };
+    });
+    spies.swapAllowanceReady.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    // The form as it stands while an approval is under review: filled, quoted.
+    setup({ quote: { ...QUOTE, needsApproval: true } });
+    fill();
+    await waitFor(() => expect(spies.quoteSwap).toHaveBeenCalledTimes(1), { timeout: 8000 });
+    spies.quoteSwap.mockClear();
+    spies.quoteSwap.mockImplementation(async () => {
+      storeMod.useLiveStore.setState({ swap: { ...state().swap, quote: QUOTE } });
+      return null;
+    });
+    act(() => storeMod.useLiveStore.setState({ swap: { ...state().swap, plan: APPROVE_PLAN } }));
+    fireEvent.click(screen.getByTestId('live-swap-arm'));
+    fireEvent.click(screen.getByTestId('live-swap-confirm'));
+    await waitFor(() => expect(screen.getByTestId('live-swap-waiting-approval')).toBeTruthy());
+    await waitFor(() => expect(spies.swapAllowanceReady).toHaveBeenCalledTimes(1), { timeout: 6000 });
+    // Not there yet: nothing but the allowance was asked for.
+    expect(spies.quoteSwap).not.toHaveBeenCalled();
+    await waitFor(() => expect(spies.quoteSwap).toHaveBeenCalledTimes(1), { timeout: 6000 });
+    expect(spies.swapAllowanceReady).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(screen.queryByTestId('live-swap-waiting-approval')).toBeNull());
+    expect(spies.quoteSwap).toHaveBeenCalledTimes(1);
+    spies.quoteSwap.mockImplementation(async () => null);
+  }, 30000);
 
   it('Back from the review drops the plan and keeps the quote; leaving clears everything', () => {
     const { onBack } = setup({ quote: QUOTE, plan: swapPlan(40) });

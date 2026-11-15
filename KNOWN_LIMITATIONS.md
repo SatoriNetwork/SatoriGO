@@ -467,7 +467,10 @@ confirmed by the owner on mainnet (item 7). Nothing below is marketing.
     wallet says so there and offers no slippage above 1%, but it does not send
     swaps through a private relay. The quote, like a balance, is what the
     network node reports: a node that understated it would set the minimum too
-    low. The deadline is counted from the chain's clock, and a reviewed swap
+    low. A quote's reads are packed into single requests through the
+    standard Multicall3 contract (read only, never sent a transaction), so a
+    token whose own code fails badly enough to sink the packed read gets no
+    quote. The deadline is counted from the chain's clock, and a reviewed swap
     has to be priced again after two minutes. An approval that is confirmed and
     then not followed by its swap leaves Uniswap's router allowed that exact
     amount and no more. Where a token supports a signed permit (EIP-2612, with

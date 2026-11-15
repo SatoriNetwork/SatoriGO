@@ -162,7 +162,7 @@ export interface SwapStatus {
 }
 
 /** How often, and for how long, a sent swap is watched for its receipt. */
-export const SWAP_FOLLOW_POLL_MS = 1_500;
+export const SWAP_FOLLOW_POLL_MS = 4_000;
 export const SWAP_FOLLOW_MAX_MS = 180_000;
 
 /** The one refusal an approval fixes: the router may not yet take the input
@@ -223,6 +223,34 @@ async function batch(provider: EvmWalletDataProvider, chain: EvmChainInfo, calls
 
 const ethCall = (to: string, data: string): EvmRpcCall => ({ method: 'eth_call', params: [{ to, data }, 'latest'] });
 
+/** Many reads in ONE request, through Multicall3, answered in order:
+ *  each read's return data, or null for one that failed inside (no
+ *  such pool). The whole request failing is the node being unreachable. This
+ *  keeps a quote to a few requests, which is what a shared RPC allowance can
+ *  carry. Reads only: nothing is ever sent to Multicall3. */
+async function readTogether(
+  evm: EvmMods,
+  provider: EvmWalletDataProvider,
+  chain: EvmChainInfo,
+  reads: ReadonlyArray<{ to: string; data: string }>,
+): Promise<Array<string | null>> {
+  if (reads.length === 0) return [];
+  const [entry] = await batch(provider, chain, [ethCall(evm.MULTICALL3, evm.encodeAggregate3(reads))]);
+  const answers = read(entry, (r) => evm.decodeAggregate3(r, reads.length));
+  if (answers === null) throw new EvmSendError('quote-failed', `${chain.displayName} is unreachable right now. Try again.`);
+  return answers;
+}
+
+/** One answer of readTogether decoded, or null when it failed or does not decode. */
+function decoded<T>(answer: string | null | undefined, decode: (result: string) => T): T | null {
+  if (answer === null || answer === undefined) return null;
+  try {
+    return decode(answer);
+  } catch {
+    return null;
+  }
+}
+
 /** A decoded batch entry, or null when the node refused it (no such pool) or
  *  the answer does not decode. */
 function read<T>(entry: EvmRpcBatchResult | undefined, decode: (result: unknown) => T): T | null {
@@ -240,28 +268,28 @@ interface Leg {
 }
 
 /** Quote `amountIn` through the pool at every fee tier for each (tokenIn,
- *  tokenOut) pair, in one round trip, and keep the best tier per pair. */
+ *  tokenOut) pair, in one request, and keep the best tier per pair. */
 async function bestLegs(
   evm: EvmMods,
   provider: EvmWalletDataProvider,
   chain: EvmChainInfo,
   deployment: UniswapV3Deployment,
   pairs: ReadonlyArray<{ tokenIn: string; tokenOut: string; amountIn: bigint }>,
-  extra: EvmRpcCall[] = [],
-): Promise<{ legs: Array<Leg | null>; extra: EvmRpcBatchResult[] }> {
-  const calls: EvmRpcCall[] = [];
+  extra: Array<{ to: string; data: string }> = [],
+): Promise<{ legs: Array<Leg | null>; extra: Array<string | null> }> {
+  const calls: Array<{ to: string; data: string }> = [];
   for (const pair of pairs) {
     for (const fee of evm.UNISWAP_V3_FEES) {
       const hop = { tokenIn: pair.tokenIn, tokenOut: pair.tokenOut, fee };
-      calls.push(ethCall(deployment.quoterV2, evm.encodeQuoteExactInput([hop], pair.amountIn)));
+      calls.push({ to: deployment.quoterV2, data: evm.encodeQuoteExactInput([hop], pair.amountIn) });
     }
   }
-  const results = await batch(provider, chain, [...calls, ...extra]);
+  const results = await readTogether(evm, provider, chain, [...calls, ...extra]);
   const tiers = evm.UNISWAP_V3_FEES.length;
   const legs = pairs.map((pair, p) => {
     let best: Leg | null = null;
     evm.UNISWAP_V3_FEES.forEach((fee, f) => {
-      const out = read(results[p * tiers + f], evm.decodeQuoteAmountOut);
+      const out = decoded(results[p * tiers + f], evm.decodeQuoteAmountOut);
       if (out !== null && out > 0n && (!best || out > best.out)) {
         best = { hop: { tokenIn: pair.tokenIn, tokenOut: pair.tokenOut, fee }, out };
       }
@@ -284,11 +312,11 @@ async function measureImpact(
 ): Promise<number | null> {
   try {
     const pools = (
-      await batch(provider, chain, hops.map((hop) => ethCall(deployment.factory, evm.encodeGetPool(hop.tokenIn, hop.tokenOut, hop.fee))))
-    ).map((entry) => read(entry, evm.decodePoolAddress));
+      await readTogether(evm, provider, chain, hops.map((hop) => ({ to: deployment.factory, data: evm.encodeGetPool(hop.tokenIn, hop.tokenOut, hop.fee) })))
+    ).map((answer) => decoded(answer, evm.decodePoolAddress));
     if (pools.some((pool) => pool === null)) return null;
-    const prices = (await batch(provider, chain, pools.map((pool) => ethCall(pool as string, evm.encodeSlot0())))).map((entry) =>
-      read(entry, evm.decodeSqrtPriceX96),
+    const prices = (await readTogether(evm, provider, chain, pools.map((pool) => ({ to: pool as string, data: evm.encodeSlot0() })))).map((answer) =>
+      decoded(answer, evm.decodeSqrtPriceX96),
     );
     if (prices.some((price) => price === null)) return null;
     return evm.priceImpactBps(amountOut, evm.midPriceOut(amountIn, hops, prices as bigint[]));
@@ -319,9 +347,9 @@ export async function quoteSwap(args: {
   if (sameAddress(tin, tout)) throw new EvmSendError('unknown-asset', 'Pick two different tokens to swap.');
 
   const middles = [deployment.wrappedNative, deployment.stable].filter((m) => !sameAddress(m, tin) && !sameAddress(m, tout));
-  const allowanceCall = tokenIn.address === null ? [] : [ethCall(tin, evm.encodeAllowance(from, deployment.swapRouter02))];
+  const allowanceCall = tokenIn.address === null ? [] : [{ to: tin, data: evm.encodeAllowance(from, deployment.swapRouter02) }];
 
-  // Round trip 1: the direct pool, the first leg to each intermediate, and the allowance.
+  // Request 1: the direct pool, the first leg to each intermediate, and the allowance.
   const first = await bestLegs(
     evm,
     provider,
@@ -333,7 +361,7 @@ export async function quoteSwap(args: {
   const direct = first.legs[0];
   const firstLegs = first.legs.slice(1).filter((leg): leg is Leg => leg !== null);
 
-  // Round trip 2: from each intermediate on to the output.
+  // Request 2, only when an intermediate has a first leg: on to the output.
   const second =
     firstLegs.length > 0
       ? (await bestLegs(evm, provider, chain, deployment, firstLegs.map((leg) => ({ tokenIn: leg.hop.tokenOut, tokenOut: tout, amountIn: leg.out })))).legs
@@ -353,7 +381,7 @@ export async function quoteSwap(args: {
 
   let needsApproval = false;
   if (tokenIn.address !== null) {
-    const allowance = read(first.extra[0], (r) => evm.decodeUint256(r as string));
+    const allowance = decoded(first.extra[0], evm.decodeUint256);
     if (allowance === null) throw new EvmSendError('quote-failed', `${tokenIn.symbol} could not be read right now. Try again.`);
     needsApproval = allowance < amountIn;
   }
@@ -371,6 +399,23 @@ export async function quoteSwap(args: {
     needsApproval,
     quotedAt: Date.now(),
   };
+}
+
+/** Whether the router may now take the quote's amount: the one read the wait
+ *  for an approval repeats, so waiting costs one small request at a time and
+ *  the full quote runs once, when this turns true. Never throws: a node that
+ *  did not answer is "not yet". */
+export async function swapAllowanceReady(args: { provider: EvmWalletDataProvider; chain: EvmChainInfo; quote: SwapQuote }): Promise<boolean> {
+  const { provider, chain, quote } = args;
+  if (quote.tokenIn.address === null) return true;
+  try {
+    const { evm, deployment } = setup(await loadEvmModules(), chain);
+    const [entry] = await batch(provider, chain, [ethCall(quote.tokenIn.address, evm.encodeAllowance(quote.from, deployment.swapRouter02))]);
+    const allowance = read(entry, (r) => evm.decodeUint256(r as string));
+    return allowance !== null && allowance >= quote.amountIn;
+  } catch {
+    return false;
+  }
 }
 
 /** Refuse a swap the account cannot fund, in words, before the node does it

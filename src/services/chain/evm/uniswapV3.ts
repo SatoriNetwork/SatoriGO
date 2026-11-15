@@ -68,6 +68,13 @@ export function uniswapV3For(chainKey: string): UniswapV3Deployment | null {
   return Object.prototype.hasOwnProperty.call(UNISWAP_V3, chainKey) ? UNISWAP_V3[chainKey] : null;
 }
 
+/** Multicall3: the standard contract that runs many reads in one eth_call, at
+ *  this one address on every chain above (scripts/uniswap-probe.ts checks the
+ *  code is there). READ ONLY: the wallet never sends a transaction to it, so
+ *  it can never hold an allowance or move anything. It is how a quote costs a
+ *  few requests instead of two dozen. */
+export const MULTICALL3 = '0xcA11bde05977b3631167028862bE2a173976CA11';
+
 /** Every fee tier a v3 pool can have, in hundredths of a basis point. */
 export const UNISWAP_V3_FEES: readonly number[] = Object.freeze([100, 500, 3000, 10000]);
 
@@ -86,6 +93,7 @@ export const UNISWAP_V3_SELECTORS = Object.freeze({
   nonces: '0x7ecebe00', // nonces(address), on a token with permit
   factory: '0xc45a0155', // factory(), on the router and the quoter
   WETH9: '0x4aa4a4fc', // WETH9(), on the router
+  aggregate3: '0x82ad56cb', // aggregate3((address,bool,bytes)[]), on Multicall3
 });
 
 /** One pool crossed by a swap. */
@@ -147,6 +155,48 @@ export function encodeSwapPath(hops: readonly SwapHop[]): string {
     path += hop.fee.toString(16).padStart(6, '0') + addressHex(hop.tokenOut, 'tokenOut');
   });
   return path;
+}
+
+/** eth_call data for Multicall3.aggregate3: every call is allowed to fail, so
+ *  one missing pool does not lose the other answers. */
+export function encodeAggregate3(calls: ReadonlyArray<{ to: string; data: string }>): string {
+  const tuples = calls.map(
+    (call) => addressWord(call.to, 'target') + uintWord(1n) + uintWord(96n) + bytesTail(strip(call.data)),
+  );
+  let offset = calls.length * 32;
+  let heads = '';
+  for (const tuple of tuples) {
+    heads += uintWord(BigInt(offset));
+    offset += tuple.length / 2;
+  }
+  return UNISWAP_V3_SELECTORS.aggregate3 + uintWord(32n) + uintWord(BigInt(calls.length)) + heads + tuples.join('');
+}
+
+/** aggregate3's answers in call order: the return data of each call, or null
+ *  for one that failed. Throws unless there are exactly `count` of them and
+ *  every one lies inside the data. */
+export function decodeAggregate3(returnData: unknown, count: number): Array<string | null> {
+  const body = words(returnData, 2, 'aggregate3 result');
+  const size = body.length / 2;
+  const at = (byte: number): number => {
+    if (!Number.isInteger(byte) || byte < 0 || byte + 32 > size) throw new Error('uniswapV3: aggregate3 result is malformed');
+    const value = BigInt(`0x${body.slice(byte * 2, byte * 2 + WORD_HEX)}`);
+    if (value > BigInt(size)) throw new Error('uniswapV3: aggregate3 result is malformed');
+    return Number(value);
+  };
+  const array = at(0);
+  if (at(array) !== count) throw new Error('uniswapV3: aggregate3 answered a different number of calls');
+  const start = array + 32;
+  const out: Array<string | null> = [];
+  for (let i = 0; i < count; i++) {
+    const tuple = start + at(start + i * 32);
+    const success = at(tuple);
+    const data = tuple + at(tuple + 32);
+    const length = at(data);
+    if (data + 32 + length > size) throw new Error('uniswapV3: aggregate3 result is malformed');
+    out.push(success === 1 ? `0x${body.slice((data + 32) * 2, (data + 32 + length) * 2)}` : null);
+  }
+  return out;
 }
 
 /** eth_call data for factory.getPool(a, b, fee). */

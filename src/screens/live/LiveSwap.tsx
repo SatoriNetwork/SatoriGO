@@ -64,6 +64,7 @@ function impactText(bps: number | null): string {
 export function LiveSwap({ onBack, onDone }: LiveSwapProps) {
   const swap = useLiveStore((s) => s.swap);
   const quoteSwap = useLiveStore((s) => s.quoteSwap);
+  const swapAllowanceReady = useLiveStore((s) => s.swapAllowanceReady);
   const planSwap = useLiveStore((s) => s.planSwap);
   const selectSwapFeeLevel = useLiveStore((s) => s.selectSwapFeeLevel);
   const confirmSwap = useLiveStore((s) => s.confirmSwap);
@@ -184,22 +185,38 @@ export function LiveSwap({ onBack, onDone }: LiveSwapProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [quoteKey, quoteSwap, clearSwap]);
 
-  // After an approval is sent: look again until the chain shows the allowance.
+  // After an approval is sent: read only the allowance until the chain shows
+  // it, then ask for the full quote once. Waiting must stay cheap.
   const { quote, plan, quoting, planning, error } = swap;
+  const waitingOn = quote ? quote.needsApproval : null;
   useEffect(() => {
     if (!waitingApproval || waitTimedOut || !tokenIn || !tokenOut || amountIn === null) return;
-    if (quote && !quote.needsApproval) {
+    if (waitingOn === false) {
       setWaitingApproval(false);
       return;
     }
-    if (Date.now() - waitingSince > APPROVAL_WAIT_MS) {
-      setWaitTimedOut(true);
-      return;
-    }
-    const timer = setTimeout(() => void quoteSwap(tokenIn, tokenOut, amountIn as bigint), APPROVAL_POLL_MS);
-    return () => clearTimeout(timer);
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const look = async () => {
+      if (Date.now() - waitingSince > APPROVAL_WAIT_MS) {
+        setWaitTimedOut(true);
+        return;
+      }
+      // No quote to wait on (the last one failed): ask for it again.
+      const ready = waitingOn === null || (await swapAllowanceReady());
+      if (stopped) return;
+      // A quote that still needs the approval (or none) leaves the wait as it
+      // was, so keep looking; one that does not ends the wait above.
+      if (ready) await quoteSwap(tokenIn, tokenOut, amountIn as bigint);
+      if (!stopped) timer = setTimeout(() => void look(), APPROVAL_POLL_MS);
+    };
+    timer = setTimeout(() => void look(), APPROVAL_POLL_MS);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [waitingApproval, waitTimedOut, waitingSince, quote, quoteSwap]);
+  }, [waitingApproval, waitTimedOut, waitingSince, waitingOn, quoteSwap, swapAllowanceReady]);
 
   const startWaiting = () => {
     setWaitingSince(Date.now());

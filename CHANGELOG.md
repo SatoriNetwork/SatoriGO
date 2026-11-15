@@ -35,6 +35,8 @@ and release commits.
   your computer's.
 - On Ethereum and BNB Chain, where pending swaps are public, the wallet says so
   and offers no slippage above 1%.
+- Getting a price is a few small network requests, not dozens, and waiting for
+  an approval to confirm checks only that approval.
 
 ## 1.7.25
 

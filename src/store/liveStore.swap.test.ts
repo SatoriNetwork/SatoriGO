@@ -13,7 +13,8 @@ vi.mock('../services/chain/engine', async (importOriginal) => {
 });
 
 import { MemoryStorageAdapter, setStorageForTests } from '../services/storage';
-import { UNISWAP_V3, UNISWAP_V3_SELECTORS, decodeErc20Calldata, decodeSignedTx, midPriceOut, permitDomainSeparator } from '../services/chain/evm';
+import { MULTICALL3, UNISWAP_V3, UNISWAP_V3_SELECTORS, decodeErc20Calldata, decodeSignedTx, midPriceOut, permitDomainSeparator } from '../services/chain/evm';
+import { answerAggregate3 } from '../services/chain/evm/testing/multicall3';
 import { resetEvmProvidersForTests } from './evmBalances';
 import { resetEvmIndexersForTests } from './evmHistory';
 import type { SwapToken } from './evmSwap';
@@ -85,6 +86,14 @@ function answer(req: Req): Record<string, unknown> {
       const sel = data.slice(0, 10);
       const body = data.slice(10);
       if (to.toLowerCase() === '0x420000000000000000000000000000000000000f') return ok(`0x${word(0x2f0d)}`);
+      if (to.toLowerCase() === MULTICALL3.toLowerCase() && sel === UNISWAP_V3_SELECTORS.aggregate3) {
+        return ok(
+          answerAggregate3(data, (innerTo, innerData) => {
+            const inner = answer({ id: 0, method: 'eth_call', params: [{ to: innerTo, data: innerData }, 'latest'] });
+            return 'result' in inner ? (inner.result as string) : null;
+          }),
+        );
+      }
       if (sel === UNISWAP_V3_SELECTORS.quoteExactInput) {
         const path = body.slice(192, 192 + Number(BigInt(`0x${body.slice(128, 192)}`)) * 2);
         let out = BigInt(`0x${body.slice(64, 128)}`);

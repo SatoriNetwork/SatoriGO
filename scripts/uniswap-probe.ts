@@ -4,7 +4,8 @@
 //   npx vite-node scripts/uniswap-probe.ts            every pinned chain
 //   npx vite-node scripts/uniswap-probe.ts base       one chain
 //
-// For each chain: code exists at every pinned address, the router and the
+// For each chain: code exists at every pinned address (Multicall3 included, and
+// a wallet-built packed read decodes), the router and the
 // quoter name the pinned factory, the router names the pinned wrapped coin, a
 // wallet-built quote decodes, and a wallet-built coin-in swap simulates
 // (eth_call from the wrapped-coin contract, which always holds coin), with and
@@ -16,6 +17,9 @@ import {
   UNISWAP_V3,
   UNISWAP_V3_SELECTORS,
   UNISWAP_V3_FEES,
+  MULTICALL3,
+  encodeAggregate3,
+  decodeAggregate3,
   encodeQuoteExactInput,
   decodeQuoteAmountOut,
   encodeSwap,
@@ -88,6 +92,28 @@ async function checkChain(key: string): Promise<boolean> {
   check('router.factory()', same((await call(d.swapRouter02, UNISWAP_V3_SELECTORS.factory)).result, d.factory));
   check('quoter.factory()', same((await call(d.quoterV2, UNISWAP_V3_SELECTORS.factory)).result, d.factory));
   check('router.WETH9()', same((await call(d.swapRouter02, UNISWAP_V3_SELECTORS.WETH9)).result, d.wrappedNative));
+
+  // Multicall3: code at the pinned address, and a wallet-built aggregate of
+  // the four tier quotes plus one pool that cannot exist answers in one call,
+  // the missing pool failing alone.
+  const multicallCode = (await rpc(url, 'eth_getCode', [MULTICALL3, 'latest'])).result ?? '0x';
+  check('code at multicall3', multicallCode.length > 2, `${(multicallCode.length - 2) / 2} bytes`);
+  const reads = [
+    ...UNISWAP_V3_FEES.map((fee) => ({ to: d.quoterV2, data: encodeQuoteExactInput([{ tokenIn: d.wrappedNative, tokenOut: d.stable, fee }], 10n ** 15n) })),
+    { to: d.quoterV2, data: encodeQuoteExactInput([{ tokenIn: d.wrappedNative, tokenOut: FEE_PROBE_ADDRESS, fee: 3000 }], 10n ** 15n) },
+  ];
+  const packed = await call(MULTICALL3, encodeAggregate3(reads));
+  let together: Array<string | null> | null = null;
+  try {
+    together = decodeAggregate3(packed.result, reads.length);
+  } catch {
+    together = null;
+  }
+  check(
+    'multicall3 packs the quotes, a missing pool fails alone',
+    together !== null && together[reads.length - 1] === null && together.slice(0, -1).some((answer) => answer !== null && decodeQuoteAmountOut(answer) > 0n),
+    packed.error?.message ?? '',
+  );
 
   // Best coin -> dollar-token tier, by a wallet-built quote.
   const amountIn = 10n ** 15n;

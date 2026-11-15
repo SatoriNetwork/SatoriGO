@@ -19,6 +19,7 @@ vi.mock('../services/chain/engine', async (importOriginal) => {
 import { broadcastEvmPlan } from './evmSend';
 import {
   quoteSwap,
+  swapAllowanceReady,
   buildSwapApprovePlan,
   buildSwapPlan,
   swapSupported,
@@ -39,6 +40,7 @@ import {
   EvmNonceTracker,
   UNISWAP_V3,
   UNISWAP_V3_SELECTORS,
+  MULTICALL3,
   ERC20_SELECTORS,
   decodeErc20Calldata,
   encodeSwap,
@@ -52,6 +54,7 @@ import {
   type TypedData,
   type SwapHop,
 } from '../services/chain/evm';
+import { answerAggregate3 } from '../services/chain/evm/testing/multicall3';
 import type { EvmChainInfo } from './evmChains';
 
 const FROM = '0x9858EfFD232B4033E47d90003D41EC34EcaEda94';
@@ -129,10 +132,14 @@ function fakeBase(
     permit?: { name: string; version: string; nonce: bigint };
     /** The token refuses the signed permit when it is shown one. */
     permitRefused?: boolean;
+    /** Multicall3 itself does not answer. */
+    multicallDown?: boolean;
   } = {},
 ) {
   const pools = opts.pools ?? POOLS;
   const seen: Req[] = [];
+  /** How many JSON-RPC calls each HTTP request carried. */
+  const requests: number[] = [];
   const baseFee = '0x4c4b40';
   const poolAddress = (i: number) => `0x${(i + 1).toString(16).padStart(40, 'a')}`;
   const findPool = (x: string, y: string, fee: number) =>
@@ -162,6 +169,15 @@ function fakeBase(
         const sel = call.data.slice(0, 10);
         const body = call.data.slice(10);
         if (to === ORACLE) return ok('0x' + word(0x2f0d));
+        if (to === MULTICALL3.toLowerCase() && sel === UNISWAP_V3_SELECTORS.aggregate3) {
+          if (opts.multicallDown) return err('execution reverted');
+          return ok(
+            answerAggregate3(call.data, (innerTo, data) => {
+              const inner = answer({ id: 0, method: 'eth_call', params: [{ to: innerTo, data }, 'latest'] });
+              return 'result' in inner ? (inner.result as string) : null;
+            }),
+          );
+        }
         if (to === D.quoterV2.toLowerCase() && sel === UNISWAP_V3_SELECTORS.quoteExactInput) {
           const amountIn = BigInt('0x' + body.slice(64, 128));
           const length = Number(BigInt('0x' + body.slice(128, 192)));
@@ -213,13 +229,14 @@ function fakeBase(
   };
   const fetchImpl = async (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const body = JSON.parse(String(init?.body)) as Req | Req[];
+    requests.push(Array.isArray(body) ? body.length : 1);
     const out = Array.isArray(body) ? body.map(answer) : answer(body);
     return new Response(JSON.stringify(out), { status: 200 });
   };
   const provider = new EvmWalletDataProvider(createEvmRpcClient(evmChainByKey('base')!, { fetchImpl }));
   const calls = (selector: string) =>
     seen.filter((r) => r.method === 'eth_call' && (r.params[0] as { data: string }).data.startsWith(selector));
-  return { provider, seen, calls };
+  return { provider, seen, calls, requests };
 }
 
 const hop = (tokenIn: string, tokenOut: string, fee: number): SwapHop => ({ tokenIn, tokenOut, fee });
@@ -622,5 +639,58 @@ describe('permit: a token swap in one transaction', () => {
     const failure = await buildSwapPlan({ provider: broken.provider, chain: BASE, quote, slippageBps: 50, signPermit }).catch((e: unknown) => e);
     expect(failure).toMatchObject({ code: 'quote-failed', message: expect.stringContaining('Too little received') });
     expect(failure).not.toBeInstanceOf(SwapNeedsApprovalError);
+  });
+});
+
+describe('what a quote costs the RPC', () => {
+  const settle = async (provider: EvmWalletDataProvider) => {
+    await provider.rpc.batch([{ method: 'eth_chainId', params: [] }]);
+  };
+
+  it('33. a direct quote is three single requests, never a burst', async () => {
+    const { provider, requests } = fakeBase();
+    await settle(provider);
+    requests.length = 0;
+    const quote = await quoteSwap({ provider, chain: BASE, from: FROM, tokenIn: SATORI, tokenOut: USDC, amountIn: 10n ** 12n });
+    expect(quote.impactBps).toBe(0);
+    // The tier quotes with the allowance, the pool, its price.
+    expect(requests).toEqual([1, 1, 1]);
+  });
+
+  it('34. a two hop quote is four, and a token to token one no more', async () => {
+    const two = fakeBase();
+    await settle(two.provider);
+    two.requests.length = 0;
+    const quote = await quoteSwap({ provider: two.provider, chain: BASE, from: FROM, tokenIn: ETH, tokenOut: SATORI, amountIn: 10n ** 12n });
+    expect(quote.hops).toHaveLength(2);
+    expect(two.requests).toEqual([1, 1, 1, 1]);
+    const wide = fakeBase({ pools: [...POOLS, { a: OTHER_ADDR, b: WETH_ADDR, fee: 3000, sqrt: Q96 }] });
+    await settle(wide.provider);
+    wide.requests.length = 0;
+    const far = await quoteSwap({ provider: wide.provider, chain: BASE, from: FROM, tokenIn: OTHER, tokenOut: USDC, amountIn: 10n ** 12n });
+    expect(far.hops).toHaveLength(2);
+    expect(wide.requests).toEqual([1, 1, 1, 1]);
+  });
+
+  it('35. says the network is unreachable when the packed read itself fails', async () => {
+    const { provider } = fakeBase({ multicallDown: true });
+    await expect(quoteSwap({ provider, chain: BASE, from: FROM, tokenIn: USDC, tokenOut: SATORI, amountIn: 1_000_000n })).rejects.toMatchObject({
+      code: 'quote-failed',
+      message: expect.stringContaining('unreachable'),
+    });
+  });
+
+  it('36. waiting for an approval reads the allowance alone', async () => {
+    const waiting = fakeBase();
+    const quote = await quoteSwap({ provider: waiting.provider, chain: BASE, from: FROM, tokenIn: USDC, tokenOut: SATORI, amountIn: 1_000_000n });
+    waiting.requests.length = 0;
+    waiting.seen.length = 0;
+    expect(await swapAllowanceReady({ provider: waiting.provider, chain: BASE, quote })).toBe(false);
+    expect(waiting.requests).toEqual([1]);
+    expect(waiting.seen.map((r) => (r.params[0] as { data: string }).data.slice(0, 10))).toEqual([ERC20_SELECTORS.allowance]);
+    const there = fakeBase({ allowance: 1_000_000n });
+    expect(await swapAllowanceReady({ provider: there.provider, chain: BASE, quote })).toBe(true);
+    const coin = { ...quote, tokenIn: ETH };
+    expect(await swapAllowanceReady({ provider: there.provider, chain: BASE, quote: coin })).toBe(true);
   });
 });

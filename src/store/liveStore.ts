@@ -129,6 +129,7 @@ import {
   buildSwapApprovePlan,
   buildSwapPlan,
   quoteSwap,
+  swapAllowanceReady,
   swapNeedsImpactAck,
   SwapNeedsApprovalError,
   EMPTY_SWAP,
@@ -2285,6 +2286,9 @@ interface LiveState {
   /** Find the best Uniswap route for an exact input on the active EVM chain.
    *  Sets `swap.quote`, or `swap.error`. */
   quoteSwap(tokenIn: SwapToken, tokenOut: SwapToken, amountIn: bigint): Promise<SwapQuote | null>;
+  /** While an approval confirms: whether the router may now take the quoted
+   *  amount. One small read; changes nothing. */
+  swapAllowanceReady(): Promise<boolean>;
   /** Price the next step of the quoted swap for review: the exact-amount
    *  approval when the quote needs one, else the swap. Sets `swap.plan`. */
   planSwap(slippageBps: number): Promise<SwapPlan | null>;
@@ -6642,6 +6646,14 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       set((s) => ({ swap: { ...s.swap, quote: null, quoting: false, error } }));
       return null;
     }
+  },
+
+  async swapAllowanceReady() {
+    const chain = activeEvmChain(get());
+    const quote = get().swap.quote;
+    if (!chain || !quote || quote.chainKey !== chain.key || quote.from !== get().address) return false;
+    const provider = await evmProviderFor(chain.key);
+    return provider ? swapAllowanceReady({ provider, chain, quote }) : false;
   },
 
   async planSwap(slippageBps: number) {

@@ -9,9 +9,13 @@ import { describe, it, expect } from 'vitest';
 import { bytesToHex } from '@noble/hashes/utils';
 import { selector } from './erc20';
 import { isEvmAddress } from './keys';
+import { answerAggregate3 } from './testing/multicall3';
 import {
   UNISWAP_V3,
   UNISWAP_V3_SELECTORS,
+  MULTICALL3,
+  encodeAggregate3,
+  decodeAggregate3,
   uniswapV3For,
   encodeSwapPath,
   encodeGetPool,
@@ -76,6 +80,7 @@ describe('pinned Uniswap v3 deployments', () => {
       nonces: 'nonces(address)',
       factory: 'factory()',
       WETH9: 'WETH9()',
+      aggregate3: 'aggregate3((address,bool,bytes)[])',
     };
     for (const [name, signature] of Object.entries(signatures)) {
       expect(UNISWAP_V3_SELECTORS[name as keyof typeof UNISWAP_V3_SELECTORS], name).toBe(selector(signature));
@@ -324,5 +329,39 @@ describe('permit: the allowance as a signature inside the swap', () => {
     expect(() => encodeSwap({ ...args, permit: { ...permit, token: USDC } })).toThrow(/permit/);
     expect(() => encodeSelfPermitIfNecessary({ ...permit, r: '0x12' })).toThrow(/bytes32/);
     expect(() => encodeSelfPermitIfNecessary({ ...permit, v: 1 })).toThrow(/27 or 28/);
+  });
+});
+
+describe('Multicall3 reads', () => {
+  const READS = [
+    { to: BASE.quoterV2, data: '0xaabbccdd' },
+    { to: BASE.factory, data: `0x1698ee82${'11'.repeat(40)}` },
+    { to: USDC, data: '0x' },
+  ];
+
+  it('packs the reads into one call and gets each answer back in order, a failed one as null', () => {
+    const asked: Array<{ to: string; data: string }> = [];
+    const packed = encodeAggregate3(READS);
+    expect(packed.startsWith(UNISWAP_V3_SELECTORS.aggregate3)).toBe(true);
+    const answers = ['0x' + '22'.repeat(32), null, '0x'];
+    const returned = answerAggregate3(packed, (to, data) => {
+      asked.push({ to, data });
+      return answers[asked.length - 1];
+    });
+    expect(asked).toEqual(READS.map((r) => ({ to: r.to.toLowerCase(), data: r.data })));
+    expect(decodeAggregate3(returned, 3)).toEqual(answers);
+  });
+
+  it('refuses an answer for a different number of reads, or one that points outside itself', () => {
+    const returned = answerAggregate3(encodeAggregate3(READS), () => '0x' + '22'.repeat(32));
+    expect(() => decodeAggregate3(returned, 2)).toThrow(/different number/);
+    expect(() => decodeAggregate3(returned.slice(0, -64), 3)).toThrow(/malformed/);
+    expect(() => decodeAggregate3('0x', 3)).toThrow(/too short/);
+    expect(() => encodeAggregate3([{ to: '0x12', data: '0x' }])).toThrow(/address/);
+  });
+
+  it('is pinned to the standard address', () => {
+    expect(MULTICALL3).toBe('0xcA11bde05977b3631167028862bE2a173976CA11');
+    expect(isEvmAddress(MULTICALL3)).toBe(true);
   });
 });
