@@ -9,7 +9,7 @@ and release commits.
 
 ---
 
-## Unreleased
+## 1.8.0
 
 ### Swap inside the wallet
 
@@ -38,6 +38,14 @@ and release commits.
   and offers no slippage above 1%.
 - Getting a price is a few small network requests, not dozens, and waiting for
   an approval to confirm checks only that approval.
+
+### X Coin
+
+- The wallet now looks for newly used addresses of your recovery
+  phrase every time you unlock it, not only when you import. The X Coin
+  desktop wallet can move the lottery to a new address of the same phrase,
+  and rewards won there were missing from the balance until you added the
+  address by hand.
 
 ## 1.7.25
 

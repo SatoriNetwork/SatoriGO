@@ -131,10 +131,10 @@ describe('signing a pay-to-pubkey input', () => {
  * NO address history at all, only rewards on its pay-to-pubkey script, one long
  * mature and one won ten blocks ago.
  */
-async function lotteryWorld(net = XFER_MAINNET) {
+async function lotteryWorld(net = XFER_MAINNET, lotteryIndex = 2) {
   const seed = await mnemonicToSeed(MNEMONIC);
   const key0 = deriveAddress(seed, net, 0, 0, 0);
-  const key2 = deriveAddress(seed, net, 0, 0, 2);
+  const key2 = deriveAddress(seed, net, 0, 0, lotteryIndex);
   const script2 = bytesToHex(p2pkScript(key2.publicKey));
   const sh2 = scriptToElectrumScripthash(p2pkScript(key2.publicKey));
   const mature = prevout(1, 5000 * COIN, script2);
@@ -190,6 +190,25 @@ describe('X Coin wallet with lottery winnings', () => {
     expect(res.highestUsedIndex).toBe(2);
     expect(res.addressCountAfter).toBe(3);
     expect((await svc.listAddresses()).map((a) => a.address)).toContain(w.key2.address);
+  });
+
+  // The owner's wallet, 2026-11-18: the desktop wallet moved the lottery to the
+  // next key long after the import, and the wallet had been locked and reopened
+  // since. The scan runs from a fresh service that only unlocked.
+  it('a reopened wallet finds a reward key that came into use after the import', async () => {
+    const before = await lotteryWorld(XFER_MAINNET, 3);
+    const first = new LiveWalletService(before.client);
+    await first.import(MNEMONIC, 'pw', 'xfer-mainnet');
+    expect((await first.discoverUsedAddresses()).addressCountAfter).toBe(4);
+
+    const later = await lotteryWorld(XFER_MAINNET, 4);
+    const svc = new LiveWalletService(later.client);
+    expect(await svc.unlock('pw')).toBe(true);
+    const res = await svc.discoverUsedAddresses();
+    expect(res.addressCountBefore).toBe(4);
+    expect(res.addressCountAfter).toBe(5);
+    expect(res.complete).toBe(true);
+    expect((await svc.listAddresses()).map((a) => a.address)).toContain(later.key2.address);
   });
 
   it('counts the rewards in the balance of the key they belong to', async () => {

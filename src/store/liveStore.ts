@@ -212,6 +212,20 @@ export function activeFamily(): WalletFamily {
   return svc.activeWalletFamily();
 }
 
+/** True when the ACTIVE chain pays rewards to a key the user does not choose
+ *  (X Coin: the desktop wallet hands the lottery the next receive key of the
+ *  same recovery phrase, and moves on to another one after a restart). Coins
+ *  can then land on an address this wallet has not derived yet at ANY time,
+ *  not only before the import, so the address scan has to be repeated. */
+function rewardKeysRotate(): boolean {
+  if (activeFamily() !== 'utxo') return false;
+  try {
+    return networkFor(activeChainId()).coinbaseToPubkey === true;
+  } catch {
+    return false; // an id this build does not know: nothing to scan for
+  }
+}
+
 /** The chain id the UI should treat as active: the UTXO LiveNetworkId, or the
  *  `evm:<key>` target of the chain the active EVM account is showing. */
 export function activeChainTarget(): string {
@@ -2776,10 +2790,11 @@ async function landSeedImport(set: LiveSet, get: LiveGet, evmKey: string | null,
     // IMPORT is the one moment a gap-limit scan is worth its cost: the seed
     // may already have been used in another wallet, on addresses this one has
     // never derived, which is exactly the "my imported wallet shows a smaller
-    // balance than I expect" case. Deliberately NOT run on unlock or on every
-    // refresh (up to GAP_LIMIT+ sequential round-trips, and several of these
-    // chains run on small volunteer servers), and NOT on create either: a
-    // freshly generated seed has no history anywhere to find.
+    // balance than I expect" case. Deliberately NOT run on every refresh (up to
+    // GAP_LIMIT+ sequential round-trips, and several of these chains run on
+    // small volunteer servers), on unlock only where the reward key moves (see
+    // rewardKeysRotate), and NOT on create: a freshly generated seed has no
+    // history anywhere to find.
     //
     // Fire-and-forget and AFTER the first balance refresh, so the common case
     // (funds on the primary address) paints immediately and the scan only ever
@@ -3418,7 +3433,12 @@ export const useLiveStore = create<LiveState>((set, get) => ({
         void get().loadWalletAssets();
         void get()
           .loadAddresses()
-          .then(() => get().refresh());
+          .then(() => get().refresh())
+          // Only on a chain whose reward key moves (see rewardKeysRotate): the
+          // import-time scan cannot have seen a key that came into use later.
+          // After the first refresh, so the known balance paints first and the
+          // scan only ever adds to it. scanForUsedAddresses never throws.
+          .then(() => (rewardKeysRotate() ? get().scanForUsedAddresses() : undefined));
         return true;
       }
       set({ error: 'Incorrect password' });
@@ -3631,7 +3651,11 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       await get().loadWalletAssets();
       if (keptUnlocked) {
         await get().loadAddresses();
-        void get().refresh();
+        // Landing on a wallet with no password prompt is this wallet's unlock,
+        // so the same repeat scan applies (see unlock()).
+        void get()
+          .refresh()
+          .then(() => (rewardKeysRotate() ? get().scanForUsedAddresses() : undefined));
         return;
       }
       // A passwordless wallet needs no password — auto-unlock it (skip the lock

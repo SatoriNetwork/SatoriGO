@@ -26,6 +26,8 @@ const hoisted = vi.hoisted(() => ({
   listAddresses: vi.fn(),
   importSeed: vi.fn(),
   create: vi.fn(),
+  unlock: vi.fn(),
+  network: vi.fn(),
 }));
 
 vi.mock('../services/chain/liveWallet', () => {
@@ -53,7 +55,10 @@ vi.mock('../services/chain/liveWallet', () => {
       return false;
     }
     network() {
-      return 'mainnet';
+      return hoisted.network() ?? 'mainnet';
+    }
+    unlock(...args: unknown[]) {
+      return hoisted.unlock(...args);
     }
     getAddress() {
       return ADDR;
@@ -285,6 +290,50 @@ describe('liveStore — when the scan runs by itself', () => {
     await state().createWallet('pw');
     // Let the fire-and-forget loadAddresses -> refresh chain settle.
     await vi.waitFor(() => expect(hoisted.provider.getAllAssetBalances).toHaveBeenCalled());
+
+    expect(hoisted.discoverUsedAddresses).not.toHaveBeenCalled();
+  });
+
+  // X Coin's desktop wallet moves the lottery to the next key of the same
+  // phrase after a restart, so rewards can land on an address this wallet has
+  // not derived, long after the import. Found on the owner's wallet 2026-11-18.
+  it('scans again on every UNLOCK of an X Coin wallet', async () => {
+    hoisted.network.mockReturnValue('xfer-mainnet');
+    hoisted.unlock.mockResolvedValue(true);
+    hoisted.listAddresses.mockResolvedValue(addressList(4));
+    hoisted.discoverUsedAddresses.mockResolvedValue(
+      scanResult({ highestUsedIndex: 4, addressCountBefore: 4, addressCountAfter: 5 }),
+    );
+
+    expect(await state().unlock('pw')).toBe(true);
+    await vi.waitFor(() => expect(hoisted.discoverUsedAddresses).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(state().addressScan.result?.found).toBe(1));
+    // The balance known so far was read BEFORE the scan started.
+    expect(hoisted.provider.getAllAssetBalances.mock.invocationCallOrder[0]).toBeLessThan(
+      hoisted.discoverUsedAddresses.mock.invocationCallOrder[0],
+    );
+
+    expect(await state().unlock('pw')).toBe(true);
+    await vi.waitFor(() => expect(hoisted.discoverUsedAddresses).toHaveBeenCalledTimes(2));
+  });
+
+  it('does NOT scan on unlock on a chain whose rewards go to a chosen address', async () => {
+    hoisted.unlock.mockResolvedValue(true);
+    hoisted.listAddresses.mockResolvedValue(addressList(1));
+
+    expect(await state().unlock('pw')).toBe(true);
+    await vi.waitFor(() => expect(hoisted.provider.getAllAssetBalances).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(hoisted.discoverUsedAddresses).not.toHaveBeenCalled();
+  });
+
+  it('does not scan when the password was wrong', async () => {
+    hoisted.network.mockReturnValue('xfer-mainnet');
+    hoisted.unlock.mockResolvedValue(false);
+
+    expect(await state().unlock('nope')).toBe(false);
+    await new Promise((r) => setTimeout(r, 20));
 
     expect(hoisted.discoverUsedAddresses).not.toHaveBeenCalled();
   });

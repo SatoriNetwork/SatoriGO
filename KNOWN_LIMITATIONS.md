@@ -1,6 +1,6 @@
 # Known limitations
 
-Current, honest limitations of the wallet (v1.7.25).
+Current, honest limitations of the wallet (v1.8.0).
 
 Satori GO is a non-custodial multi-chain wallet. Eight coin networks and four
 EVM networks ship in this version, and every one of them has had a funded send
@@ -121,6 +121,16 @@ confirmed by the owner on mainnet (item 7). Nothing below is marketing.
       Caveat two: only keys of the recovery phrase are covered. A node that
       ran before its wallet existed pays a separate key kept in the node's
       `lottery-payout.key` file, which no recovery phrase can derive.
+      Caveat three: the X Coin desktop wallet gives the lottery the next
+      receive key of the phrase and can move on to another one after a
+      restart, so rewards can start landing on an address this wallet has not
+      derived yet (seen on the owner's wallet on 2026-11-18: 285,000 XFER on
+      the next key were missing from the balance). Since 1.8.0 the address
+      scan is repeated on every unlock of an X Coin wallet, after the first
+      balance read. Between unlocks a new key is not noticed; Settings >
+      Addresses > Scan for used addresses runs the same scan by hand. The
+      repeat is tested with a scripted server, and has not yet been watched
+      picking up a real key change.
     - **One kind of send is owner-verified, two are not.** A send of XFER paid
       from lottery rewards was confirmed by the owner on mainnet on 2026-11-13
       (1.7.23), which is the pay-to-pubkey signing path. A send paid from coins
